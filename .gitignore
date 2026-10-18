@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.deps/
+.tmp/
+.env
+
+# 知识库是构建产物，不该进版本库（.kb.json 是临时文件前缀）
+*.kb.json
+examples/kb.json
+
+# 打包产物
+build/
+dist/
+*.egg-info/
