@@ -1,7 +1,12 @@
-'''Agent：DeepSeek 客户端封装。
+'''Agent：模型对话客户端。
 
-配置（密钥从哪来、用哪个模型）都在 promptkit/config.py；
-Agent 只负责「怎么干活」：发请求、跑工具循环、**发事件**。
+配置（密钥从哪来、用哪个模型）都在 promptkit/config.py 和
+promptkit/client_sys/registry.py；Agent 只负责「怎么干活」：发请求、跑工具循环、
+**发事件**。
+
+厂商是可换的（`Agent(vendor="openai")` / `Agent(vendor="anthropic")`），
+但 Agent 的代码里**没有一处按厂商分支** —— 客户端层（`client_sys/`）把每家
+厂商的协议都翻译成 Chat Completions 这一种方言，Agent 只认这一个。
 
 Agent 自己不 print。想看过程就挂 handler：
 
@@ -25,19 +30,26 @@ from typing import (
     Union,
 )
 
-from openai import OpenAI
 from pydantic import BaseModel
 
+from promptkit.client_sys import (
+    BaseClient,
+    ClientError,  # 再导出：ask() 抛的网络 / 鉴权错误就是它
+    make_client,
+    resolve_api_key as resolve_vendor_api_key,
+    resolve_target,
+    with_params,
+)
 from promptkit.config import (
-    DEFAULT_BASE_URL,
-    DEFAULT_EXTRA_BODY,
-    DEFAULT_MODEL,
-    DEFAULT_REASONING_EFFORT,
+    DEFAULT_BASE_URL,  # 再导出，保持老代码可 import
+    DEFAULT_EXTRA_BODY,  # 同上（现在归 DeepSeek 厂商规格管）
+    DEFAULT_MODEL,  # 同上
+    DEFAULT_REASONING_EFFORT,  # 同上
     DEFAULT_START_PROMPTS,
     ENV_FILE,
     ENV_VAR,
     load_env_file,  # 再导出，保持 `from promptkit.agent import load_env_file` 可用
-    resolve_api_key,
+    resolve_api_key,  # 再导出：老代码仍可用（只认 DeepSeek 的密钥）
 )
 from promptkit.core.display_sys.display import console_display
 from promptkit.core.event_sys import Event, EventBus, EventType, extract_reasoning
@@ -166,13 +178,26 @@ class _SimpleFunction:
 
 
 class Agent:
-    '''DeepSeek 客户端。`Agent()` 不带参数即可用：
+    '''模型对话客户端。`Agent()` 不带参数即可用：
 
-    密钥按 `api_key 参数 -> 环境变量 DEEPSEEK_API_KEY -> 项目根目录 .env` 的顺序查找。
-    实例化时会自动注册为「默认 agent」，所以 `Workflow.run()` 不用再传 agent。
+    - 默认还是 DeepSeek：密钥按 `api_key 参数 -> 环境变量 DEEPSEEK_API_KEY ->
+      项目根目录 .env` 的顺序查找，模型 `deepseek-flash`，开了思考模式。
+    - 换厂商只要说一句，密钥 / 端点 / 模型都会跟着换：
 
-    事件：传 `bus=` 或 `on_event=` 就能看到思考过程 / 工具调用 / 回复。
-    `verbose=True` 等价于挂一个 console_display()。
+        Agent(vendor="openai")                 # OPENAI_API_KEY，gpt-4o-mini
+        Agent(vendor="openai", model="gpt-4o")
+        Agent(vendor="anthropic")              # ANTHROPIC_API_KEY，claude-sonnet-4-5
+        Agent(model="claude-sonnet-4-5")       # 按模型名自动认出是 Anthropic
+        Agent(base_url="http://localhost:11434/v1",
+              model="qwen2.5", api_key="ollama")   # 本地 / 中转 / 任何兼容端点
+
+    - 实例化时会自动注册为「默认 agent」，所以 `Workflow.run()` 不用再传 agent。
+    - 事件：传 `bus=` 或 `on_event=` 就能看到思考过程 / 工具调用 / 回复。
+      `verbose=True` 等价于挂一个 console_display()。
+
+    `agent.client` 是厂商客户端（`client_sys.BaseClient`）：它长得像 openai SDK
+    （`client.chat.completions.create(...)` 照样能用），要拿原生 SDK 就看
+    `agent.client.sdk`（Anthropic 那边没有 SDK，就没这个属性）。
     '''
 
     _default: Optional["Agent"] = None
@@ -181,21 +206,34 @@ class Agent:
         self,
         api_key: Optional[str] = None,
         start_prompts: Optional[List[Dict[str, str]]] = None,
-        model: str = DEFAULT_MODEL,
-        base_url: str = DEFAULT_BASE_URL,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
         bus: Optional[EventBus] = None,
         on_event: Optional[Any] = None,
         verbose: bool = False,
         register_as_default: bool = True,
+        vendor: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
-        self.api_key = resolve_api_key(api_key)  # API key
+        # 厂商 / 模型 / 端点是一组，缺的用厂商默认值补（补不上会在这一步报错）
+        self.spec, self.model, self.base_url = resolve_target(
+            vendor=vendor, model=model, base_url=base_url, api_key=api_key
+        )
+        self.vendor = self.spec.name
+        self.api_key = resolve_vendor_api_key(self.spec, api_key)
+
+        # 厂商默认参数（DeepSeek 的思考模式就住这儿）+ 用户参数。用户优先。
+        self.params: Dict[str, Any] = with_params(self.spec, params)
+        if max_tokens is not None:
+            self.params["max_tokens"] = max_tokens
+        self.timeout = timeout
 
         # 不要用可变对象做默认参数，否则所有实例会共享同一份列表
         self.start_prompts = list(
             DEFAULT_START_PROMPTS if start_prompts is None else start_prompts
         )
-        self.model = model
-        self.base_url = base_url
 
         self.bus = bus if bus is not None else EventBus()
         if on_event is not None:
@@ -207,7 +245,12 @@ class Agent:
                 console_display(show_message=False, stream=sys.stderr)
             )
 
-        self.client = OpenAI(api_key=self.api_key, base_url=base_url)  # 客户端
+        self.client: BaseClient = make_client(
+            self.spec,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            timeout=timeout,
+        )
 
         self.history: List[Dict[str, Any]] = []  # 上下文
         self.messages: List[Dict[str, Any]] = self._build_messages()
@@ -227,7 +270,7 @@ class Agent:
         cls._default = agent
 
     def __repr__(self) -> str:
-        return f"<Agent model={self.model!r}>"
+        return f"<Agent {self.vendor} model={self.model!r}>"
 
     def on(self, handler: Any) -> Any:
         '''挂一个事件 handler，返回它（可以当装饰器）。'''
@@ -241,16 +284,21 @@ class Agent:
     def _create(
         self, tools: Optional[List[Dict[str, Any]]] = None, stream: bool = False
     ):
-        '''发一次请求。只有传了工具才带 tools 参数。'''
+        '''发一次请求。只有传了工具才带 tools 参数。
+
+        `self.params` 是厂商默认参数（DeepSeek 的思考模式）和用户参数的合并结果；
+        Anthropic 那种不认这些参数的厂商，由客户端自己忽略 / 翻译，
+        Agent 不需要知道。
+        '''
         kwargs: Dict[str, Any] = {
+            **self.params,
             "model": self.model,
             "messages": self.messages,
             "stream": stream,
-            "reasoning_effort": DEFAULT_REASONING_EFFORT,
-            "extra_body": dict(DEFAULT_EXTRA_BODY),
         }
         if tools:
             kwargs["tools"] = tools
+        # `chat.completions` 只是兼容外壳，等价于 client.create(...)
         return self.client.chat.completions.create(**kwargs)
 
     def _append_message(self, message: Dict[str, Any]) -> None:
@@ -391,34 +439,53 @@ class Agent:
                 bus.emit(Event(EventType.MESSAGE_END, {"text": content}))
                 return content
 
-            for call in calls:
-                function = getattr(call, "function", None)
-                name = getattr(function, "name", "") or ""
-                arguments = getattr(function, "arguments", "") or ""
-                bus.emit(
-                    Event(
-                        EventType.TOOL_CALL_START,
-                        {"name": name, "arguments": arguments},
+            # 工具里可能又调 agent.ask（比如 Skill 内部要问一次模型）。那是**另一次
+            # 对话**，不能写进当前这段「assistant(tool_calls) -> tool」之间，否则
+            # 消息序列就坏了（DeepSeek/OpenAI 会直接 400）。
+            # 做法：工具执行期间把 history 换成「这条 tool_calls 之前」的副本，
+            # 跑完丢掉副本、只把 tool 结果写回真正的历史。
+            saved_history, saved_messages = self.history, self.messages
+            clean = list(saved_history)
+            if clean and clean[-1].get("tool_calls"):
+                clean = clean[:-1]
+            self.history = clean
+            self.messages = self._build_messages()
+            replies: List[Dict[str, Any]] = []
+            try:
+                for call in calls:
+                    function = getattr(call, "function", None)
+                    name = getattr(function, "name", "") or ""
+                    arguments = getattr(function, "arguments", "") or ""
+                    bus.emit(
+                        Event(
+                            EventType.TOOL_CALL_START,
+                            {"name": name, "arguments": arguments},
+                        )
                     )
-                )
-                bus.emit(
-                    Event(
-                        EventType.TOOL_CALL_END,
-                        {"name": name, "arguments": arguments},
+                    bus.emit(
+                        Event(
+                            EventType.TOOL_CALL_END,
+                            {"name": name, "arguments": arguments},
+                        )
                     )
-                )
-                reply = self._run_tool(by_name, call)
-                bus.emit(
-                    Event(
-                        EventType.TOOL_RESULT,
-                        {
-                            "name": name,
-                            "arguments": arguments,
-                            "result": reply["content"],
-                            "tool_call_id": reply["tool_call_id"],
-                        },
+                    reply = self._run_tool(by_name, call)
+                    bus.emit(
+                        Event(
+                            EventType.TOOL_RESULT,
+                            {
+                                "name": name,
+                                "arguments": arguments,
+                                "result": reply["content"],
+                                "tool_call_id": reply["tool_call_id"],
+                            },
+                        )
                     )
-                )
+                    replies.append(reply)
+            finally:
+                self.history = saved_history
+                self.messages = saved_messages
+
+            for reply in replies:
                 self._append_message(reply)
 
         raise ToolLoopExceeded(

@@ -25,7 +25,8 @@ pip install -e ".[yaml]"   # 需要 YamlFormatter 时
 | `rich` | Markdown 排版、代码高亮、表格 | 退回纯文本（去掉标记） |
 | `yaml` | `YamlFormatter` | 用别的解析器 |
 
-公式渲染**不需要额外依赖** —— 内置的渲染器是零依赖的（见第 18 节）。
+接 Anthropic 也**不需要额外依赖** —— Claude 客户端是 `urllib` 直连的
+（见第 22 节）。公式渲染同样不需要额外依赖（见第 18 节）。
 
 `[math]` 这个 extra 是给 `sympy` 留的，它**默认不启用**：实测 sympy 会把
 `\ln` 改成 `log(x, E)`、把 `\arctan` 改成 `atan`、遇到 `\sqrt5` 这种不带
@@ -98,12 +99,27 @@ set DEEPSEEK_API_KEY=sk-xxxx          # Windows
 export DEEPSEEK_API_KEY=sk-xxxx       # Linux / macOS
 cp .env.example .env                  # 或者写进 .env（已被 .gitignore 忽略）
 
+# 用 OpenAI / Claude 就换成 OPENAI_API_KEY / ANTHROPIC_API_KEY，
+# 然后 Agent(vendor="openai") / Agent(vendor="anthropic")，见第 22 节
+
 python examples/interview.py           # 模拟面试工作流（交互式）
 python examples/refund_workflow.py "我要退款" "我要投诉"
+python examples/multi_vendor.py        # 同一个工作流换三家厂商跑
+python examples/memory.py              # 记忆系统（不需要 API Key）
+python examples/memory_tutor.py "样本量到底怎么定？"   # 会记住你的答疑教练
+python examples/coding_agent.py        # 改代码 → 跑测试 → 失败再改（真模型）
+python examples/coding_chat.py --fresh --say "实现 todo.py 让测试通过"   # 多轮里把应用做出来
+python examples/orchestrate.py         # 多代理：固定模板 + 汇总
+python examples/orchestrate.py --plan  # 多代理：让模型自己拆任务
+python examples/skills.py --show       # Skill 注册表 + 自动生成的 JSON Schema
+python examples/skills.py              # Skill 互调（脚本化 agent，不需要 Key）
+python examples/skill_refund.py        # 真实业务 Skill：规则+工作流（不需要 Key）
+python examples/course_assistant.py --show   # 课程学习助手：skills=[DSL 函数] 挂进聊天
 ```
 
 `Agent()` 不带参数就能用：密钥按 `api_key 参数 → 环境变量 DEEPSEEK_API_KEY → 项目根目录 .env`
-的顺序查找。**所有逻辑都写在模块级的工作流声明里，main 只负责 `wf.run()`**：
+的顺序查找。想用 OpenAI / Claude 就是 `Agent(vendor="openai")` / `Agent(vendor="anthropic")`
+（见第 22 节）。**所有逻辑都写在模块级的工作流声明里，main 只负责 `wf.run()`**：
 
 ```python
 from promptkit.agent import Agent
@@ -1918,6 +1934,9 @@ Workflow(
 `promptkit.cautions.Role` 是「你现在扮演：X」那种约束文本。两者不同，
 同时 `import *` 会互相覆盖 —— 用显式 import 就没问题。
 
+想让机器人**记住**学员的偏好 / 历史，加 `memory=` + `memory_config=` 就行
+（开跑前读、每轮召回、结束时写），见第 23 节。
+
 ### 20. 退出保留上下文，下次接着聊
 
 `Agent.history` 只在内存里，进程一退就没了。想「这次退出、下次无缝衔接」，
@@ -2182,6 +2201,1375 @@ wf = Workflow(
 Agent().run()              # 输入空行结束
 ```
 
+### 22. 多厂商：OpenAI / Anthropic / 任何 OpenAI 兼容端点
+
+`Agent` 默认还是 DeepSeek（老代码一行都不用改），但厂商不再是写死的：
+
+```python
+from promptkit.agent import Agent
+
+Agent()                                               # DeepSeek（默认）
+Agent(vendor="openai")                                # OPENAI_API_KEY，gpt-4o-mini
+Agent(vendor="openai", model="gpt-4o")
+Agent(vendor="anthropic")                             # ANTHROPIC_API_KEY，claude-sonnet-4-5
+Agent(model="claude-sonnet-4-5", api_key="sk-ant-…")   # 按模型名自动认出 Anthropic
+Agent(base_url="http://localhost:11434/v1",            # Ollama / vLLM / 中转站
+      model="qwen2.5", api_key="ollama")
+```
+
+**怎么认出是哪家**：`vendor=` 显式说 > `base_url` 的主机名 > `model` 的前缀
+（`claude` / `gpt` / `deepseek` …）> 环境变量 / `.env` 里现成的密钥 > DeepSeek（默认）。
+显式传了 `api_key=` 就不再按环境变量猜——否则同一份代码在不同机器上会换厂商。
+
+**密钥**：`api_key 参数 → 厂商环境变量 → PROMPTKIT_API_KEY → .env`。
+
+| 厂商 | `vendor=` | 环境变量 | 默认模型 | 默认端点 |
+| --- | --- | --- | --- | --- |
+| DeepSeek | `deepseek`（默认） | `DEEPSEEK_API_KEY` | `deepseek-flash` | `https://api.deepseek.com` |
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | `https://api.openai.com/v1` |
+| Anthropic | `anthropic`（别称 `claude`） | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` | `https://api.anthropic.com` |
+| 兼容端点 | `openai-compatible`（必须给 `base_url` 和 `model`） | `OPENAI_API_KEY` | — | — |
+
+**它凭什么能换**：promptkit 内部**只说一种方言**（OpenAI Chat Completions），
+`client_sys/` 负责翻译。Claude 那边所有不一样的地方都在 `AnthropicClient`
+里消化掉了，`Agent` 的工具循环 / 事件 / 流式一行都不分厂商：
+
+| 差异 | OpenAI / DeepSeek | Anthropic | 谁处理 |
+| --- | --- | --- | --- |
+| 系统提示 | `messages` 里 role=`system` | 顶层 `system` 字段 | `AnthropicClient` |
+| 工具调用 | 消息上的 `tool_calls` + role=`tool` | assistant 的 `tool_use` 块 + user 的 `tool_result` 块 | `AnthropicClient` |
+| 工具定义 | `{"type": "function", "function": {...}}` | `{"name", "description", "input_schema"}` | `AnthropicClient` |
+| 必填参数 | `max_tokens` 可选 | `max_tokens` **必填**（默认 4096） | `AnthropicClient` |
+| 参数改名 | `stop` | `stop_sequences` | `AnthropicClient` |
+| 流式 | SSE 的 `choices[0].delta` | SSE 的 `content_block_delta` | `AnthropicClient` |
+| 厂商默认参数 | 思考模式（`reasoning_effort` + `extra_body`） | —— | 厂商规格 `ClientSpec` |
+
+厂商特有参数走 `params=`（和厂商默认参数浅合并，你写的优先）：
+
+```python
+Agent(vendor="openai", model="gpt-4o", params={"temperature": 0.2})
+Agent(vendor="anthropic", max_tokens=8192)
+Agent(params={"reasoning_effort": "low"})        # 覆盖 DeepSeek 默认的 high
+```
+
+DeepSeek 的思考参数只在 DeepSeek 上发，切到 OpenAI / Anthropic 不会带过去
+（之前是 Agent 里写死的，现在归 `client_sys/registry.py` 的厂商规格管）。
+
+**已知限制**（写在这里好过让你踩坑）：
+
+- Anthropic 的 extended thinking 没接：开启后多轮工具调用必须回传带
+  `signature` 的 thinking 块，而通用历史里没地方存它。传 `thinking=` 会直接
+  报一个能看懂的错，而不是让 API 甩 400 出来。
+- Claude 默认不做思考，所以历史里 `reasoning_content` 那一栏只有 DeepSeek 会有；
+  翻译给 Anthropic 时它不参与（也不影响对话）。
+- Anthropic 客户端用 `urllib` 直连，**不需要装 anthropic SDK**；OpenAI 那侧
+  还是官方 `openai` 包，重试 / 超时 / 连接池都归它管。
+- 换厂商时**历史不用转换**：`agent.history` 一直是 OpenAI 形状。
+
+想加一家新厂商（公司内网网关之类）不用改任何已有代码：
+
+```python
+from promptkit.client_sys import ClientSpec, register_vendor
+
+register_vendor(ClientSpec(
+    name="corp",
+    label="公司网关",
+    kind="openai",                      # 它说 Chat Completions 协议
+    env_vars=("CORP_LLM_KEY",),
+    default_model="corp-7b",
+    default_base_url="https://llm.corp/v1",
+))
+Agent(vendor="corp")
+```
+
+协议完全不同的（不是 Chat Completions 也不是 Messages），自己写一个
+`BaseClient` 子类，把 `factory=` 一起传进 `register_vendor` 就行。
+
+要更底层的控制：`agent.client` 就是厂商客户端（`client.chat.completions.create(...)`
+照旧能用），OpenAI 那侧的原生 SDK 在 `agent.client.sdk`；网络 / 鉴权错误统一是
+`client_sys.ClientError`。
+
+### 23. 记忆系统：三层 + 薄接口
+
+**分层**，别混着用：
+
+| 层 | 生命周期 | 谁负责 | 内容 |
+| --- | --- | --- | --- |
+| 工作记忆 | 单次 `Workflow.run` | `Context`（已有） | 当前步骤的中间变量 |
+| 短期记忆 | 单次会话 | `SessionMemory`（只读包 `Agent.history`） | 当前对话 messages |
+| 长期记忆 | 跨会话 | `KVMemory` / `VectorMemory` / `LayeredMemory` | 画像、偏好、进度、笔记 |
+
+四条边界，整个设计就是为了守住它们：
+
+1. **显式优于魔法**：没有「自动记住一切」。读什么、写什么、何时召回，
+   都写在步骤里 —— `ReadMemory` / `WriteMemory` / `RecallMemory` / `MemoryStep`。
+   写记忆**不给模型权限**（工具只给读）。
+2. **接口薄**：`Memory` 只有 `read` / `write` / `recall`（外加可选的 `forget`）。
+3. **适配器隔离**：向量库 / embedding / rerank 都是接口，实现在
+   `memory.adapters` 里；核心零依赖，`HashEmbedding + InMemoryVectorStore`
+   就能跑通整条链路。
+4. **可遗忘**：`forget(key)`、按时间过期、按新旧降权。
+
+```python
+class Memory(ABC):
+    def read(self, key: str, default=None): ...        # 按键读（KV 语义）
+    def write(self, key: str, value: Any) -> None: ... # 按键写
+    def recall(self, query: str, top_k: int = 5) -> list[dict]: ...  # 语义召回
+    def forget(self, key: str) -> bool: ...            # 可选：可遗忘
+```
+
+**KV 走 IO（`ReadMemory` / `WriteMemory`），向量走检索（`RecallMemory`），
+复杂组合走 `MemoryStep`** —— 三者的边界不重叠。
+
+#### 最短的一次：进程内记忆
+
+```python
+from promptkit.memory import InMemoryMemory
+from promptkit.core import ReadMemory, Var, WriteMemory, Workflow
+
+mem = InMemoryMemory()
+ctx = Workflow(
+    WriteMemory(mem, "level", "中级"),            # 字面量
+    WriteMemory(mem, "notes", Var("notes")),     # 表达式（从 Context 取）
+    ReadMemory(mem, "level", output_key="level"),
+).run(notes="想要更具体的例子")
+print(ctx["level"])                              # 中级
+```
+
+`ReadMemory` 的 `output_key` 省略时就用键名；键也可以写表达式
+（`ReadMemory(mem, Var("who") + "_level")`）。读不到时写 `default`，
+所以「第一次来」不会炸，用 `If(Var("level") == None)` 走新手分支就行。
+
+#### 结构化长期记忆：SQLite
+
+```python
+from promptkit.memory import KVMemory
+
+kv = KVMemory(namespace="learner_001")                 # 落到默认数据目录
+kv = KVMemory("~/data/tutor.db", namespace="learner_001")   # 也可以自己指定
+kv.write("level", "中级")
+kv.write("topics_covered", ["抽样", "问卷设计"])       # 值走 JSON，dict / list 都行
+kv.read("level")                                      # '中级'
+kv.read("missing", "兜底")                             # '兜底'
+kv.forget("level")                                     # True
+kv.keys() / kv.items() / kv.count() / kv.clear()
+```
+
+零额外依赖（标准库 sqlite3）、单文件、跨进程都在。`path=":memory:"` 就是纯内存。
+**`path` 省略时不会落到当前目录**，而是 `<data_dir>/memory/kv/<namespace>.db`
+（见下面「存在哪」），父目录自动创建。
+一个实例持有一个连接，用完 `close()`，或者 `with KVMemory(...) as kv:`。
+⚠️ Windows 上连接没关时文件被占用，删临时文件会 `PermissionError` ——
+测试里记得 `close()`。
+
+#### 语义召回：五步
+
+```text
+切分 → 向量化 → 存储 → 召回 → 重排（可选）
+```
+
+```python
+from promptkit.memory import VectorMemory, TokenBudget
+from promptkit.memory.adapters import HashEmbedding, OpenAIEmbedding
+
+# 开箱即用（零依赖）：词法级向量，够跑通链路、够写测试
+vec = VectorMemory(HashEmbedding(dimension=256), namespace="learner_001",
+                   chunk_size=500, overlap=60,
+                   budget=TokenBudget(max_tokens=1500))
+
+# 真语义：换一行就行，接口一样
+vec = VectorMemory(OpenAIEmbedding(model="text-embedding-3-small"), namespace="learner_001")
+
+# 存进一个文件夹（进程退出还在）
+vec = VectorMemory(HashEmbedding(), namespace="learner_001",
+                   path="~/.promptkit/memory/vector/learner_001")
+vec.write("notes", "……很长的笔记，会按 500 字切块，重叠 60 字……")
+vec.recall("退款怎么处理", top_k=3)
+# [{'text': '退款政策：7 天内无理由……', 'score': 0.83, 'id': 'notes#0', 'metadata': {...}}]
+vec.forget("notes")        # 删掉这个逻辑键的所有 chunk
+vec.close()                # 落盘（文件夹型存储需要；内存库是空操作）
+```
+
+- 重写同一个 key 会**先清掉旧 chunk**，不会留下孤儿
+- 空内容不写（否则以后会被召回出来、占预算、还什么都不说）
+- `min_score` 默认 `0.0`：余弦 ≤ 0 的噪音直接丢
+- `VectorMemory` **没有 `read()`**：原文被切块了，读不回来 —— 要按键读用 `KVMemory`
+
+**预算**：召回之后一定要过 `TokenBudget`，否则一段长笔记就能把上下文吃掉。
+
+```python
+from promptkit.memory import TokenBudget
+
+budget = TokenBudget(max_tokens=2000)          # 内置粗略估算：中文 1 字≈1 token
+budget.trim(items)                              # 按顺序留，超了截断/丢弃
+TokenBudget(2000, tokenizer=lambda t: len(enc.encode(t)))   # 想要精确就传 tokenizer
+```
+
+**遗忘**：`forget(key)` 显式删；`VectorMemory(max_age=86400)` 超过一天的不召回；
+`decay_half_life=3600` 每小时半衰（越旧排得越后，不删但降权）。
+
+#### 存在哪：默认目录 + `StorageConfig`
+
+路径**不写在核心库里**，也不 `os.getcwd()`。位置统一由 `memory/paths.py` 解析，
+默认落在操作系统的数据目录：
+
+```text
+Windows   %APPDATA%\promptkit\memory\
+macOS     ~/Library/Application Support/promptkit/memory/
+Linux     $XDG_DATA_HOME/promptkit/memory/     （通常是 ~/.local/share）
+
+memory/
+├── kv/
+│   └── learner_001.db          # KVMemory：一个 namespace 一个文件
+└── vector/
+    └── learner_001/
+        └── index.jsonl         # VectorMemory：一个 namespace 一个文件夹
+```
+
+默认位置在系统数据目录，**不会进版本库**；如果你用 `path=` 把记忆指到项目里，
+记得自己 `.gitignore` 掉那个文件 / 文件夹。
+
+| 写法 | 存哪 |
+| --- | --- |
+| `KVMemory(namespace="u1")` | `<data_dir>/memory/kv/u1.db` |
+| `KVMemory("~/data/a.db", namespace="u1")` | 你指定的文件 |
+| `VectorMemory(embed, namespace="u1")` | 进程内（`InMemoryVectorStore`，测试 / 原型） |
+| `VectorMemory(embed, namespace="u1", path="…")` | 你指定的文件夹（`FolderVectorStore`） |
+| `VectorMemory(embed, store=ChromaVectorStore(…))` | 交给那个 store |
+
+- 父目录**自动创建**，不用手动 `mkdir`
+- `long_term_memory("u1", embed_client=…)` 会同时用 `kv/u1.db` 和 `vector/u1/`
+- 整体换位置：`PROMPTKIT_DATA_DIR=/data/promptkit`（测试、容器、便携部署都用它）
+- 文件名会过一遍 `safe_namespace_name()`：`a/b` → `a_b-<crc32>`（不撞车、不穿越），
+  `张三` 原样保留（好认）
+
+要统一管理就用 `StorageConfig` + 工厂：
+
+```python
+from promptkit.memory import StorageConfig, create_memory
+from promptkit.memory.adapters import HashEmbedding
+
+kv = create_memory(StorageConfig(backend="sqlite", namespace="user_001"))
+vec = create_memory(StorageConfig(backend="jsonl", namespace="user_001"),
+                    embed_client=HashEmbedding())
+
+# 全部显式：文件、文件夹、服务地址
+kv = create_memory(StorageConfig(backend="sqlite", namespace="user_001",
+                                 path="D:/data/tutor.db"))
+```
+
+| backend | 得到 | 位置 |
+| --- | --- | --- |
+| `sqlite`（别名 `kv`） | `KVMemory` | `path` 或 `<data_dir>/memory/kv/<ns>.db` |
+| `jsonl`（别名 `folder` / `vector`） | `VectorMemory` + `FolderVectorStore` | `path` 或 `<data_dir>/memory/vector/<ns>/` |
+| `chroma` | `VectorMemory` + `ChromaVectorStore` | `path`（本地持久化）或 `url`（服务） |
+| `qdrant` | `VectorMemory` + `QdrantVectorStore` | `url` |
+| `memory` / `session` | `InMemoryMemory` / `SessionMemory` | 不需要位置 |
+| `layered` | `LayeredMemory`（KV + 向量） | 上面两者组合 |
+
+⚠️ `StorageConfig` 里 `namespace` 是**必填**的，没有 `"default"` 兜底 ——
+「用默认值上线」往往就是用户 A 的记忆串到用户 B 的那一刻。
+（直接构造 `KVMemory(namespace="default")` 的默认值留着，那是单用户脚本的便利。）
+
+**生命周期**（不只是「存」）：
+
+```python
+kv.backup("backup/20261020.db")         # 热备份（SQLite 在线备份，边写边备也安全）
+kv.export_json("user_001.json")         # 导出（换后端 / 迁移 / 人肉检查）
+kv.import_json("user_001.json", replace=True)
+kv.vacuum()                             # 压实
+kv.size_bytes()                         # 占多大
+kv.destroy()                            # 删库（不可恢复）
+
+vec.flush() / vec.close()               # 向量落盘；也可以 with VectorMemory(...) as vec:
+```
+
+`FolderVectorStore` 是**文件夹型**向量存储（零依赖）：一个文件夹一个
+`index.jsonl`，追加写 + 定期压实，重启还在。索引和原文放同一个文件里，
+不会出现「索引说有、元数据没有」这种半截状态。几千到几万条够用；
+再大就换 Chroma / Qdrant。FAISS 没内置（删记录要重建索引、还要 numpy）——
+要接就实现那 4 个方法，然后 `register_memory_backend("faiss", …)`。
+
+自定义后端不用改库：
+
+```python
+from promptkit.memory import create_memory, register_memory_backend
+
+register_memory_backend("redis", lambda config, **kw: MyRedisMemory(config.url))
+create_memory(StorageConfig(backend="redis", namespace="u1", url="redis://..."))
+```
+
+#### 声明式：`ChatWorkflow` + `MemoryConfig`
+
+```python
+from promptkit.memory import MemoryConfig, RecallConfig, long_term_memory
+from promptkit.memory.adapters import OpenAIEmbedding
+from promptkit.core import ChatWorkflow
+
+memory = long_term_memory(
+    "learner_001",
+    embed_client=OpenAIEmbedding(model="text-embedding-3-small"),
+)
+
+chat = ChatWorkflow(
+    role="课程导师",
+    want="帮学生掌握市场调研方法",
+    rules=["学员水平：{{level}}"],          # 开跑前读出来的值可以直接用
+    memory=memory,
+    memory_config=MemoryConfig(
+        read=["level", "preferred_style"],                    # 开跑前读
+        recall=RecallConfig(query_key="usr_input",            # 每轮按输入召回
+                            output_key="related", top_k=5),
+        write=["topics_covered", "new_weak_points"],          # 结束后写
+        budget=TokenBudget(max_tokens=2000),
+        write_on="end",                                        # 或 "each_turn"
+    ),
+)
+chat.run(agent=agent)
+```
+
+`build()` 会自动编译成普通步骤（步骤树里看得见）：
+
+```text
+MemoryStep(read)                 ← 循环之前（所以 system prompt 能用 {{level}}）
+Workflow('chat_loop')
+└─ While(...)
+   ├─ Set('usr_input', Read(...))
+   ├─ If(退出词).Then(..., Break())
+   ├─ MemoryStep(recall)         ← 每轮，读入输入之后、调模型之前
+   ├─ ChatTurn(...)              ← 召回内容拼进**这一轮**的用户消息
+   ├─ Echo(...)
+   └─ [MemoryStep(write) + SaveDeliverables]   ← write_on="each_turn" 时
+MemoryStep(write)                ← write_on="end" 时
+SaveDeliverables()
+```
+
+两处刻意的设计：
+
+- **召回内容拼在「这一轮的用户消息」里，不进 system prompt** ——
+  system 是长期人格设定，把每轮的临时召回塞进去既浪费 token 又会让模型
+  当成长久事实。`ChatLoop(turn_template=...)` 就是干这个的。
+- **`read` / `write` 里写的是 Context 里的变量名**。`write=["topics_covered"]`
+  要求 Context 里真的**有**这个变量；没有就跳过（`missing="skip"`，
+  不会把上次记的值清成 None）。模型一轮只产出 `model_reply`，
+  想写结构化内容得先 `LLMStep(output_model=...)` 抽出来 ——
+  想写什么，由工作流显式决定。
+
+#### 显式：普通 `Workflow`
+
+```python
+from promptkit.core import (Break, Echo, If, LLMStep, NewVar, Read,
+                            ReadMemory, RecallMemory, Set, Var, While,
+                            WriteMemory, Workflow)
+from promptkit.memory import TokenBudget
+from promptkit.prompt import Prompt
+
+workflow = Workflow(
+    NewVar("signal", default="start"),          # While 的条件要用它
+    ReadMemory(kv, "level", output_key="level"),
+    While(Var("signal") != "end").Do(
+        Set("usr_input", Read(">>> ")),
+        If(Var("usr_input") == "exit").Then(Set("signal", "end"), Break()),
+        RecallMemory(vec, query=Var("usr_input"),
+                     output_key="related", top_k=5,
+                     budget=TokenBudget(1500)),
+        LLMStep(Prompt(role="user",
+                       content="水平：{{level}}\n参考：{{related}}\n问题：{{usr_input}}"),
+                output_key="reply"),
+        Echo(Var("reply")),
+        WriteMemory(kv, "last_reply", Var("reply")),
+    ),
+)
+```
+
+`RecallMemory` 默认把结果拼成 `[1] … [2] …` 的文本（主要去处是 prompt）；
+要结构化数据用 `raw=True`，拿到 `list[dict]`。
+
+#### 可选：让 Agent 自己决定要不要回忆
+
+固定上下文用 `MemoryStep`；只有「模型自己判断该不该查记忆」才需要工具。
+**只给读，不给写**：
+
+```python
+from promptkit.memory import RecallMemoryTool
+
+tool = RecallMemoryTool(vec, top_k=3, max_top_k=5, max_calls=3,
+                        max_item_chars=500, redact=["phone"])
+agent.ask("接着上次的进度讲", tools=[tool])
+```
+
+四道闸门：调用次数（`max_calls`）、top_k 上限、单条截断、元数据默认不返回
+（要返回就配 `redact=` 名单）。另有审计日志（logger `promptkit.memory`）。
+
+#### 多用户隔离
+
+一切隔离都靠 `namespace`：
+
+```python
+kv = KVMemory(namespace="u_1")                    # -> memory/kv/u_1.db
+vec = VectorMemory(embed, namespace="u_1",
+                   path=default_vector_dir("u_1"))   # -> memory/vector/u_1/
+memory = long_term_memory("u_1")                  # KV + 向量，同一个 ns
+```
+
+`KVMemory` 默认一个 namespace 一个文件，删用户就是删一个文件；
+向量库那边 namespace 落在 `metadata`，召回和删除都带过滤 ——
+一个 collection 放很多用户，不靠「记得换个 collection」。
+`StorageConfig` 把 `namespace` 设成必填，就是为了不让你「顺手用默认值」。
+
+#### 自己接一个后端
+
+三个接口，实现哪个都行：
+
+```python
+from promptkit.memory import EmbeddingClient, VectorStore, Reranker
+
+class MyEmbedding(EmbeddingClient):
+    def embed(self, text): return my_api(text)
+
+class MyStore(VectorStore):
+    def upsert(self, namespace, item): ...
+    def search(self, namespace, vector, top_k=5): ...
+    def delete(self, namespace, *, ids=None, key=None): ...   # 可遗忘必须实现
+
+class MyReranker(Reranker):
+    def rerank(self, query, items, top_k=None): ...
+```
+
+现成的适配器（`promptkit.memory.adapters`，可选依赖**懒加载**）：
+
+| 类别 | 适配器 |
+| --- | --- |
+| embedding | `HashEmbedding`（零依赖）/ `CallableEmbedding` / `OpenAIEmbedding` / `SentenceTransformerEmbedding`（BGE 等本地模型） |
+| store | `InMemoryVectorStore`（零依赖）/ `ChromaVectorStore` / `QdrantVectorStore` |
+| rerank | `NoopReranker` / `LlmReranker`（用你自己的 Agent 打分）/ `CohereReranker` / `CrossEncoderReranker` |
+
+`ChromaVectorStore` / `QdrantVectorStore` **只包不建**：collection、维度、
+距离函数由你创建（`hnsw:space=cosine` 才让 score 是 0~1 的相似度）。
+FAISS / pgvector 没内置：FAISS 是索引不是库（删记录要重建、得自己维护
+id ↔ 文本映射），pgvector 用 `psycopg` 实现那 4 个方法即可。
+
+#### 实现状态
+
+| 优先级 | 内容 | 状态 |
+| --- | --- | --- |
+| P0 | `Memory` 抽象 + `ReadMemory` / `WriteMemory` + `InMemoryMemory` | ✅ |
+| P1 | `KVMemory`（SQLite）+ `SessionMemory` + `MemoryStep` | ✅ |
+| P2 | `VectorMemory` + 三个接口 + 适配器（embedding 4 / store 3 / rerank 4）+ `RecallMemory` + `TokenBudget` | ✅ |
+| P3 | `Reranker` + `RecallMemoryTool` + 遗忘（过期/降权/删除）+ 脱敏 + 多用户 | ✅ |
+
+### 24. 编码任务：读 → 补丁 → 应用 → 测试 → 修复
+
+对话任务里模型产出**文本**；编码任务里模型产出**要执行的代码变更**。
+所以核心不是提示词，而是这条闭环：
+
+```text
+读上下文 → 生成变更（校验：结构 + 干跑） → 应用 → 跑测试
+    ↑                                              │
+    └──────────── 失败则带着错误再改 ←──────────────┘
+```
+
+`LLMStep` 不够用：它把输出解析成文本 / Pydantic 对象就结束了，**没人验证
+这个补丁装不装得上、这段代码能不能跑**。
+
+#### 原语一览
+
+| 想干的事 | 本仓库的名字 | 规格里的叫法 |
+| --- | --- | --- |
+| 读源码 | `ReadFileStep` | `ReadFile`（名字被 `core.ReadFile` 占了） |
+| 整文件写 | `WriteFileStep` | `WriteFile`（和 `default_tools.WriteFile` 撞名） |
+| 应用补丁 | `ApplyDiff` / `ApplyChanges` | `ApplyDiff` |
+| 列 / 搜 | `ListDir` / `SearchCode` | 同 |
+| 跑命令 / 测试 / lint | `RunCommand` / `RunTests` / `LintStep` | 同 |
+| 版本控制 | `GitDiff` / `GitCommit` | 同 |
+| 生成变更 | `CodingStep` | 同 |
+| 失败重试循环 | `FixLoop` | 同 |
+
+它们都从 `promptkit.coding` 导入（**不从 `core` 导出** —— core 是底层，
+不能反过来依赖沙箱和子进程）。
+
+#### 最小闭环（可跑）
+
+```python
+from promptkit.coding import (ApplyDiff, CodingStep, FixLoop, ReadFileStep, RunTests)
+from promptkit.core import Var, Workflow
+
+wf = Workflow(
+    ReadFileStep("calc.py", output_key="source", base_dir=root),
+    ReadFileStep("test_calc.py", output_key="tests", base_dir=root),
+    RunTests("python -m unittest discover -s . -q", base_dir=root, allowlist=["python"]),
+    FixLoop(
+        [
+            CodingStep(
+                task="修好 add：它应该返回 a + b",
+                context={"calc.py": Var("source"), "test_calc.py": Var("tests")},
+                error=Var("test_result"),        # 上一次的测试输出
+                path="calc.py",                  # 给了 path 就干跑校验
+                base_dir=root,
+                cautions=[Custom("只改出错的那一行，不要动测试")],
+            ),
+            ApplyDiff("calc.py", diff=Var("patch"), base_dir=root),
+            RunTests("python -m unittest discover -s . -q", base_dir=root, allowlist=["python"]),
+        ],
+        until=Var("test_result")["passed"],
+        max_rounds=3,
+    ),
+)
+```
+
+跑起来是这样（[examples/coding_agent.py](examples/coding_agent.py)，真实模型）：
+
+```text
+== 基线测试（退出码 1）==
+FAIL: test_add (test_calc.TestCalc.test_add)
+AssertionError: -1 != 5
+
+== 开始修复（模型 deepseek/deepseek-flash）==
+Workflow('coding_demo')
+├─ ReadFileStep('calc.py' -> source)
+├─ ReadFileStep('test_calc.py' -> tests)
+├─ run_tests('python -m unittest discover -s . -q' -> test_result)
+└─ FixLoop(until Var('test_result')['passed'], max_rounds=3)
+   ├─ Coding(diff, 修好 calc.py 里 add 的 bug… -> calc.py -> patch)
+   ├─ ApplyDiff('calc.py' -> apply_result)
+   └─ run_tests('python -m unittest discover -s . -q' -> test_result)
+
+用了这么多轮修复： 1
+测试通过： True
+```
+
+注意 `If` / `until` 里写的是 `Var("test_result")["passed"]` —— 这个 DSL
+没有 `Var("x").passed` 这种属性访问（要写 `.attr("passed")` 也行）。
+
+#### 三种输出格式（都校验「能不能执行」）
+
+| `output_format` | 适合 | 校验什么 |
+| --- | --- | --- |
+| `diff`（默认） | 改现有文件，省 token | 能解析 + hunk 行数自洽 + **给了 `path` 就干跑一次**（真应用一遍再丢掉） |
+| `full_file` | 新建 / 整文件重写 | 去围栏 + Python `ast.parse`（别的语言可传 `syntax_check=`） |
+| `json` | 多文件重构 | 每条有 `path` / `action` + `create`/`modify` 和文件是否存在对得上 |
+
+失败不是抛出去，而是**原样塞回提示词重试**（`max_retries`，默认取
+`settings.max_retries`）。所以模型的第二次机会是「带着具体错误」的。
+
+`diff` 的解析/应用是 [coding/diff.py](coding/diff.py) 自己实现的，不 shell 出去跑
+`git apply`：因为要给出「第 2 个 hunk 的上下文在 12 行附近找不到」这种能塞回
+提示词的错误，还要能在写盘前干跑。
+
+#### 代码搜索：先定位，再读，再改
+
+编码任务的入口几乎都是「这东西在哪儿」。`SearchCode` 做的是**沙箱内的
+字面量 / 正则扫描**，返回结构化结果：
+
+```python
+SearchCode("def apply_hunks", glob="*.py", output_key="hits")
+# Context["hits"] == [{"path": "coding/diff.py", "line": 265,
+#                      "text": "def apply_hunks("}]
+```
+
+三种用法，按「要答案还是要定位」选：
+
+| 想要 | 怎么写 | 拿到什么 |
+| --- | --- | --- |
+| 这东西在哪个文件 | `files_only=True` | `[{"path": "coding/sandbox.py", "matches": 1}, …]` |
+| 只看命中行 | 默认 | `[{path, line, text}, …]` |
+| 要改它，得看上下文 | `context=2` | 每条多带 `before` / `after` 各 2 行 |
+
+```python
+SearchCode("def search", glob="*.py", context=2, max_per_file=1, as_text=True)
+```
+
+```text
+coding/sandbox.py:289: def search(
+   287|         return found
+   288| 
+   290|         self,
+   291|         query: str,
+```
+
+参数一览：
+
+| 参数 | 作用 | 默认 |
+| --- | --- | --- |
+| `glob` | 只看匹配的文件（`*.py` / `*.{ts,tsx}` 这种多选不支持，用 `*` 再排除） | `*.py` |
+| `context` | 每条命中前后各带几行 | `0` |
+| `max_per_file` | 一个文件最多报几处（防止一个文件吃光配额） | `10` |
+| `files_only` | 只回文件 + 命中次数 | `False` |
+| `exclude` | 按相对路径排除（`tests/*`、`*.min.js`） | `()` |
+| `as_text` | 输出拼好的文本（默认是 `list[dict]`） | `False` |
+| `ignore_case` | 忽略大小写 | `False` |
+
+命中上限在沙箱上：`max_search_hits`（默认 50）、`max_search_files`
+（默认 500）、`max_line_chars`（默认 200）。
+
+**它会做什么、不会做什么**（改代码前值得知道）：
+
+- 正则写错了会**自动退化成普通字符串**搜索（`add(a` 这种括号没闭合的常见）
+- 用 `Var("hits")[0]["path"]` 就能把结果喂给 `ReadFileStep`，形成
+  「搜 → 读 → 改」；给模型的工具版本（`SearchCodeTool`）直接返回上面的文本
+- 自动跳过 `.git` / `__pycache__` / `node_modules` / `.venv`，超过 1MB 的文件跳过，
+  编码按 utf-8 → 系统编码 → gbk 兜底
+- **不是语义检索**：搜「样本量」不会命中「样本容量」。要语义就走向量记忆
+  （`VectorMemory`，第 23 节）
+- 是**目录遍历 + 上限**，不是索引：命中上限到了会截断（日志里会写「已截断」）。
+  大仓库建议按目录搜（`exclude=("docs/*", "examples/*")`）或直接用下面的替换方案
+
+**想更强就换后端**，接口不变：
+
+```python
+# ① 有 ripgrep 就用它（快一个数量级，支持 .gitignore）
+RunCommand("rg -n -C 2 'def search' --glob '*.py'", allowlist=["rg"])
+
+# ② 结构化搜索（ast-grep / 自己写 ast）：找「所有调用 foo() 的地方」
+#    比正则准，因为正则分不清字符串里的 foo 和真实调用
+SearchCode(r"\bfoo\(", glob="*.py", context=1)
+
+# ③ 语义检索：把源码块写进 VectorMemory，按意思找
+from promptkit.memory import VectorMemory
+from promptkit.memory.adapters import HashEmbedding
+vec = VectorMemory(HashEmbedding(), namespace="repo")
+vec.write("coding/step.py", open("coding/step.py", encoding="utf-8").read())
+vec.recall("怎么校验补丁能不能应用", top_k=3)
+```
+
+`Sandbox.search` 是**四个方法**（walk / 读 / 正则 / 截断）的默认实现：
+换成 `rg`、`ast-grep`、甚至一个索引服务，只要保留
+`[{path, line, text, before?, after?}]` 这个返回形状，步骤和工具都不用改。
+
+#### `FixLoop`：把「什么时候算修好」说清楚
+
+```python
+FixLoop(
+    [CodingStep(...), ApplyDiff(...), RunTests(...)],
+    until=Var("test_result")["passed"],
+    max_rounds=3,
+    round_key="fix_round",          # 当前第几轮，提示词里可以引用
+    exhausted_key="fix_exhausted",  # 轮数用完还没通过 -> True（不是假装成功）
+    on_exhausted="stop",            # 或 "raise" 直接抛错逼人工介入
+)
+```
+
+和 `While` 的区别不是能力，是**意图**：`While` 要你手数轮数、自己 `Break`；
+`FixLoop` 只需要说「什么算修好了」。循环体里 `Break()` 也算「不想再修了」。
+
+#### 安全边界：`Sandbox`
+
+模型会生成路径，所以每一步都过同一个沙箱：
+
+| 红线 | 做法 |
+| --- | --- |
+| 越界 | 只收相对路径；`realpath` 之后必须还在 `base_dir` 里（`..`、绝对路径、符号链接都挡） |
+| 敏感文件 | `.env` / `id_rsa*` / `*.pem` / `.git/config` … 读写都拒，要放行就 `allow=[".env.example"]` |
+| 写权限 | `Sandbox(allow_write=False)` 时一律只读（**工具默认只读**） |
+| 命令 | `allow_commands=["python", "pytest"]` 只放行这些可执行文件，并挡 `; \| & > $` 这类 shell 拼接 |
+| 失控 | 单文件读取截断、列目录/搜索有上限 |
+| 审计 | 每次读 / 写 / 执行都打 `promptkit.coding` 日志 |
+
+**它不是容器级沙箱**：防手滑，不防恶意提权。真跑不受信任的代码请上 Docker。
+
+#### 让 Agent 自己决定改哪里（工具模式）
+
+```python
+from promptkit.coding import Sandbox, default_coding_tools
+
+tools = default_coding_tools(root, allow_write=True, allow_commands=["python"])
+agent.ask("修掉 tests 里失败的用例", tools=tools)
+```
+
+默认给的是**只读**五件套（`read_file` / `list_dir` / `search_code` /
+`apply_diff` / `run_tests`）；`write_file` 要自己显式加。
+`WriteFileTool` 没有「交互确认」——工具里没有等人按 y 的通道，确认的语义就是
+**你有没有把这个工具交给模型**。
+
+#### 多轮对话里把应用做出来（`chat` 模式）
+
+一次性工作流适合「已知改哪、怎么验证」；要从需求聊出来，就把同一批工具交给
+`ChatWorkflow`，让它自己决定读什么、写什么、什么时候跑测试：
+
+```python
+from promptkit.coding import default_coding_tools
+from promptkit.core import ChatWorkflow, settings
+
+settings.max_tool_rounds = 20      # 编码任务工具调用天然多，默认 8 容易不够
+
+chat = ChatWorkflow(
+    role="资深 Python 工程师",
+    want="按 README 的需求把应用实现到验收测试全绿",
+    rules=[
+        "先读 README 和 tests/ 再动手",
+        "只改这个工作区里的文件，测试命令是 `python -m unittest discover -s . -q`",
+        "每次改完都跑测试，用测试输出决定下一步",
+    ],
+    tools=default_coding_tools(workspace, allow_write=True, allow_commands=["python"]),
+    session=".tmp/coding-chat/session.json",   # 退出再进来还能接着聊
+)
+```
+
+[examples/coding_chat.py](examples/coding_chat.py) 就是这个（工作区里预置了
+`README.md` 需求 + 5 条验收测试 + 一个 `raise NotImplementedError` 的空壳）：
+
+```text
+$ python examples/coding_chat.py --fresh --say "读 README 和测试，实现 todo.py 让测试通过"
+  …
+  • Todo.__init__ / add / list / done / clear，JSON 落盘、父目录自动创建
+  • 顺手补了 main(argv) 的最小 CLI
+  ⚠️ 第一次 apply_diff 的 hunk 行数算错了（+1,97 实际 105），被工具挡下重来
+  测试：Ran 5 tests — OK
+
+$ python examples/coding_chat.py --say "加一个 search(keyword)，大小写不敏感，补一条测试"
+  • todo.py：新增 search()
+  • tests/test_todo.py：新增 test_search_filters_case_insensitive
+  测试：Ran 6 tests — OK      # 会话历史从 session.json 续上，工作区也是上一轮的状态
+```
+
+两个细节值得注意：
+
+- **工具会把错误原样还给模型**：上面那次 diff 行数算错，`ApplyDiffTool` 返回
+  「行数对不上：实际读到 10 行旧内容 / 97 行新内容」，模型据此重新生成补丁 ——
+  这正是「工具结果决定下一步」的样子。
+- **会话 + 工作区是两份状态**：`session.json` 存对话历史，文件在磁盘上。
+  两者都在，第二轮才谈得上「在上次的基础上加功能」。
+
+#### 怎么测编码任务
+
+测「模型返回了字符串」没有意义，要测**代码可应用、测试能过**：
+
+- `diff`：解析 / 多 hunk / 行号偏移 / 新建删除 / 上下文对不上 / CRLF /
+  末尾换行 / 围栏 + 前言
+- 应用：单文件、多文件、创建、删除、`backup=True` 留 `.orig`、
+  **失败时文件一个字节都没动**
+- `CodingStep`：坏了重试、干跑拦下错位补丁、重试耗尽报错、三种格式
+- 执行：成功 / 非 0 / 超时 / allowlist / shell 元字符 / cwd 越界
+- `FixLoop`：条件成立提前停、轮数耗尽标记、`raise` 模式、`Break`
+- 工具体：越界路径、敏感文件、只读默认、审计日志
+- `git`：真建一个临时仓库跑 `GitDiff` / `GitCommit`
+
+线上评估可以看：最终测试通过率、**首次通过率**、平均修复轮次、
+diff 可应用率（干跑通过的比例）、lint 通过率、token / 延迟。
+
+#### 和规格的几处差异
+
+- **`ReadFile` → `ReadFileStep`**：`core.ReadFile` 是惰性表达式，重名会互相
+  覆盖；`WriteFile` 同理（`default_tools.WriteFile` 是工具）。
+- **`Var("x").passed` → `Var("x")["passed"]`**：这个 DSL 不支持属性重载。
+- **`promptkit.io` → `promptkit.coding.io`**：所有编码原语收在一个包里，
+  不给顶层加 `io` 这种容易撞名的模块。
+- **没做**：Docker / 并行修改 / 代码审查 Step（P3）。diff 也不支持二进制、
+  文件重命名、权限位变化 —— 那是 `git apply` 的活，需要时可以换成它。
+
+### 25. 多代理编排：Plan → Dispatch → Aggregate
+
+「多开几个 Agent」只是执行层。真正难的四件事是：**任务怎么拆、上下文怎么隔离、
+结果怎么合并、失败怎么降级** —— 这一节就是这四件事的实现。
+
+#### 三个概念别混
+
+| 概念 | 解决什么 | 谁来决定 | 本仓库的东西 |
+| --- | --- | --- | --- |
+| 任务规划 | 大任务拆成小任务 | 模板 / LLM / 人工 | `TemplatePlanner` / `LLMPlanner` |
+| 子代理 | 每个子任务独立执行 | 编排器分配 | `sub_agent()` / `RoleFactory` |
+| 编排 | 调度、汇总、重试、预算 | 工作流 / `Orchestrator` | `Orchestrator` + 三个 Step |
+
+`Plan` 只描述「做什么」，`Orchestrator` 只负责「怎么跑」，子代理只负责「干」。
+三者分开，所以每一层都能单独测。
+
+#### 三种模式，按这个顺序上
+
+| 模式 | 写法 | 适合 | 代价 |
+| --- | --- | --- | --- |
+| ① 固定模板 | `Plan.from_template([...])` | 重复出现的流程 | 不灵活，新流程要改代码 |
+| ② LLM 规划 | `PlanStep(planner=agent)` | 需求千变万化 | 规划可能错、成本不可控 |
+| ③ 动态委派 | `DelegateTool({...})` | 主 Agent 自己决定派谁 | 最难控，容易失控 |
+
+**先①，再②，最后才③。** 本节的例子和测试都以①为主。
+
+#### 最小闭环（可跑）
+
+```python
+from promptkit.orchestrate import (
+    AggregateStep, ExecutePlan, OrchestratorConfig, Plan, RoleFactory, Task,
+)
+
+plan = Plan.from_template([
+    Task("research", "给出 3 条理由，每条一句话。", role="researcher",
+         output_key="research"),
+    Task("write", "根据这些理由写一段 150 字文案：\n{{research}}", role="writer",
+         depends_on=("research",), output_key="draft"),
+    Task("review", "审一下这段文案，指出问题并给改后版本：\n{{draft}}", role="reviewer",
+         depends_on=("write",), output_key="reviewed"),
+])
+
+workflow = Workflow(
+    ExecutePlan(
+        plan=plan,
+        agent_factory=RoleFactory({          # 每个任务现造一个子代理
+            "researcher": "你是市场调研员……",
+            "writer": "你是资深文案……",
+            "reviewer": "你是严格审稿人……",
+        }),
+        config=OrchestratorConfig(max_total_tokens=20000),
+    ),
+    AggregateStep(results_key="task_results", agent=editor,
+                  instructions="合成一份能交给老板的说明。"),
+)
+```
+
+[examples/orchestrate.py](examples/orchestrate.py) 真跑一遍：
+
+```text
+Workflow('multi_agent_demo')
+├─ ExecutePlan(-> task_results)
+└─ AggregateStep(task_results -> final)
+
+共 3 个任务：成功 3 / 失败 0 / 跳过 0，用时 12.3s，tokens 2544
+  ✓ research (2.8s, 387 tokens)
+  ✓ write (3.7s, 892 tokens)
+  ✓ review (5.8s, 1265 tokens)
+```
+
+`--plan` 换成 LLM 规划，其它不变（规划器只产出计划，`ExecutePlan` 一行没改）：
+
+```text
+├─ PlanStep(-> plan, 最多 4 个任务)
+├─ Echo('计划：{{plan}}')
+├─ ExecutePlan(-> task_results)
+└─ AggregateStep(task_results -> final)
+
+计划：Plan(3 个任务: reasons -> copy -> review)
+共 3 个任务：成功 3 / 失败 0 / 跳过 0，用时 22.2s，tokens 5297
+```
+
+#### 上下文怎么隔离
+
+| 资源 | 做法 |
+| --- | --- |
+| `Agent.history` | 每个任务一个实例（`RoleFactory` 现造）；复用 agent 时 `isolate=True` 会先 `reset()` |
+| `Context` | 任务只拿 `{{变量}}` 里真的引用的值；结果写回 `output_key`，不写进别人的上下文 |
+| 上游结果 | 有 `depends_on` 就**自动**附在提示词后面（描述里已用 `{{名字}}` 就不重复附） |
+| 工具 | `Task.tools` 按任务给；子代理不共享主代理的对话 |
+| token | 每个任务独立统计（`TaskResult.tokens`），总和受 `max_total_tokens` 限制 |
+
+「上游结果自动附上」这条是踩出来的：LLM 规划出的任务经常写「把两份上游产出合并」，
+但不写 `{{}}` —— 一开始子代理就回「请把材料贴过来」。现在描述里没引用也会附。
+
+#### 失败怎么降级
+
+```python
+Task("review", "……", on_failure="retry", max_retries=2)   # 默认
+```
+
+| 策略 | 重试 | 失败之后 |
+| --- | --- | --- |
+| `retry`（默认） | `max_retries` 次 | 标记 failed；**依赖它的任务**标 skipped，其余继续 |
+| `skip` | **不重试** | 标记 `skipped`，继续（它的下游也会被跳过） |
+| `abort` | **不重试** | 立刻终止整个计划，抛 `TaskError`，异常里带着**已完成**的 `PlanResult` |
+| `fallback` | `max_retries` 次 | 换 `fallback_agent` 再跑一次；还失败就 failed |
+
+另外 `stop_on_error=True` 把「一个失败就停」提到全局。串行时是**真的一停就停**；
+并发时同一层已经在跑的任务会跑完（同步 Agent 没有取消机制）。
+
+#### 三个保险
+
+| 护栏 | 默认 | 挡什么 |
+| --- | --- | --- |
+| `max_tasks` | 10 | 规划器一次吐出 50 个任务 |
+| `max_concurrency` | 1 | 并发打爆 API；`>1` 时同层任务用线程池跑 |
+| `max_total_tokens` | 不限 | 成本爆炸；超了后面的任务标 skipped |
+| `per_task_timeout` | 无 | 一个任务卡死整条链（超时只标记失败，不能杀线程） |
+| `max_delegations` | 5 | 委派工具被无限调用 |
+| `max_depth` | 1 | 子代理再派子代理，递归爆炸 |
+
+`max_depth` 在 `DelegateTool` 上而不是 `OrchestratorConfig` 里：深度是**委派链**的
+属性，跟「一个计划有几个任务」无关。`DelegateTool` 给子代理的工具是按层传的，
+深度到了就不再给下一层发这个工具。
+
+#### 结果怎么汇总
+
+`TaskResult` 统一形状（`name/status/output/error/tokens/latency/attempts`），
+所以汇总可以：
+
+- **直接拼**：`result.to_context()` → `{"research": "...", "draft": "..."}`
+- **让模型写**：`AggregateStep`（把失败任务也写进去，并明确说「不要编造它们的结果」）
+- **结构化合并**：`AggregateStep(output_model=FinalReport)`，走 Pydantic 校验
+
+```python
+AggregateStep(results_key="task_results", output_model=FinalReport, agent=writer)
+```
+
+`format_task_results()` 是拼给模型看的那段文本，自带
+`## 任务名 [status]` 和「这些任务没有成功：…」的提醒。
+
+#### LLM 规划的三个额外动作
+
+`LLMPlanner` 不是「把模型输出直接当真」：
+
+1. 超过 `max_tasks` 就**截断**（并且去掉指向被截掉任务的依赖）
+2. 依赖指向不存在的任务 → 删掉这条依赖（而不是让整个计划作废）
+3. `Plan` 构造时再查一次重名 / 环 / 自依赖
+
+解析失败会带着错误重试（和 `LLMStep` 的 `Executor` 一个策略）。
+
+#### 和规格的几处差异
+
+- **`max_depth` 不在 `OrchestratorConfig`**：见上，它是委派链的属性，放在
+  `DelegateTool` 上才能真正拦住递归。
+- **并发用线程池，不是 asyncio**：`Agent` 是同步的，改 async 会污染整条调用链；
+  代价是超时只能「标记失败」，不能真的取消。
+- **`PlanStep` 存的是 `Plan` 对象**（不是 `list[TaskSpec]`），`ExecutePlan` 只认
+  `Plan` / `Task` 列表 / `{"tasks": [...]}` 三种；转换用 `plan_from()`。
+- **`AggregateStep` 不强制 Pydantic**：`output_model` 可给可不给。
+- **没做**：P4 的跨计划记忆共享、动态角色分配、子代理再派生 orchestrator。
+
+#### 怎么测
+
+- `Task` / `Plan`：重名、未知依赖、自依赖、环、拓扑稳定序、分层、`max_tasks`
+- `Orchestrator`：依赖顺序、变量传递、上游结果自动附、失败→依赖 skipped、
+  重试次数、`fallback`、`abort` 带 partial result、预算、缺 agent、缺变量、
+  隔离（`reset` 次数）、并发（计时验证）、超时、`agent_factory`
+- `LLMPlanner`：解析、截断、丢未知依赖、坏 JSON 重试、空计划、提示词约束
+- Step：`PlanStep` 两种规划器、`ExecutePlan` 写回哪些 key、`AggregateStep`
+  文本/结构化、`format_task_results` 的失败提示与截断
+- `DelegateTool`：点名、未知 agent、次数上限、深度上限、下一层工具是否传下去
+- `sub_agent` / `RoleFactory` / `structured_answer`（含「数据里的 `{{}}` 不被当模板」）
+
+指标建议：任务成功率、**首次成功率**、平均重试次数、总 tokens/计划、
+汇总被人工采纳率、降级命中率（`fallback` 用了多少次）。
+
+### 26. Skill：把能力封装成「可注册、可描述、可执行」的单元
+
+`Tool` 是模型自主调的单个函数，`Step` 是工作流里的一步，**Skill 是完整的能力单元**：
+提示词 + 控制流 + 工具 + 输出契约，对外只有一份描述。
+
+| | Tool | Step | Skill |
+| --- | --- | --- | --- |
+| 谁调用 | LLM 自主 | 工作流 | 你的代码 / Agent / 别的 Skill |
+| 粒度 | 一个函数 | 一个动作 | 一个完整能力 |
+| 内容 | `run()` | `execute()` | Prompt + 流程 + Tool + 校验 |
+| 描述 | JSON Schema | 无 | 名称 / 用途 / 参数 / 返回 |
+| 可组合 | 低 | 中 | 高（Skill 调 Skill） |
+
+**不引入新引擎**：Skill 内部就是普通 Python，`Workflow` / `LLMStep` / `Tool` /
+`Memory` 都能用。
+
+#### 最小定义
+
+```python
+from promptkit.skill import SkillContext, skill
+
+class Sentiment(BaseModel):
+    label: Literal["正面", "负面", "中性"]
+    confidence: float
+
+@skill(name="classify_sentiment", description="判断一段文本的情感倾向",
+       tags=["nlp"], output_model=Sentiment)
+def classify_sentiment(text: str, ctx: SkillContext) -> Sentiment:
+    return ctx.structured(f"判断这段话的情感：{text}", Sentiment)
+```
+
+`@skill` 会做三件事：
+
+1. 从**函数签名**生成 `parameters`（`ctx` 会被跳过）
+2. `output_model` 给了就把它的 JSON Schema 填进 `returns`
+3. 返回一个 `Skill`：可以当函数调（`classify_sentiment("好评")`），也可以注册
+
+`ctx` 上能拿到：`agent` / `executor` / `client` / `memory` / `tools` / `logger` /
+`trace`，以及 `ctx.ask()` / `ctx.structured()` / `ctx.run(workflow)` /
+`ctx.call_skill()`。
+
+#### 先给函数挂字段，再套装饰器
+
+接口字段和业务字段都可以直接挂在函数上，装饰器负责收：
+
+```python
+def summarize(text: str, max_words: int = 100) -> str:
+    """把文本压缩到指定字数。"""
+    return text[:max_words]
+
+summarize.tags = ["nlp", "text"]          # 接口字段：标签
+summarize.version = "1.2"                 # 接口字段：版本
+summarize.parameters = {...}              # 可省：不给就按签名生成
+summarize.owner = "content-team"          # 额外字段 -> spec.metadata
+summarize.cost = "cheap"
+summarize.metadata = {"docs_url": "..."}  # 也可以显式给一个 dict
+
+summarize = skill(summarize)              # 等价于 @skill
+```
+
+优先级：**显式参数 > 函数属性 > 签名 / docstring 推导**。
+
+```python
+summarize.metadata                 # {'owner': 'content-team', 'cost': 'cheap', 'docs_url': '...'}
+summarize.with_metadata(level=2)   # 装饰之后还能链式补
+registry.list(metadata={"owner": "content-team"})   # 按额外字段路由
+```
+
+几个细节：
+
+- 只读 `func.__dict__`（也就是你自己 `fn.xxx = ...` 挂的），**下划线开头的跳过**
+- 认的接口字段：`name` / `description` / `parameters` / `returns` / `tags` /
+  `examples` / `version` / `metadata` / `output_model`；其余公开属性全进 `metadata`
+- `metadata` **不进** `openai_schema()`（OpenAI 的函数 Schema 不接受额外键），
+  只在 `spec.to_dict()` / `registry.list(metadata=...)` 里用
+- 重复装饰不会丢：`skill(已经是 Skill 的对象)` 会合并，而不是重造
+
+#### 自动生成 Schema
+
+```python
+@skill(description="把文本压到指定字数")
+def summarize(text: str, max_words: int = 100) -> str: ...
+```
+
+```json
+{"type": "object",
+ "properties": {"text": {"type": "string"},
+                "max_words": {"type": "integer", "default": 100}},
+ "required": ["text"]}
+```
+
+支持 `str/int/float/bool`、`list[T]`、`dict[str, T]`、`Optional[T]`、
+`Literal[...]`、`Enum`、Pydantic 模型；`*args/**kwargs` 和 `ctx` 不进 schema。
+
+#### 注册、导出、执行
+
+```python
+registry = SkillRegistry([classify_sentiment, summarize])
+registry.list(tag="nlp")        # 按标签筛
+registry.to_openai_tools()      # 给模型看的 schema（⚠️ 只有描述，不能执行）
+registry.to_tools(ctx)          # 给 Agent 真能调的工具
+registry.execute("summarize", {"text": "...", "max_words": 20}, ctx=ctx)
+```
+
+`execute` 会先按 schema 校验参数（必填 / 多余字段 / 基本类型 / enum），
+handler 抛的异常包成 `SkillExecutionError`（原始异常在 `__cause__`），
+每次执行都记一条 `ctx.trace`。
+
+#### 让 Agent 自己挑
+
+```python
+ctx = SkillContext(agent=Agent())          # 有模型能力；没有就 ctx 里什么都调不了
+tools = registry.to_tools(ctx)             # 每个 Skill 变成一个 Tool
+agent.ask("给「提示词工程」写条标题", tools=tools)
+```
+
+真跑（[examples/skills.py](examples/skills.py) `--live`）：
+
+```text
+== 直接调 brief（内部会调另外两个 Skill）==
+标题：企业提示词工程的战略价值
+基调：中性（0.95）
+
+== 把 Skill 交给 Agent，让它自己挑 ==
+提示词工程驱动企业智能升级
+```
+
+#### 在 DSL 里用 Skill：`SkillStep`
+
+`FunctionStep` 是 **Step**：调用约定是 `func(context)`，只有一个参数，它不可调用、
+也没有参数签名 —— 所以 `@skill` 套 `FunctionStep` 是套不上的：
+
+```python
+step = FunctionStep(summarize, output_key="out")
+skill(step)      # TypeError: skill 需要可调用对象，得到 FunctionStep
+```
+
+Step 和 Skill 方向不同：Step 是「流程里的一步」，Skill 是「按名字 + 参数调用的能力」。
+要在工作流里调 Skill，用 `SkillStep`：
+
+```python
+from promptkit.skill import SkillStep
+
+Workflow(
+    SkillStep(summarize, text=Var("text"), output_key="summary"),
+    Echo("摘要：{{summary}}"),
+    # 也可以按名字从注册表里拿（走校验 + 轨迹）
+    SkillStep("needs_model", text=Var("summary"), registry=registry, output_key="reply"),
+)
+```
+
+```text
+Workflow
+├─ SkillStep(summarize(text=text) -> summary)
+├─ Echo('摘要：{{summary}}')
+└─ SkillStep(needs_model(text=summary) -> reply)
+```
+
+几个细节：
+
+- 入参值可以是字面量，也可以是表达式（`Var("text")`，**每轮重新求值**，`While` 里也能用）
+- `output_key` 不给就写回 **Skill 的名字**
+- 传 `registry=` 就按名字解析，并走 `registry.execute`（参数校验、`ctx.trace` 都在那边）
+- 它会把 **workflow 的 agent** 放进 `SkillContext`，所以 Skill 里的 `ctx.ask` /
+  `ctx.structured` / `ctx.run` 用的是同一个模型 —— 这也是它比
+  `FunctionStep(lambda ctx: skill(...))` 好的地方（后者拿到的是空 ctx，调模型会报「没有 agent」）
+- 参数名和 `inputs` / `output_key` / `registry` / `ctx` / `name` 撞了，就用
+  `SkillStep(skill, inputs={"output_key": ...})`
+
+三种用法的分工：
+
+| 想在哪用 | 用什么 | 谁负责参数 |
+| --- | --- | --- |
+| 工作流里（已知顺序） | `SkillStep` | 你（字面量 / 表达式） |
+| 工作流里但要自己的 ctx | `FunctionStep(lambda ctx: ...)` | 你 |
+| 让 Agent 自己决定 | `registry.to_tools(ctx)` | 模型 |
+
+#### Skill 调 Skill
+
+```python
+@skill(name="brief", description="先判断基调，再起标题")
+def brief(topic: str, ctx: SkillContext) -> str:
+    sentiment = ctx.call_skill("classify_sentiment", text=topic)
+    headline = ctx.call_skill("write_headline", topic=topic)
+    return f"{headline}（{sentiment.label}）"
+```
+
+`ctx.call_skill` 走的是同一个注册表和同一个 ctx，所以轨迹是连贯的。
+
+#### 挂到 `ChatWorkflow`：`skills=[...]`
+
+聊天里模型只能看到「工具」（名字 + 描述 + 参数 Schema），所以 `ChatWorkflow` 多了一个
+`skills=`：DSL 函数和 `@skill` 都会在 `build()` 时被包成工具。
+
+```python
+from promptkit.core import ChatWorkflow, Function, LLMStep, Prompt
+from promptkit.default_tools import WEB_SEARCH, WriteFile
+
+WRITE = WriteFile("outputs")
+
+MakeLab = Function(
+    args=("ref_path",),
+    name="make_lab",                                   # 工具名（模型看到的就是它）
+    description="根据学习主题生成实验任务清单",          # 工具描述（决定模型调不调）
+    output_key="lab",
+    tools=[WRITE],                                     # 函数内部还能用工具
+).Do(
+    LLMStep(
+        Prompt(role="user", content="给出实验清单，参考：{{ref_path}}"),
+        output_key="lab",
+    )
+)
+
+chat = ChatWorkflow(
+    role="机器学习学习助手",
+    want="讲解并用费曼学习法验收",
+    tools=[WEB_SEARCH, WRITE],      # 现成的工具
+    skills=[MakeLab],                # 带参数的能力 -> 编译成工具
+    rules=["除非用户指定，不要生成任何文件"],
+    session=".tmp/course/session.json",
+)
+chat.run()      # 或 chat.build().run()
+```
+
+`build()` 出来的结构（[examples/course_assistant.py](examples/course_assistant.py)）：
+
+```text
+Workflow('chat')
+├─ Role('机器学习学习助手')
+├─ Want('根据具体情况讲解，并用费曼学习法验收')
+├─ Rules(1 条)
+├─ Tools(web_search, write_file, make_lab)      ← 三个工具都在
+├─ ExitWords(exit, quit, :q)
+├─ FunctionStep(<lambda>)                        ← 把这次运行的 agent 交给工具
+├─ SystemPrompt()
+└─ ChatLoop(...)
+```
+
+真跑一轮：
+
+```text
+$ python examples/course_assistant.py --say "给我一份这一节的实验清单，参考文档 https://example.com/ml"
+模型：deepseek/deepseek-flash（输入 exit 退出）
+
+（这一轮模型调了 1 次工具）
+这里有个前提要先说明：工具那边没有历史上下文……我把它改写成可执行版，并为每条加上验收标准。
+```
+
+几个要点：
+
+- **`tools` vs `skills`**：`tools` 是现成的工具（`WEB_SEARCH` / `WriteFile`）；
+  `skills` 是「带参数的能力」（DSL `Function` / `@skill` 函数），编译时被包成工具
+- **`Function` 一定要写 `name=` 和 `description=`**：默认名是 `function`，
+  模型看到这个名字没法判断该不该调
+- **`output_key` 对不上会丢结果**：函数的 `output_key` 和函数体里 `LLMStep` 的
+  `output_key` 要么一致，要么用 `Return(...)`；工具会先取函数名对应的值，
+  取不到再取函数体最后一个 `output_key`
+- **agent 是运行时才知道的**：`build()` 里加了一步 `FunctionStep`，把
+  `context["agent"]` 塞进 `AgentHolder`；不传 `agent` 就跑 `wf.run()` 时用默认 agent
+- 工具出错不会中断对话：`_FunctionTool` 把异常变成 `"错误：…"` 文本交回给模型
+
+#### 一个完整点的例子：退款处理
+
+[examples/skill_refund.py](examples/skill_refund.py) 里两个 Skill 正好代表两种形态：
+
+```python
+@skill(name="refund_policy", description="按规则判断能不能退", output_model=RefundPolicy)
+def refund_policy(order: dict, reason: str = "") -> RefundPolicy:   # 没有 ctx：纯规则
+    days = int(order.get("days") or 0)
+    if days <= 7:
+        return RefundPolicy(allowed=True, rule="7 天无理由", days_since_purchase=days)
+    return RefundPolicy(allowed=False, rule=f"已超过 7 天（{days} 天）", days_since_purchase=days)
+
+
+@skill(name="refund_flow", description="查单、判规则、按物流状态给方案", output_model=RefundResult)
+def refund_flow(order_id: str, reason: str = "质量问题", ctx: SkillContext = None) -> RefundResult:
+    order = ctx.tool("lookup_order")(order_id)                     # 工具来自 ctx
+    policy = ctx.call_skill("refund_policy", order=order, reason=reason)
+    if not policy.allowed:                                         # 规则在前：0 次模型调用
+        return RefundResult(allowed=False, action="拒绝", ...)
+
+    workflow = Workflow(                                           # 模型只在能退之后干活
+        LLMStep(Prompt(role="user", content="物流备注：{{note}}\n判断状态"), OrderStatus,
+                output_key="order_status"),
+        If(Var("order_status").attr("status") == "未发货").Then(
+            LLMStep(Prompt(role="user", content="写一条退款确认…"), output_key="reply"),
+        ).Else(
+            LLMStep(Prompt(role="user", content="写一条退货指引…"), output_key="reply"),
+        ),
+    )
+    context = ctx.run(workflow, note=order["note"], order_id=order["id"], ...)
+    action = "直接退款" if context["order_status"].status == "未发货" else "退货后退款"
+    return RefundResult(allowed=True, action=action, reply=context["reply"], rule=policy.rule)
+```
+
+跑三单（`--fake`，脚本化 agent，不需要 Key）：
+
+```text
+== B2002 ==  能不能退：True（7 天无理由）  方案：直接退款，状态：未发货   花了 2 次模型调用
+== A1001 ==  能不能退：True（7 天无理由）  方案：退货后退款，状态：已发货 花了 2 次模型调用
+== C3003 ==  能不能退：False（已超过 7 天（21 天））  方案：拒绝         花了 0 次模型调用
+```
+
+真模型（`--live`）：
+
+```text
+能不能退：True（7 天无理由）
+方案：退货后退款（状态：已发货）
+话术：您好，您的订单A1001（金额299元，退货原因：尺寸不合适）请先将商品寄回；
+      我们签收确认后将为您办理退款。
+```
+
+三个值得抄的点：
+
+- **规则在前，模型在后**：不能退的那单一次模型调用都不花（`ctx` 的轨迹里也没有 workflow 记录）。
+- **`action` 由代码决定**，只让模型写「给客户看的话术」，不让它决定「能不能退」。
+- **`ctx.tool` / `ctx.call_skill`**：查单和规则都有自己的位置，Skill 不自己去连数据库。
+
+#### Skill 里用记忆
+
+`ChatWorkflow(memory=...)` 会把记忆传给每个 Skill 的 `SkillContext`，所以 Skill 里
+直接用 `ctx.read` / `ctx.remember` / `ctx.recall`：
+
+```python
+from promptkit.memory import KVMemory
+from promptkit.skill import SkillContext, skill
+
+memory = KVMemory(".tmp/course/memory.db")
+
+@skill(name="remember_topic", description="把学完的小节记进学习记录")
+def remember_topic(topic: str, ctx: SkillContext) -> str:
+    done = list(ctx.read("topics", []))
+    if topic not in done:
+        done.append(topic)
+    ctx.remember("topics", done)
+    return f"已记录 {topic}（累计 {len(done)} 节）"
+
+ChatWorkflow(role="学习助手", skills=[remember_topic], memory=memory).run()
+```
+
+- **只让 Skill 用记忆时不用配 `memory_config`**（配了就是聊天层也自动读写）
+- `ctx.read` / `ctx.remember` / `ctx.recall` 只是薄封装，也可以直接 `ctx.memory.write(...)`
+- `ctx.recall` 需要**带语义检索**的实现（`VectorMemory` / `LayeredMemory`）；
+  `KVMemory` 只有 `read` / `write`，调 `recall` 会明确报错而不是返回空
+- DSL `Function` 里用记忆两种写法：
+  `MemoryStep(memory, read=["topics"])` 写进 `.Do(...)`（编译期已知 memory），
+  或 `FunctionStep(lambda ctx: ctx["memory"].write(...))`（工具执行时会注入 `ctx["memory"]`）
+
+聊天层的记忆（每轮召回、写回、`write_on`）见第 23 节。两者可以一起用：
+
+```python
+ChatWorkflow(
+    memory=memory,
+    memory_config=MemoryConfig(
+        read=["profile"],                       # 开跑前读进来
+        recall=RecallConfig(query_key="usr_input", output_key="related"),  # 每轮召回
+        write=["usr_input"], write_on="each_turn",
+    ),
+    skills=[remember_topic],
+)
+```
+
+#### 继承状态（`inherit`）
+
+记忆是**自动共享**的（`ChatWorkflow(memory=...)` → `ctx.memory`）；Context 里**其他变量**
+要显式声明才会进到技能里：
+
+```python
+MakeLab = Function(
+    args=("ref_path",),
+    name="make_lab",
+    description="根据当前讨论生成实验清单",
+    output_key="lab",
+    inherit=True,                 # True = 全部；("profile", "topics") = 只要这几个
+).Do(
+    LLMStep(Prompt(role="user",
+                   content="刚才讨论：{{usr_input}}\n参考：{{ref_path}}"),
+            output_key="lab"),
+)
+```
+
+- `ChatWorkflow` 每轮会做一次状态快照（`FunctionStep(skills_state)`），所以技能拿到的是
+  **这一轮开始时**的变量，包含本轮的 `usr_input`
+- `@skill` 函数一律能读快照：`ctx.get("profile", "空")`（内部是 `SkillContext.state`）
+- 不声明继承时，模板里用了没被继承的变量不会静默变空 —— 工具会返回
+  `错误：KeyError: 变量 'profile' 不存在；当前可用：agent, q`，模型自己会改
+- 框架内部键（`agent` / `memory` / `chat_tools` / `_verbosity`）不参与继承
+- 参数可以**预绑定**：`skills=[MakeLab(ref_path=REF_PATH)]` 会变成一个无参工具
+  （参数冻结在定义里，模型看不到 `ref_path` 这个入参）
+
+#### 插件（装完就能用）
+
+```toml
+[project.entry-points."promptkit.skills"]
+my_skills = "my_pkg.skills:register"      # register(registry) 函数，或直接指向 Skill
+```
+
+```python
+registry.load_entry_points()        # 返回加载成功几个；失败的记在 registry.errors
+```
+
+一条坏插件不会拖垮整个应用。
+
+#### 一个踩过的坑（已在 agent 层修掉）
+
+Skill 当 Tool 用时，它内部可能又要问模型（`ctx.ask`）。如果直接写进**当前**这段
+`assistant(tool_calls) → tool` 之间，消息序列就坏了，DeepSeek 会直接 400：
+
+```text
+An assistant message with 'tool_calls' must be followed by tool messages ...
+```
+
+现在 `Agent` 在执行工具时把历史**换成副本**（并且去掉最后那条 tool_calls），
+跑完丢掉副本、只把工具结果写回主历史 —— 工具内部的对话是「另一次对话」。
+有专门的回归测试盯着（`TestSkillToolReentrancy`）。
+
+#### 怎么测 Skill
+
+Skill 是普通函数，注入假 agent 就行：
+
+```python
+ctx = SkillContext(agent=FakeAgent(['{"label": "正面", "confidence": 0.9}']))
+assert classify_sentiment("很好", ctx=ctx).label == "正面"
+```
+
+#### 和规格的几处差异
+
+- **没有全局注册表**：`@skill` 只返回 `Skill`，注册是你 `registry.register(...)`
+  或 `@skill(registry=...)`。全局单例会让测试互相污染。
+- **`to_openai_tools()` 只给 schema**：`as_tools` 把它转成 Tool 后 `func` 是空实现，
+  真要让 Agent 调请用 `to_tools(ctx)`（文档里标了 ⚠️）。
+- **`Skill` 既是函数又是描述**：装饰后拿到的是可调用对象，`skill.spec` 才是
+  `SkillSpec`；`SkillSpec` 本身也可以直接造（不写装饰器）。
+- **P3 没做**：版本管理、依赖声明、权限控制（`version` 字段留着了）。
+
 ## 实验性功能（默认关闭）
 
 核心能力（工作流 / 提示词 / Agent / 工具 / 约束 / 事件 / 结构化输出）开箱即用。
@@ -2238,6 +3626,53 @@ prompt.py                     Prompt 对象与变量渲染（支持 {{a.b}} 点�
 features.py                   功能开关（实验性功能默认关闭）
 knowledge.py                  知识库（实验性，默认关闭，见文末）
 
+client_sys/                   ── 多厂商模型客户端（见第 22 节）──
+client_sys/types.py           Completion / Chunk / Message（Chat Completions 方言）
+client_sys/client.py          BaseClient 接口 + ClientSpec 厂商规格 + ClientError
+client_sys/openai_client.py   OpenAI / DeepSeek / 任何兼容端点（透传官方 SDK）
+client_sys/anthropic_client.py Anthropic Messages API <-> Chat Completions 翻译
+client_sys/registry.py        厂商表 / 识别 / 密钥 / 客户端工厂
+
+memory/                       ── 记忆系统（见第 23 节）──
+memory/base.py                Memory 接口 + MemoryItem + InMemoryMemory
+memory/budget.py              TokenBudget（召回按 token 裁剪）
+memory/config.py              MemoryConfig / RecallConfig（给 ChatWorkflow 用）
+memory/paths.py               默认数据目录 + namespace 命名规则
+memory/storage.py             StorageConfig + create_memory 工厂
+memory/kv.py                  KVMemory（SQLite，按键读写 + 备份/导出/删库）
+memory/session.py             SessionMemory（包 Agent.history，只读）
+memory/vector.py              VectorMemory + Embedding/Store/Reranker 接口 + 切分
+memory/folder_store.py        FolderVectorStore（一个文件夹一份向量记忆）
+memory/layered.py             LayeredMemory / long_term_memory（KV + 向量）
+memory/tool.py                RecallMemoryTool（只给读的工具）
+memory/adapters/              embedding / store / rerank 的具体实现
+
+coding/                       ── 编码任务（见第 24 节）──
+coding/sandbox.py             路径白名单 / 敏感文件 / 写权限 / 命令 allowlist / 审计
+coding/diff.py                unified diff 解析 + 应用（不依赖 git）
+coding/formats.py             diff / full_file / json 三种可执行输出 + 校验
+coding/step.py                CodingStep（生成变更 + 干跑 + 重试）
+coding/io.py                  ReadFileStep / WriteFileStep / ApplyDiff / ApplyChanges / ListDir / SearchCode
+coding/exec.py                RunCommand / RunTests / LintStep
+coding/git.py                 GitDiff / GitCommit
+coding/loop.py                FixLoop（测试失败 → 带错误重试）
+coding/tools.py               给 Agent 自主编码用的工具
+
+orchestrate/                  ── 多代理编排（见第 25 节）──
+orchestrate/task.py           Task / TaskResult / Plan（重名、依赖、查环、分层）
+orchestrate/planner.py        TemplatePlanner / LLMPlanner
+orchestrate/orchestrator.py   Orchestrator：调度、预算、失败降级、结果汇总
+orchestrate/steps.py          PlanStep / ExecutePlan / AggregateStep
+orchestrate/agents.py         sub_agent / RoleFactory / 结构化回答
+orchestrate/delegate.py       DelegateTool（max_delegations / max_depth）
+
+skill/                        ── Skill（见第 26 节）──
+skill/spec.py                 SkillSpec / Skill / @skill 装饰器
+skill/schema.py               从函数签名生成 JSON Schema + 参数校验
+skill/context.py              SkillContext（agent / executor / memory / tools / trace）
+skill/registry.py             SkillRegistry（注册、导出、执行、插件）
+skill/tools.py                把 Skill 包成 Tool 给 Agent
+
 core/                         ── 工作流核心 ──
 core/errors.py                WorkflowError / UndefinedVariable / LoopLimitExceeded / ...
 core/context.py               步骤间共享的状态容器（含变量类型转换）
@@ -2263,6 +3698,8 @@ core/steps/chat.py             ChatWorkflow / Deliverable（声明式编译成 W
 core/steps/actions/chat_util.py 聊天的声明式 Step：Role / Want / Rules / ChatLoop / …
 core/steps/actions/llm.py            LLMStep
 core/steps/actions/interactive.py    Read / ReadFile / Echo / Save / SaveHistory
+core/steps/actions/memory.py         ReadMemory / WriteMemory / ForgetMemory / MemoryStep
+core/steps/actions/recall.py         RecallMemory（召回 + 预算 + 拼文本）
 core/steps/actions/message.py        MessageStep
 core/steps/logics/conditions.py      条件对象 Condition / And / Or / Not / When
 core/steps/logics/var.py             变量步骤 NewVar / Set / Inc / Dec / Var
@@ -2300,6 +3737,63 @@ steps/*                                 步骤：workflow 是容器，actions �
 model_action                            默认约束 / Caution / Formatter
 core/__init__                           汇总
 ```
+
+模型那一侧是另一条独立的线（`Agent` 和 `Workflow` 互不依赖）：
+
+```
+client_sys/types         纯数据，不依赖任何东西
+client_sys/client        接口 + 厂商规格
+client_sys/*_client.py   具体厂商（OpenAI 兼容 / Anthropic）
+client_sys/registry      汇总：厂商表 / 识别 / 密钥 / 工厂
+agent                    只依赖 client_sys 的接口，不认具体厂商
+```
+
+记忆也是独立的一层，**`core.steps` 只在函数里延迟 import 它**：
+
+```
+memory/base / budget / config    纯数据 + 接口，不依赖任何东西
+memory/kv / vector / layered     具体实现（sqlite3 / 接口 + 适配器）
+memory/adapters                  OpenAI / Chroma / Qdrant / 本地模型
+core/steps/actions/memory.py     只认「有 read/write/recall 的对象」，鸭子类型
+```
+
+所以 `import promptkit.core` 不会把 SQLite 和向量库一起拖进来（有测试盯着）。
+
+编码任务是**最上面**的一层，只依赖 core，不被 core 依赖：
+
+```
+coding/errors / diff / formats    纯逻辑（diff 解析、输出校验），不碰步骤
+coding/sandbox                    文件与命令的安全边界
+coding/step / io / exec / git     步骤（都实现 core 的 Step）
+coding/tools                      同一批能力的 Tool 包装
+```
+
+`promptkit.coding` 也**不从 `core` 导出** —— 否则 `import promptkit.core`
+就会把子进程和文件沙箱一起拖进来（同样有测试盯着）。
+
+编排在最上面，只依赖 core 和 `Agent`：
+
+```
+orchestrate/task                 Task / TaskResult / Plan（纯数据 + 校验）
+orchestrate/planner              需求 -> Plan（模板 / LLM）
+orchestrate/orchestrator         调度、预算、失败降级
+orchestrate/steps                PlanStep / ExecutePlan / AggregateStep
+orchestrate/delegate             委派工具（带次数和深度护栏）
+```
+
+`import promptkit.core` 不会拖进编排；`promptkit.orchestrate` 里的东西
+也不会自动出现在 `core` 的命名空间里。
+
+Skill 更靠上：它只依赖 `Agent` / `Executor` / `Tool` / `Workflow`，不被任何一层
+反依赖：
+
+```
+skill/spec / schema            纯定义（装饰器 + 从签名生成 Schema）
+skill/context                  Skill 运行时（需要模型时才拿 agent）
+skill/registry / tools         注册、导出成 Tool、执行
+```
+
+`skill` 里没有任何全局注册表 —— 注册表是你显式创建、显式传进 `SkillContext` 的。
 
 `steps` 是底层，**不会在运行时反向依赖 `model_action`** —— 这一点由
 `Context` / `VarType` 的导入全部收进 `TYPE_CHECKING` 来保证，有测试盯着。
@@ -2346,9 +3840,23 @@ from promptkit.core.model_action.caution_related import RegexFormatter
 
 ## 说明
 
-- 模型固定为 `deepseek-flash`，并开启了思考模式
+- **默认**模型是 `deepseek-flash`，并开启了思考模式
   （`reasoning_effort="high"` + `extra_body={"thinking": {"type": "enabled"}}`）。
   思考模式不支持 `temperature` / `presence_penalty` / `frequency_penalty`。
-- 密钥不再写死在代码里：`Agent()` 依次查找 `api_key` 参数、环境变量
-  `DEEPSEEK_API_KEY`、项目根目录的 `.env`。`.env` 已被 `.gitignore` 忽略，
-  请以 `.env.example` 为模板创建。三者都没有时会抛出带提示的 `ValueError`。
+  这些默认值是 `client_sys/registry.py` 里 DeepSeek 的厂商规格，不是写死在
+  Agent 里的；换厂商见第 22 节。
+- 密钥不再写死在代码里：`Agent()` 依次查找 `api_key` 参数、**该厂商的**环境变量
+  （DeepSeek 是 `DEEPSEEK_API_KEY`，OpenAI / Anthropic 各用自己的）、
+  通用的 `PROMPTKIT_API_KEY`、项目根目录的 `.env`。`.env` 已被 `.gitignore`
+  忽略，请以 `.env.example` 为模板创建。都没有时会抛出带提示的 `ValueError`。
+- 记忆**不会自动保存任何东西**：写什么、读什么、何时召回都写在步骤里
+  （第 23 节）。模型能拿到的记忆工具只有「召回」，没有写权限。
+- 记忆默认存在**系统数据目录**（`%APPDATA%\promptkit` / `~/Library/Application
+  Support/promptkit` / `$XDG_DATA_HOME/promptkit`），不会污染项目目录；
+  位置可以用 `path=` 覆盖，或用 `PROMPTKIT_DATA_DIR` 整体改掉。
+- 编码任务的每一步都**显式**（读哪个文件、跑哪条命令、失败怎么修）；沙箱只保证
+  「不出 `base_dir`、不碰敏感文件、不跑白名单外的命令」，**不是**容器级隔离。
+- 多代理默认是**固定模板 + 串行**；LLM 规划和并发是可选能力，而且都带
+  `max_tasks` / `max_concurrency` / `max_total_tokens` 三个保险。
+- Skill 没有全局单例、没有自动扫描：`@skill` 只做封装，注册表由你显式创建
+  （想让第三方包「装完就能用」再走 entry points）。

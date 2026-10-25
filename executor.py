@@ -5,7 +5,12 @@ from typing import Any, Optional, Sequence, Type
 
 from pydantic import BaseModel, ValidationError
 
-from promptkit.core.model_action.caution_related.formatter import Formatter, FormatterError, get_formatter
+from promptkit.core.model_action.caution_related.formatter import (
+    Formatter,
+    FormatterError,
+    get_formatter,
+)
+from promptkit.core.settings import settings
 from promptkit.prompt import Prompt
 
 
@@ -15,6 +20,46 @@ class OutputValidationError(FormatterError):
 
 class MaxRetriesExceeded(Exception):
     '''重试若干次后仍然没有得到合法输出。'''
+
+
+def run_structured(
+    agent: Any,
+    text: str,
+    output_model: Type[BaseModel],
+    *,
+    tools: Optional[Sequence[Any]] = None,
+    bus: Any = None,
+    max_retries: Optional[int] = None,
+) -> BaseModel:
+    '''把一段**已经是数据**的文本发给 agent，解析成 `output_model`。
+
+    和 `Executor.run` 的区别只有一个，但很关键：**不经过 `Prompt.render()`**。
+    编排层和技能层经常把上游结果 / 用户输入拼进提示词，那些文本里可能带
+    `{{...}}`，再渲染一遍会被当成模板变量而抛 `KeyError`。
+
+    解析失败会带着错误重试，重试次数默认取 `settings.max_retries`。
+    '''
+    formatter = get_formatter(None)
+    limit = settings.max_retries if max_retries is None else int(max_retries)
+    correction: Optional[str] = None
+    last_error: Optional[Exception] = None
+
+    for _ in range(limit + 1):
+        raw = agent.ask(
+            {"role": "user", "content": correction or text},
+            tools=tools,
+            bus=bus,
+        )
+        try:
+            return output_model.model_validate(formatter.parse(raw))
+        except Exception as exc:      # noqa: BLE001 - 解析/校验失败都值得重试
+            last_error = exc
+            correction = (
+                f"你上一次的输出无法使用：{exc}\n"
+                f"请只输出{formatter.name}格式的内容，不要解释、不要代码块。"
+            )
+
+    raise MaxRetriesExceeded(f"重试 {limit} 次后仍未得到合法输出：{last_error}")
 
 
 class Executor:

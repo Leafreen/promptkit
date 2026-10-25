@@ -19,7 +19,14 @@ from promptkit.core.steps.actions.interactive import (
     output_stream,
 )
 from promptkit.core.steps.actions.llm import LLMStep, T
+from promptkit.core.steps.actions.memory import (
+    ForgetMemory,
+    MemoryStep,
+    ReadMemory,
+    WriteMemory,
+)
 from promptkit.core.steps.actions.message import MessageStep
+from promptkit.core.steps.actions.recall import RecallMemory, format_recalled
 from promptkit.core.steps.actions.chat_util import (
     CHAT_ROLE_KEY,
     CHAT_WANT_KEY,
@@ -69,6 +76,14 @@ __all__ = [
     "OUTPUT_STREAM_KEY",
     "DEFAULT_ENCODING",
     "output_stream",
+    # memory.py：长期记忆的 IO 原语
+    "ReadMemory",
+    "WriteMemory",
+    "ForgetMemory",
+    "MemoryStep",
+    # recall.py：语义召回
+    "RecallMemory",
+    "format_recalled",
     # message.py
     "MessageStep",    "CHAT_ROLE_KEY",
     "CHAT_WANT_KEY",

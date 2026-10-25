@@ -51,6 +51,8 @@ package-dir = { "promptkit" = "." }
 packages = [
     "promptkit",
     "promptkit.cautions",
+    "promptkit.client_sys",
+    "promptkit.coding",
     "promptkit.core",
     "promptkit.core.display_sys",
     "promptkit.core.event_sys",
@@ -61,6 +63,10 @@ packages = [
     "promptkit.core.steps.logics",
     "promptkit.core.steps.logics.expr_sys",
     "promptkit.default_tools",
+    "promptkit.memory",
+    "promptkit.memory.adapters",
+    "promptkit.orchestrate",
+    "promptkit.skill",
 ]
 
 [tool.setuptools.package-data]

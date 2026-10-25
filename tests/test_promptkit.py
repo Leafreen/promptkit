@@ -7,6 +7,7 @@ import os
 import platform
 import sys
 import unittest
+import urllib.error
 from types import SimpleNamespace
 from typing import Optional
 import io
@@ -148,6 +149,22 @@ from promptkit.core.display_sys.runlog import (  # noqa: E402
     log_display,
     setup_logging,
 )
+from promptkit.client_sys import (  # noqa: E402
+    AnthropicClient,
+    BaseClient,
+    ClientError,
+    ClientSpec,
+    Completion,
+    OpenAIClient,
+    detect_vendor,
+    get_spec,
+    iter_sse,
+    make_client,
+    register_vendor,
+    resolve_api_key,
+    resolve_target,
+    vendor_names,
+)
 from promptkit.core.steps.actions.interactive import VERBOSITY_KEY  # noqa: E402
 from promptkit.core.steps.actions.chat_util import (  # noqa: E402
     DEFAULT_EXIT_WORDS,
@@ -176,6 +193,55 @@ from promptkit.session import (  # noqa: E402
     SESSION_VERSION,
     Session,
     as_session,
+)
+from promptkit.memory import (  # noqa: E402
+    BACKENDS,
+    FolderVectorStore,
+    InMemoryMemory,
+    InMemoryVectorStore,
+    KVMemory,
+    LayeredMemory,
+    Memory,
+    MemoryConfig,
+    MemoryError,
+    MemoryItem,
+    RecallConfig,
+    RecallMemoryTool,
+    Reranker,
+    SessionMemory,
+    StorageConfig,
+    TokenBudget,
+    VectorMemory,
+    chunk_text as memory_chunk_text,
+    cosine,
+    create_memory,
+    default_data_dir,
+    default_kv_path,
+    default_vector_dir,
+    estimate_tokens,
+    format_memories,
+    long_term_memory,
+    register_memory_backend,
+    safe_namespace_name,
+)
+from promptkit.memory.adapters import (  # noqa: E402
+    ChromaVectorStore,
+    CohereReranker,
+    CrossEncoderReranker,
+    HashEmbedding,
+    LlmReranker,
+    NoopReranker,
+    OpenAIEmbedding,
+    QdrantVectorStore,
+    SentenceTransformerEmbedding,
+)
+from promptkit.core import (  # noqa: E402
+    ForgetMemory,
+    MemoryStep,
+    ReadMemory,
+    RecallMemory,
+    WriteMemory,
+    format_recalled,
 )
 from promptkit.agent import normalize_history  # noqa: E402
 from promptkit.core.model_action.caution_related.formatter import (  # noqa: E402
@@ -3988,7 +4054,7 @@ class TestCautionsEndToEnd(PromptkitTestCase):
 
 
 class TestVariablePaths(PromptkitTestCase):
-    '''{{a.b}} 这种点路径 —— 之前 \w+ 匹配不到，会**静默原样输出**。'''
+    r'''{{a.b}} 这种点路径 —— 之前 \w+ 匹配不到，会**静默原样输出**。'''
 
     def render(self, text, **variables):
         return render_text(text, variables)
@@ -8741,6 +8807,5983 @@ class TestEachTurnInHandWrittenWorkflow(PromptkitTestCase):
                 ChatLoop(after_turn=[]),          # 显式空 = 什么都不存
             ).run(agent=agent, verbose=Verbosity.SILENT, out=io.StringIO())
         self.assertEqual(os.listdir(self.folder), [])
+
+
+# ==================== 多厂商客户端（client_sys） ====================
+class FakeSDK:
+    '''假的 openai.OpenAI：只实现 chat.completions.create。'''
+
+    def __init__(self, responses=()):
+        self.responses = list(responses)
+        self.calls = []
+        self.closed = False
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self.responses:
+            raise AssertionError("假 SDK 没有更多回复了")
+        return self.responses.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+class FakeHTTPResponse:
+    '''假的 urllib 响应：能迭代（SSE 行）、能 read()、能 close()。'''
+
+    def __init__(self, lines=(), body=b"{}"):
+        self.lines = list(lines)
+        self.body = body
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.lines)
+
+    def read(self):
+        return self.body
+
+    def close(self):
+        self.closed = True
+
+
+def anthropic_client_with(reply):
+    '''造一个不发网络的 AnthropicClient，并记录每次请求体。
+
+    `reply` 可以是：响应 dict（非流式）、SSE 行列表（流式）、
+    或者 `callable(body, stream)`。
+    '''
+    seen = []
+
+    def transport(url, body, stream):
+        seen.append({"url": url, "body": body, "stream": stream})
+        return reply(body, stream) if callable(reply) else reply
+
+    return AnthropicClient(api_key="sk-ant-test", transport=transport), seen
+
+
+def sse(*payloads):
+    '''把 dict 变成 SSE 行（data + 空行）。'''
+    lines = []
+    for payload in payloads:
+        lines.append("data: " + json.dumps(payload, ensure_ascii=False))
+        lines.append("")
+    return lines
+
+
+class TestVendorRegistry(PromptkitTestCase):
+    def test_builtin_vendors(self):
+        for name in ("deepseek", "openai", "anthropic", "openai-compatible"):
+            self.assertIn(name, vendor_names())
+
+    def test_default_vendor_is_still_deepseek(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                self.assertEqual(detect_vendor(), "deepseek")
+
+    def test_model_prefix_decides_the_vendor(self):
+        self.assertEqual(detect_vendor(model="claude-sonnet-4-5"), "anthropic")
+        self.assertEqual(detect_vendor(model="deepseek-chat"), "deepseek")
+        self.assertEqual(detect_vendor(model="gpt-4o"), "openai")
+        self.assertEqual(detect_vendor(model="o3-mini"), "openai")
+        # OpenRouter 那种带厂商前缀的写法
+        self.assertEqual(detect_vendor(model="anthropic/claude-3-5-haiku"), "anthropic")
+        self.assertEqual(detect_vendor(model="deepseek/deepseek-chat"), "deepseek")
+
+    def test_base_url_wins_over_model_name(self):
+        self.assertEqual(
+            detect_vendor(model="gpt-4o", base_url="https://api.anthropic.com"),
+            "anthropic",
+        )
+        self.assertEqual(detect_vendor(base_url="https://api.openai.com/v1"), "openai")
+        self.assertEqual(detect_vendor(base_url="https://api.deepseek.com"), "deepseek")
+
+    def test_unknown_base_url_means_openai_compatible(self):
+        self.assertEqual(
+            detect_vendor(base_url="http://localhost:11434/v1"), "openai-compatible"
+        )
+
+    def test_env_keys_are_sniffed_only_when_nothing_is_said(self):
+        with mock.patch("promptkit.config.load_env_file"):
+            with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "k"}, clear=True):
+                self.assertEqual(detect_vendor(), "anthropic")
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "k"}, clear=True):
+                self.assertEqual(detect_vendor(), "openai")
+            # DeepSeek 排第一：两个都设了也还是它
+            with mock.patch.dict(
+                "os.environ",
+                {"OPENAI_API_KEY": "k", "DEEPSEEK_API_KEY": "k"},
+                clear=True,
+            ):
+                self.assertEqual(detect_vendor(), "deepseek")
+
+    def test_env_file_can_decide_the_vendor(self):
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".env", delete=False, encoding="utf-8"
+        )
+        try:
+            handle.write("ANTHROPIC_API_KEY=sk-ant-file\n")
+            handle.close()
+            with mock.patch.dict("os.environ", {}, clear=True):
+                with mock.patch(
+                    "promptkit.config.load_env_file",
+                    lambda: load_env_file(handle.name),
+                ):
+                    self.assertEqual(detect_vendor(), "anthropic")
+        finally:
+            os.unlink(handle.name)
+
+    def test_explicit_key_does_not_sniff_env(self):
+        # 显式给了密钥就说明用户心里有默认厂商了，别再跟着环境变量漂
+        with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "k"}, clear=True):
+            self.assertEqual(detect_vendor(api_key="sk-x"), "deepseek")
+
+    def test_alias_and_case_are_accepted(self):
+        for name in ("claude", "ANTHROPIC", "Anthropic"):
+            self.assertEqual(get_spec(name).name, "anthropic")
+        self.assertEqual(get_spec("openai_compatible").name, "openai-compatible")
+        self.assertEqual(get_spec("ds").name, "deepseek")
+
+    def test_unknown_vendor_lists_the_choices(self):
+        with self.assertRaises(ValueError) as cm:
+            get_spec("mistral")
+        message = str(cm.exception)
+        self.assertIn("deepseek", message)
+        self.assertIn("anthropic", message)
+
+    def test_resolve_target_fills_vendor_defaults(self):
+        spec, model, base = resolve_target(vendor="anthropic")
+        self.assertEqual(spec.name, "anthropic")
+        self.assertEqual(model, "claude-sonnet-4-5")
+        self.assertEqual(base, "https://api.anthropic.com")
+
+    def test_openai_compatible_needs_model_and_base_url(self):
+        with self.assertRaises(ValueError) as cm:
+            resolve_target(vendor="openai-compatible", base_url="http://x/v1")
+        self.assertIn("model", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            resolve_target(vendor="openai-compatible", model="qwen2.5")
+        self.assertIn("base_url", str(cm.exception))
+
+    def test_key_order_is_argument_then_env(self):
+        with mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "from-env"}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                self.assertEqual(resolve_api_key("anthropic", "from-arg"), "from-arg")
+                self.assertEqual(resolve_api_key("anthropic"), "from-env")
+
+    def test_universal_key_fallback(self):
+        with mock.patch.dict("os.environ", {"PROMPTKIT_API_KEY": "sk-any"}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                self.assertEqual(resolve_api_key("deepseek"), "sk-any")
+
+    def test_missing_key_names_the_vendor_variable(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                with self.assertRaises(ValueError) as cm:
+                    resolve_api_key("anthropic")
+        self.assertIn("ANTHROPIC_API_KEY", str(cm.exception))
+
+    def test_missing_key_hints_local_endpoints(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                with self.assertRaises(ValueError) as cm:
+                    resolve_api_key("openai-compatible")
+        self.assertIn("ollama", str(cm.exception))
+
+    def test_key_can_come_from_the_env_file(self):
+        handle = tempfile.NamedTemporaryFile(
+            "w", suffix=".env", delete=False, encoding="utf-8"
+        )
+        try:
+            handle.write("ANTHROPIC_API_KEY=sk-from-file\n")
+            handle.close()
+            with mock.patch.dict("os.environ", {}, clear=True):
+                # 把「读哪个 .env」换成临时文件；读法还是真的那个函数
+                with mock.patch(
+                    "promptkit.config.load_env_file",
+                    lambda: load_env_file(handle.name),
+                ):
+                    self.assertEqual(resolve_api_key("anthropic"), "sk-from-file")
+        finally:
+            os.unlink(handle.name)
+
+    def test_register_vendor_adds_a_provider(self):
+        from promptkit.client_sys import registry
+
+        spec = ClientSpec(
+            name="test-gateway",
+            label="测试网关",
+            kind="openai",
+            env_vars=("TEST_GATEWAY_KEY",),
+            default_model="gateway-mini",
+            default_base_url="https://gateway.test/v1",
+        )
+        try:
+            register_vendor(spec)
+            self.assertEqual(get_spec("test-gateway").name, "test-gateway")
+            with mock.patch.dict(
+                "os.environ", {"TEST_GATEWAY_KEY": "sk-gw"}, clear=True
+            ):
+                with mock.patch("promptkit.config.load_env_file"):
+                    client = make_client("test-gateway")
+            self.assertIsInstance(client, OpenAIClient)
+            self.assertEqual(client.base_url, "https://gateway.test/v1")
+            self.assertEqual(resolve_target(vendor="test-gateway")[1], "gateway-mini")
+        finally:
+            registry.PROVIDERS.pop("test-gateway", None)
+            registry._ALIASES.pop("test-gateway", None)
+
+    def test_register_vendor_rejects_an_unknown_kind(self):
+        with self.assertRaises(ValueError) as cm:
+            register_vendor(ClientSpec(name="weird", label="W", kind="grpc"))
+        self.assertIn("factory", str(cm.exception))
+
+
+class TestOpenAIClient(PromptkitTestCase):
+    def test_create_sends_chat_completions_fields(self):
+        sdk = FakeSDK(["reply"])
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
+        messages = [{"role": "user", "content": "hi"}]
+        self.assertEqual(client.create(model="m", messages=messages), "reply")
+        self.assertEqual(
+            sdk.calls[0], {"model": "m", "messages": messages, "stream": False}
+        )
+
+    def test_tools_and_stream_are_forwarded(self):
+        sdk = FakeSDK([iter([])])
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
+        tools = [{"type": "function", "function": {"name": "f"}}]
+        client.create(model="m", messages=[], tools=tools, stream=True)
+        self.assertEqual(sdk.calls[0]["tools"], tools)
+        self.assertTrue(sdk.calls[0]["stream"])
+
+    def test_params_are_passed_through_untouched(self):
+        sdk = FakeSDK(["ok"])
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
+        client.create(
+            model="m",
+            messages=[],
+            temperature=0.2,
+            reasoning_effort="low",
+            extra_body={"thinking": {"type": "disabled"}},
+        )
+        call = sdk.calls[0]
+        self.assertEqual(call["temperature"], 0.2)
+        self.assertEqual(call["reasoning_effort"], "low")
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_chat_completions_facade(self):
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=FakeSDK())
+        self.assertIs(client.chat, client)
+        self.assertIs(client.completions, client)
+
+    def test_close_closes_the_sdk(self):
+        sdk = FakeSDK()
+        with OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk) as client:
+            self.assertIsInstance(client, BaseClient)
+        self.assertTrue(sdk.closed)
+
+    def test_make_client_builds_a_deepseek_client(self):
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-ds"}, clear=True):
+            client = make_client("deepseek")
+        try:
+            self.assertIsInstance(client, OpenAIClient)
+            self.assertEqual(client.base_url, "https://api.deepseek.com")
+            self.assertEqual(client.api_key, "sk-ds")
+            self.assertEqual(client.spec.default_params["reasoning_effort"], "high")
+        finally:
+            client.close()
+
+    def test_make_client_needs_a_base_url_for_compatible(self):
+        with self.assertRaises(ClientError) as cm:
+            make_client("openai-compatible", api_key="k")
+        self.assertIn("base_url", str(cm.exception))
+
+
+class TestAnthropicTranslation(PromptkitTestCase):
+    def test_system_is_hoisted_and_messages_are_blockified(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude-sonnet-4-5",
+            messages=[
+                {"role": "system", "content": "规则"},
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "在"},
+            ],
+        )
+        body = seen[0]["body"]
+        self.assertEqual(body["system"], "规则")
+        self.assertEqual(
+            body["messages"],
+            [
+                {"role": "user", "content": [{"type": "text", "text": "你好"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "在"}]},
+            ],
+        )
+
+    def test_multiple_system_messages_are_joined(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "system", "content": "一"},
+                {"role": "system", "content": "二"},
+                {"role": "user", "content": "x"},
+            ],
+        )
+        self.assertEqual(seen[0]["body"]["system"], "一\n\n二")
+
+    def test_tool_calls_become_tool_use_blocks(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "user", "content": "天气"},
+                {
+                    "role": "assistant",
+                    "content": "我查一下",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "北京"}',
+                            },
+                        }
+                    ],
+                },
+            ],
+        )
+        blocks = seen[0]["body"]["messages"][1]["content"]
+        self.assertEqual(blocks[0], {"type": "text", "text": "我查一下"})
+        self.assertEqual(
+            blocks[1],
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "get_weather",
+                "input": {"city": "北京"},
+            },
+        )
+
+    def test_tool_results_become_user_blocks(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "user", "content": "天气"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "function": {"name": "get_weather", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "晴"},
+            ],
+        )
+        self.assertEqual(
+            seen[0]["body"]["messages"][-1],
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "晴"}
+                ],
+            },
+        )
+
+    def test_consecutive_same_role_turns_merge(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "user", "content": "a"},
+                {"role": "tool", "tool_call_id": "c1", "content": "1"},
+                {"role": "tool", "tool_call_id": "c2", "content": "2"},
+            ],
+        )
+        messages = seen[0]["body"]["messages"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(len(messages[0]["content"]), 3)
+
+    def test_broken_arguments_are_kept_raw(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "user", "content": "x"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "function": {"name": "f", "arguments": "{oops"}}
+                    ],
+                },
+            ],
+        )
+        blocks = seen[0]["body"]["messages"][-1]["content"]
+        self.assertEqual(blocks[0]["input"], {"_raw": "{oops"})
+
+    def test_empty_assistant_message_is_dropped(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[
+                {"role": "user", "content": "x"},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": "y"},
+            ],
+        )
+        messages = seen[0]["body"]["messages"]
+        self.assertEqual([m["role"] for m in messages], ["user"])
+        self.assertEqual(len(messages[0]["content"]), 2)
+
+    def test_tools_become_input_schema(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[{"role": "user", "content": "x"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "查天气。",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        },
+                    },
+                }
+            ],
+        )
+        self.assertEqual(
+            seen[0]["body"]["tools"],
+            [
+                {
+                    "name": "get_weather",
+                    "description": "查天气。",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                }
+            ],
+        )
+
+    def test_max_tokens_defaults_to_4096_and_can_be_overridden(self):
+        client, seen = anthropic_client_with({})
+        client.create(model="claude", messages=[{"role": "user", "content": "x"}])
+        self.assertEqual(seen[0]["body"]["max_tokens"], 4096)
+        client.create(
+            model="claude", messages=[{"role": "user", "content": "x"}], max_tokens=32
+        )
+        self.assertEqual(seen[1]["body"]["max_tokens"], 32)
+
+    def test_stop_maps_to_stop_sequences(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[{"role": "user", "content": "x"}],
+            stop=["END"],
+            temperature=0.3,
+            top_p=0.9,
+        )
+        body = seen[0]["body"]
+        self.assertEqual(body["stop_sequences"], ["END"])
+        self.assertEqual(body["temperature"], 0.3)
+        self.assertEqual(body["top_p"], 0.9)
+
+    def test_tool_choice_is_translated(self):
+        client, seen = anthropic_client_with({})
+        client.create(
+            model="claude",
+            messages=[{"role": "user", "content": "x"}],
+            tool_choice="required",
+        )
+        self.assertEqual(seen[0]["body"]["tool_choice"], {"type": "any"})
+
+        client.create(
+            model="claude",
+            messages=[{"role": "user", "content": "x"}],
+            tool_choice={"type": "function", "function": {"name": "f"}},
+        )
+        self.assertEqual(seen[1]["body"]["tool_choice"], {"type": "tool", "name": "f"})
+
+    def test_unknown_params_are_rejected_with_a_list(self):
+        client, _ = anthropic_client_with({})
+        with self.assertRaises(ClientError) as cm:
+            client.create(
+                model="claude",
+                messages=[{"role": "user", "content": "x"}],
+                response_format={"type": "json_object"},
+            )
+        self.assertIn("response_format", str(cm.exception))
+
+    def test_thinking_is_rejected_with_an_explanation(self):
+        client, _ = anthropic_client_with({})
+        with self.assertRaises(ClientError) as cm:
+            client.create(
+                model="claude",
+                messages=[{"role": "user", "content": "x"}],
+                thinking={"type": "enabled", "budget_tokens": 1024},
+            )
+        self.assertIn("extended thinking", str(cm.exception))
+
+    def test_model_is_required(self):
+        client, _ = anthropic_client_with({})
+        with self.assertRaises(ClientError) as cm:
+            client.create(model="", messages=[])
+        self.assertIn("model", str(cm.exception))
+
+    def test_endpoint_handles_the_v1_suffix(self):
+        self.assertEqual(
+            AnthropicClient(api_key="k").endpoint,
+            "https://api.anthropic.com/v1/messages",
+        )
+        self.assertEqual(
+            AnthropicClient(api_key="k", base_url="https://proxy/v1").endpoint,
+            "https://proxy/v1/messages",
+        )
+        self.assertEqual(
+            AnthropicClient(api_key="k", base_url="https://proxy/").endpoint,
+            "https://proxy/v1/messages",
+        )
+
+
+class TestAnthropicResponse(PromptkitTestCase):
+    def test_text_thinking_and_usage(self):
+        client, _ = anthropic_client_with(
+            {
+                "id": "msg_1",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "想一下"},
+                    {"type": "text", "text": "你好"},
+                ],
+                "usage": {"input_tokens": 9, "output_tokens": 4},
+            }
+        )
+        reply = client.create(model="claude", messages=[{"role": "user", "content": "x"}])
+        self.assertIsInstance(reply, Completion)
+        self.assertEqual(reply.text, "你好")
+        self.assertEqual(reply.message.reasoning_content, "想一下")
+        self.assertEqual(reply.usage.prompt_tokens, 9)
+        self.assertEqual(reply.usage.completion_tokens, 4)
+        self.assertEqual(reply.usage.total_tokens, 13)
+        self.assertEqual(reply.choices[0].finish_reason, "stop")
+        self.assertEqual(reply.model, "claude-sonnet-4-5")
+
+    def test_tool_use_becomes_tool_calls(self):
+        client, _ = anthropic_client_with(
+            {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {"city": "北京"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+            }
+        )
+        reply = client.create(model="claude", messages=[{"role": "user", "content": "x"}])
+        call = reply.message.tool_calls[0]
+        self.assertEqual(call.id, "toolu_1")
+        self.assertEqual(call.function.name, "get_weather")
+        self.assertEqual(json.loads(call.function.arguments), {"city": "北京"})
+        self.assertEqual(reply.choices[0].finish_reason, "tool_calls")
+        # Agent 记历史时用的就是这个形状
+        self.assertEqual(
+            call.model_dump(),
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city": "北京"}'},
+            },
+        )
+
+    def test_stop_reason_mapping(self):
+        cases = {
+            "end_turn": "stop",
+            "stop_sequence": "stop",
+            "max_tokens": "length",
+            "tool_use": "tool_calls",
+        }
+        for anthropic_reason, openai_reason in cases.items():
+            client, _ = anthropic_client_with(
+                {"content": [{"type": "text", "text": "x"}], "stop_reason": anthropic_reason}
+            )
+            reply = client.create(model="claude", messages=[])
+            self.assertEqual(reply.choices[0].finish_reason, openai_reason)
+
+    def test_empty_usage_is_not_invented(self):
+        client, _ = anthropic_client_with({"content": [{"type": "text", "text": "x"}]})
+        reply = client.create(model="claude", messages=[])
+        self.assertIsNone(reply.usage)
+
+
+class TestAnthropicStreaming(PromptkitTestCase):
+    def test_text_deltas(self):
+        client, _ = anthropic_client_with(
+            sse(
+                {"type": "message_start", "message": {"usage": {"input_tokens": 3}}},
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "你"},
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "好"},
+                },
+                {"type": "message_stop"},
+            )
+        )
+        chunks = list(
+            client.create(
+                model="claude", messages=[{"role": "user", "content": "x"}], stream=True
+            )
+        )
+        pieces = [c.delta.content for c in chunks if c.delta is not None]
+        self.assertEqual(pieces, ["你", "好"])
+        self.assertEqual(chunks[0].usage.prompt_tokens, 3)
+
+    def test_tool_use_deltas(self):
+        client, _ = anthropic_client_with(
+            sse(
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                    },
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"city"'},
+                },
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": ': "北京"}'},
+                },
+                {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+            )
+        )
+        chunks = list(
+            client.create(model="claude", messages=[], stream=True)
+        )
+        calls = [chunk.delta.tool_calls[0] for chunk in chunks if chunk.delta and chunk.delta.tool_calls]
+        self.assertEqual(calls[0].id, "toolu_1")
+        self.assertEqual(calls[0].function.name, "get_weather")
+        self.assertEqual(
+            "".join(call.function.arguments for call in calls), '{"city": "北京"}'
+        )
+        self.assertEqual(chunks[-1].choices[0].finish_reason, "tool_calls")
+
+    def test_thinking_deltas(self):
+        client, _ = anthropic_client_with(
+            sse(
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": "嗯"},
+                }
+            )
+        )
+        chunks = list(client.create(model="claude", messages=[], stream=True))
+        self.assertEqual(chunks[0].delta.reasoning_content, "嗯")
+
+    def test_error_event_raises(self):
+        client, _ = anthropic_client_with(
+            sse(
+                {
+                    "type": "error",
+                    "error": {"type": "overloaded_error", "message": "Overloaded"},
+                }
+            )
+        )
+        with self.assertRaises(ClientError) as cm:
+            list(client.create(model="claude", messages=[], stream=True))
+        self.assertIn("overloaded_error", str(cm.exception))
+
+    def test_iter_sse_multiline_data(self):
+        lines = [
+            ": 心跳",
+            "event: content_block_delta",
+            'data: {"type": "content_block_delta", "index": 0,',
+            'data:  "delta": {"type": "text_delta", "text": "嗨"}}',
+            "",
+        ]
+        events = list(iter_sse(lines))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "content_block_delta")
+        self.assertEqual(events[0][1]["delta"]["text"], "嗨")
+
+    def test_iter_sse_skips_junk(self):
+        self.assertEqual(list(iter_sse([": ping", "", "data: not json", ""])), [])
+
+    def test_http_transport_posts_the_right_request(self):
+        fake = FakeHTTPResponse(body=b'{"content": [{"type": "text", "text": "ok"}]}')
+        client = AnthropicClient(api_key="sk-ant", timeout=5)
+        with mock.patch("urllib.request.urlopen", return_value=fake) as opener:
+            reply = client.create(model="claude", messages=[{"role": "user", "content": "x"}])
+        self.assertEqual(reply.text, "ok")
+        request = opener.call_args[0][0]
+        self.assertEqual(request.full_url, "https://api.anthropic.com/v1/messages")
+        self.assertEqual(request.get_header("X-api-key"), "sk-ant")
+        self.assertEqual(request.get_header("Anthropic-version"), "2023-06-01")
+        self.assertEqual(json.loads(request.data)["model"], "claude")
+        self.assertTrue(fake.closed)
+
+    def test_streaming_transport_closes_the_response(self):
+        lines = [
+            b'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}\n',
+            b"\n",
+        ]
+        fake = FakeHTTPResponse(lines)
+        client = AnthropicClient(api_key="k")
+        with mock.patch("urllib.request.urlopen", return_value=fake):
+            chunks = list(client.create(model="claude", messages=[], stream=True))
+        self.assertEqual([c.delta.content for c in chunks if c.delta], ["hi"])
+        self.assertTrue(fake.closed)
+
+    def test_http_errors_show_the_api_message(self):
+        error = urllib.error.HTTPError(
+            "https://api.anthropic.com/v1/messages",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(
+                b'{"type": "error", "error": {"type": "authentication_error",'
+                b' "message": "invalid x-api-key"}}'
+            ),
+        )
+        client = AnthropicClient(api_key="bad")
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(ClientError) as cm:
+                client.create(model="claude", messages=[{"role": "user", "content": "x"}])
+        self.assertIn("401", str(cm.exception))
+        self.assertIn("invalid x-api-key", str(cm.exception))
+
+
+class TestAgentMultiVendor(PromptkitTestCase):
+    def test_plain_agent_is_still_deepseek(self):
+        with mock.patch.dict("os.environ", {"DEEPSEEK_API_KEY": "sk-ds"}, clear=True):
+            agent = Agent(register_as_default=False)
+        self.assertEqual(agent.vendor, "deepseek")
+        self.assertEqual(agent.model, "deepseek-flash")
+        self.assertEqual(agent.base_url, "https://api.deepseek.com")
+        self.assertEqual(agent.api_key, "sk-ds")
+        self.assertIsInstance(agent.client, OpenAIClient)
+        # DeepSeek 的思考参数跟着厂商走，不是 Agent 写死的
+        self.assertEqual(agent.params["reasoning_effort"], "high")
+        self.assertEqual(agent.params["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_vendor_switches_model_base_url_and_client(self):
+        agent = Agent(vendor="anthropic", api_key="sk-ant", register_as_default=False)
+        self.assertEqual(agent.vendor, "anthropic")
+        self.assertEqual(agent.model, "claude-sonnet-4-5")
+        self.assertEqual(agent.base_url, "https://api.anthropic.com")
+        self.assertIsInstance(agent.client, AnthropicClient)
+        self.assertEqual(agent.client.api_key, "sk-ant")
+        self.assertEqual(agent.params, {"max_tokens": 4096})
+
+    def test_vendor_can_be_inferred_from_the_model(self):
+        agent = Agent(model="claude-sonnet-4-5", api_key="k", register_as_default=False)
+        self.assertEqual((agent.vendor, agent.model), ("anthropic", "claude-sonnet-4-5"))
+        agent = Agent(model="gpt-4o", api_key="k", register_as_default=False)
+        self.assertEqual(agent.vendor, "openai")
+        self.assertEqual(agent.base_url, "https://api.openai.com/v1")
+
+    def test_vendor_can_be_inferred_from_the_base_url(self):
+        agent = Agent(
+            base_url="http://localhost:11434/v1",
+            model="qwen2.5",
+            api_key="ollama",
+            register_as_default=False,
+        )
+        self.assertEqual(agent.vendor, "openai-compatible")
+        self.assertIsInstance(agent.client, OpenAIClient)
+        self.assertEqual(agent.client.base_url, "http://localhost:11434/v1")
+
+    def test_params_and_max_tokens_are_merged_over_vendor_defaults(self):
+        agent = Agent(
+            vendor="anthropic",
+            api_key="k",
+            params={"temperature": 0.2},
+            max_tokens=99,
+            timeout=3,
+            register_as_default=False,
+        )
+        self.assertEqual(agent.params["temperature"], 0.2)
+        self.assertEqual(agent.params["max_tokens"], 99)
+        self.assertEqual(agent.client.timeout, 3)
+
+    def test_missing_key_names_the_vendor_variable(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with mock.patch("promptkit.config.load_env_file"):
+                with self.assertRaises(ValueError) as cm:
+                    Agent(vendor="anthropic")
+        self.assertIn("ANTHROPIC_API_KEY", str(cm.exception))
+
+    def test_ask_with_anthropic_text_reply(self):
+        agent = Agent(vendor="anthropic", api_key="k", register_as_default=False)
+        seen = []
+
+        def transport(url, body, stream):
+            seen.append(body)
+            return {
+                "content": [{"type": "text", "text": "你好呀"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 3, "output_tokens": 2},
+            }
+
+        agent.client.transport = transport
+        handler, events = collect_events()
+        agent.bus.on(handler)
+
+        self.assertEqual(agent.ask("嗨"), "你好呀")
+        self.assertEqual(events[-1].type, EventType.MESSAGE_END)
+        # 系统提示被提到顶层，不进 messages
+        self.assertEqual(seen[0]["system"], "You are a helpful assistant.")
+        self.assertEqual(agent.history, [
+            {"role": "user", "content": "嗨"},
+            {"role": "assistant", "content": "你好呀"},
+        ])
+
+    def test_ask_with_anthropic_tool_loop(self):
+        def get_weather(city: str) -> str:
+            """查天气。"""
+            return f"{city} 晴"
+
+        replies = [
+            {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {"city": "北京"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            },
+            {"content": [{"type": "text", "text": "北京 晴"}], "stop_reason": "end_turn"},
+        ]
+        seen = []
+
+        def transport(url, body, stream):
+            seen.append(body)
+            return replies.pop(0)
+
+        agent = Agent(vendor="anthropic", api_key="k", register_as_default=False)
+        agent.client.transport = transport
+        handler, events = collect_events()
+        agent.bus.on(handler)
+
+        self.assertEqual(agent.ask("天气？", tools=[get_weather]), "北京 晴")
+
+        # 工具真的跑了，结果以 tool_result 块回给模型
+        results = [e.data for e in events if e.type == EventType.TOOL_RESULT]
+        self.assertEqual(results[0]["name"], "get_weather")
+        self.assertEqual(results[0]["result"], "北京 晴")
+        self.assertEqual([m["role"] for m in seen[1]["messages"]], ["user", "assistant", "user"])
+        self.assertEqual(
+            seen[1]["messages"][-1]["content"][0],
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "北京 晴"},
+        )
+        # 工具定义翻译成 input_schema
+        self.assertEqual(
+            seen[0]["tools"][0]["input_schema"]["properties"],
+            {"city": {"type": "string"}},
+        )
+        # 历史里留下的是 OpenAI 形状（换厂商不用转换）
+        self.assertEqual(agent.history[1]["tool_calls"][0]["id"], "toolu_1")
+
+    def test_ask_stream_with_anthropic_sse(self):
+        lines = sse(
+            {"type": "message_start", "message": {"usage": {"input_tokens": 4}}},
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "你"},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "好"},
+            },
+            {"type": "message_stop"},
+        )
+        agent = Agent(vendor="anthropic", api_key="k", register_as_default=False)
+        agent.client.transport = lambda url, body, stream: lines
+
+        events = list(agent.ask_stream("hi"))
+        deltas = [e.data["text"] for e in events if e.type == EventType.MESSAGE_DELTA]
+        self.assertEqual(deltas, ["你", "好"])
+        self.assertEqual(events[-1].type, EventType.MESSAGE_END)
+        self.assertEqual(events[-1].data["text"], "你好")
+        self.assertEqual(agent.history[-1]["content"], "你好")
+
+    def test_openai_vendor_does_not_leak_deepseek_params(self):
+        agent = Agent(vendor="openai", api_key="k", register_as_default=False)
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        self.assertEqual(agent.ask("hello"), "hi")
+        call = sdk.calls[0]
+        self.assertEqual(call["model"], "gpt-4o-mini")
+        self.assertNotIn("reasoning_effort", call)
+        self.assertNotIn("extra_body", call)
+
+    def test_structured_output_over_anthropic(self):
+        class Intent(BaseModel):
+            label: str
+
+        agent = Agent(vendor="anthropic", api_key="k", register_as_default=False)
+        agent.client.transport = lambda url, body, stream: {
+            "content": [{"type": "text", "text": '{"label": "退款"}'}],
+            "stop_reason": "end_turn",
+        }
+        value = Executor(agent=agent).run(
+            Prompt(role="user", content="意图？"), Intent
+        )
+        self.assertEqual(value.label, "退款")
+
+
+from promptkit.coding import (  # noqa: E402
+    ApplyChanges,
+    ApplyDiff,
+    ChangesOutput,
+    CodeFormatError,
+    CodingStep,
+    CommandError,
+    DiffError,
+    DiffOutput,
+    FilePatch,
+    FixLoop,
+    FullFileOutput,
+    GitCommit,
+    GitDiff,
+    ListDir,
+    LintStep,
+    ReadFileStep,
+    RunCommand,
+    RunTests,
+    Sandbox,
+    SandboxError,
+    SearchCode,
+    WriteFileStep,
+    apply_hunks,
+    apply_patch,
+    apply_patch_text,
+    default_coding_tools,
+    format_hits,
+    get_output,
+    git,
+    parse_patch,
+    run_command as coding_run_command,
+    strip_code_fence,
+    validate_patch,
+)
+from promptkit.coding.tools import (  # noqa: E402
+    ApplyDiffTool,
+    ListDirTool,
+    ReadFileTool,
+    RunCommandTool,
+    RunTestsTool,
+    SearchCodeTool,
+    WriteFileTool,
+)
+
+from promptkit.orchestrate import (  # noqa: E402
+    AggregateStep,
+    DelegateTool,
+    ExecutePlan,
+    LLMPlanner,
+    Orchestrator,
+    OrchestratorConfig,
+    Plan,
+    PlanError,
+    PlanResult,
+    PlanStep,
+    Planner,
+    RoleFactory,
+    Task,
+    TaskError,
+    TaskResult,
+    TemplatePlanner,
+    format_task_results,
+    plan_from,
+    structured_answer,
+    sub_agent,
+)
+
+# ==================== 记忆系统（memory） ====================
+class MemoryTestCase(PromptkitTestCase):
+    '''记忆测试的底子：临时文件 + 自动清理。'''
+
+    def temp_path(self, name="memory.db"):
+        import shutil
+
+        folder = tempfile.mkdtemp(prefix="pk-mem-")
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        return os.path.join(folder, name)
+
+    def temp_dir(self):
+        '''一个临时目录（当 `PROMPTKIT_DATA_DIR` 用）。'''
+        import shutil
+
+        folder = tempfile.mkdtemp(prefix="pk-data-")
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        return folder
+
+
+class RecordingMemory(Memory):
+    '''记录每一次调用的假记忆（断言「谁在什么时候读写」用）。'''
+
+    def __init__(self, values=None, hits=None):
+        self.values = dict(values or {})
+        self.hits = list(hits or [])
+        self.events = []
+        self.recalls = []
+
+    def read(self, key, default=None):
+        self.events.append(("read", key))
+        return self.values.get(str(key), default)
+
+    def write(self, key, value):
+        self.events.append(("write", key))
+        self.values[str(key)] = value
+
+    def recall(self, query, top_k=5):
+        self.events.append(("recall", query))
+        self.recalls.append((query, top_k))
+        return list(self.hits)
+
+    def forget(self, key):
+        self.events.append(("forget", key))
+        return self.values.pop(str(key), None) is not None
+
+    def keys(self):
+        return list(self.values)
+
+
+def walk_steps(step):
+    '''遍历一棵步骤树。'''
+    yield step
+    for child in step.children():
+        yield from walk_steps(child)
+
+
+class ReverseReranker(Reranker):
+    def __init__(self):
+        self.calls = []
+
+    def rerank(self, query, items, top_k=None):
+        self.calls.append((query, len(items), top_k))
+        return list(reversed(list(items)))[:top_k]
+
+
+class FakeChromaCollection:
+    '''假的 chromadb Collection：只实现适配器用到的那几个方法。'''
+
+    def __init__(self):
+        self.rows = {}
+
+    def upsert(self, ids, embeddings, documents, metadatas):
+        for index, item_id in enumerate(ids):
+            self.rows[str(item_id)] = {
+                "embedding": list(embeddings[index]),
+                "document": documents[index],
+                "metadata": dict(metadatas[index]),
+            }
+
+    def query(self, query_embeddings, n_results, where, include):
+        vector = list(query_embeddings[0])
+        matched = [
+            (item_id, row)
+            for item_id, row in self.rows.items()
+            if _metadata_matches(row["metadata"], where)
+        ]
+        matched.sort(
+            key=lambda pair: cosine(vector, pair[1]["embedding"]), reverse=True
+        )
+        matched = matched[:n_results]
+        return {
+            "ids": [[item_id for item_id, _ in matched]],
+            "documents": [[row["document"] for _, row in matched]],
+            "metadatas": [[dict(row["metadata"]) for _, row in matched]],
+            "distances": [
+                [1.0 - cosine(vector, row["embedding"]) for _, row in matched]
+            ],
+        }
+
+    def get(self, where=None, include=None):
+        return {
+            "ids": [
+                item_id
+                for item_id, row in self.rows.items()
+                if _metadata_matches(row["metadata"], where)
+            ]
+        }
+
+    def delete(self, ids=None, where=None):
+        doomed = {str(item) for item in (ids or [])}
+        if where:
+            doomed |= {
+                item_id
+                for item_id, row in self.rows.items()
+                if _metadata_matches(row["metadata"], where)
+            }
+        for item_id in doomed:
+            self.rows.pop(item_id, None)
+
+
+def _metadata_matches(metadata, where):
+    if not where:
+        return True
+    return all(metadata.get(key) == value for key, value in where.items())
+
+
+class _FakePoint:
+    def __init__(self, id, vector, payload):
+        self.id = id
+        self.vector = list(vector)
+        self.payload = dict(payload)
+
+
+class _FakeFilter:
+    def __init__(self, must=None):
+        self.must = list(must or [])
+
+
+class _FakeFieldCondition:
+    def __init__(self, key, match):
+        self.key = key
+        self.match = match
+
+
+class _FakeMatchValue:
+    def __init__(self, value):
+        self.value = value
+
+
+class _FakeHasIdCondition:
+    def __init__(self, has_id):
+        self.has_id = list(has_id)
+
+
+class FakeQdrantModels:
+    '''假的 qdrant_client.models。'''
+
+    PointStruct = _FakePoint
+    Filter = _FakeFilter
+    FieldCondition = _FakeFieldCondition
+    MatchValue = _FakeMatchValue
+    HasIdCondition = _FakeHasIdCondition
+
+
+class FakeQdrantClient:
+    '''假的 QdrantClient：只实现适配器用到的那几个方法。'''
+
+    def __init__(self, **kwargs):
+        self.kwargs = dict(kwargs)
+        self.points = {}
+        self.upserts = []
+        self.deletes = []
+
+    def upsert(self, collection_name, points):
+        self.upserts.append(list(points))
+        for point in points:
+            self.points[str(point.id)] = point
+
+    def _matches(self, point, condition):
+        for item in getattr(condition, "must", []):
+            if isinstance(item, _FakeHasIdCondition):
+                if str(point.id) not in {str(value) for value in item.has_id}:
+                    return False
+            elif point.payload.get(item.key) != item.match.value:
+                return False
+        return True
+
+    def query_points(self, collection_name, query, limit, query_filter, with_payload):
+        matched = [
+            (item_id, point)
+            for item_id, point in self.points.items()
+            if self._matches(point, query_filter)
+        ]
+        matched.sort(key=lambda pair: cosine(query, pair[1].vector), reverse=True)
+        return SimpleNamespace(
+            points=[
+                SimpleNamespace(
+                    id=item_id,
+                    payload=dict(point.payload),
+                    score=cosine(query, point.vector),
+                )
+                for item_id, point in matched[:limit]
+            ]
+        )
+
+    def delete(self, collection_name, points_selector):
+        self.deletes.append(points_selector)
+        for item_id in [
+            item_id
+            for item_id, point in self.points.items()
+            if self._matches(point, points_selector)
+        ]:
+            self.points.pop(item_id, None)
+
+    def count(self, collection_name, count_filter, exact):
+        return SimpleNamespace(
+            count=len(
+                [
+                    1
+                    for point in self.points.values()
+                    if self._matches(point, count_filter)
+                ]
+            )
+        )
+
+
+class KeywordEmbedding:
+    '''按关键词打分的假向量：结果**完全确定**，不受哈希碰撞影响。'''
+
+    def __init__(self, keywords):
+        self.keywords = list(keywords)
+        self.dimension = len(self.keywords)
+
+    def embed(self, text):
+        lowered = str(text or "")
+        return [1.0 if keyword in lowered else 0.0 for keyword in self.keywords]
+
+    def embed_many(self, texts):
+        return [self.embed(text) for text in texts]
+
+
+class TestMemoryInterface(MemoryTestCase):
+    def test_in_memory_roundtrip(self):
+        memory = InMemoryMemory(namespace="u1")
+        memory.write("level", "中级")
+        self.assertEqual(memory.read("level"), "中级")
+        self.assertEqual(memory.namespace, "u1")
+        self.assertTrue(memory.has("level"))
+        self.assertIn("level", memory)
+        self.assertFalse(memory.has("missing"))
+        self.assertEqual(memory.read("missing", "默认"), "默认")
+        self.assertEqual(len(memory), 1)
+        self.assertTrue(memory.forget("level"))
+        self.assertFalse(memory.forget("level"))
+        self.assertEqual(memory.read("level"), None)
+
+    def test_in_memory_can_hold_none(self):
+        # 关键区分：值真的是 None，和「没有这个键」
+        memory = InMemoryMemory()
+        memory.write("x", None)
+        self.assertTrue(memory.has("x"))
+        self.assertIsNone(memory.read("x", "默认"))
+
+    def test_default_recall_is_not_implemented(self):
+        with self.assertRaises(NotImplementedError) as cm:
+            InMemoryMemory().recall("x")
+        self.assertIn("VectorMemory", str(cm.exception))
+
+    def test_default_forget_is_not_implemented(self):
+        class PureReadWrite(Memory):
+            def read(self, key, default=None):
+                return default
+
+            def write(self, key, value):
+                pass
+
+        with self.assertRaises(NotImplementedError):
+            PureReadWrite().forget("x")
+
+    def test_item_text_accepts_three_shapes(self):
+        self.assertEqual(format_memories([MemoryItem(id="a", text="甲")]), "[1] 甲")
+        self.assertEqual(format_memories([{"text": "乙"}]), "[1] 乙")
+        self.assertEqual(format_memories(["丙"]), "[1] 丙")
+
+    def test_format_memories_options(self):
+        items = [
+            {"text": "甲", "score": 0.912},
+            {"text": ""},                      # 空内容跳过
+            MemoryItem(id="b", text="乙" * 20),
+        ]
+        self.assertEqual(format_memories(items, numbered=False), "甲\n" + "乙" * 20)
+        self.assertIn("相似度 0.91", format_memories(items, with_score=True))
+        self.assertTrue(format_memories(items, max_chars=5).splitlines()[1].endswith("…"))
+
+    def test_memory_item_to_dict(self):
+        item = MemoryItem(id="a#0", text="甲", metadata={"key": "a"}, score=0.123456)
+        self.assertEqual(item.key, "a")
+        self.assertEqual(
+            item.to_dict(),
+            {"text": "甲", "score": 0.1235, "id": "a#0", "metadata": {"key": "a"}},
+        )
+        self.assertEqual(item.to_dict(include_metadata=False), {"text": "甲", "score": 0.1235, "id": "a#0"})
+
+
+class TestTokenBudget(MemoryTestCase):
+    def test_estimate_tokens(self):
+        self.assertEqual(estimate_tokens(""), 0)
+        self.assertEqual(estimate_tokens("abcd"), 1)
+        self.assertEqual(estimate_tokens("abcdefgh"), 2)
+        self.assertEqual(estimate_tokens("你好世界"), 4)
+        # 混排：中文按字、英文按 4 字符
+        self.assertEqual(estimate_tokens("你好abcd"), 3)
+
+    def test_trim_keeps_order_and_drops_overflow(self):
+        budget = TokenBudget(max_tokens=4)
+        items = [{"text": "一二"}, {"text": "三四"}, {"text": "五六七八"}]
+        kept = budget.trim(items)
+        self.assertEqual(kept, items[:2])
+        self.assertLessEqual(budget.count_items(kept), 4)
+
+    def test_trim_truncates_the_first_when_it_alone_overflows(self):
+        budget = TokenBudget(max_tokens=3)
+        kept = budget.trim([{"text": "一二三四五六七八九十"}])
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0]["text"].endswith("…"))
+        self.assertLessEqual(budget.count(kept[0]["text"]), 3)
+
+    def test_trim_preserves_item_type(self):
+        budget = TokenBudget(max_tokens=2)
+        kept = budget.trim([MemoryItem(id="a", text="一二三四")])
+        self.assertIsInstance(kept[0], MemoryItem)
+        self.assertTrue(kept[0].text.endswith("…"))
+
+    def test_custom_tokenizer(self):
+        budget = TokenBudget(max_tokens=2, tokenizer=lambda text: len(text.split()))
+        self.assertEqual(budget.count("a b c"), 3)
+        kept = budget.trim([{"text": "a b"}, {"text": "c d"}])
+        self.assertEqual(len(kept), 1)
+
+    def test_invalid_budget(self):
+        for value in (0, -1, "10"):
+            with self.assertRaises(ValueError):
+                TokenBudget(max_tokens=value)
+
+    def test_count_items(self):
+        self.assertEqual(
+            TokenBudget().count_items([{"text": "abcd"}, {"text": "efgh"}]), 2
+        )
+
+
+class TestKVMemory(MemoryTestCase):
+    def test_roundtrip_of_json_types(self):
+        memory = KVMemory(self.temp_path(), namespace="u1")
+        values = {
+            "text": "中级",
+            "number": 42,
+            "flag": True,
+            "nothing": None,
+            "list": [1, 2, 3],
+            "dict": {"a": 1},
+        }
+        for key, value in values.items():
+            memory.write(key, value)
+        for key, value in values.items():
+            self.assertEqual(memory.read(key), value)
+        memory.close()
+
+    def test_missing_returns_default(self):
+        memory = KVMemory(self.temp_path())
+        self.assertEqual(memory.read("nope"), None)
+        self.assertEqual(memory.read("nope", "兜底"), "兜底")
+        self.assertFalse(memory.has("nope"))
+        memory.close()
+
+    def test_overwrite_and_forget(self):
+        memory = KVMemory(self.temp_path())
+        memory.write("level", "初级")
+        memory.write("level", "高级")
+        self.assertEqual(memory.read("level"), "高级")
+        self.assertTrue(memory.forget("level"))
+        self.assertFalse(memory.forget("level"))
+        self.assertEqual(memory.read("level"), None)
+        memory.close()
+
+    def test_keys_items_count_clear(self):
+        memory = KVMemory(self.temp_path(), namespace="u1")
+        memory.write("b", 2)
+        memory.write("a", 1)
+        self.assertEqual(memory.keys(), ["a", "b"])        # 有序，方便 diff
+        self.assertEqual(memory.items(), {"a": 1, "b": 2})
+        self.assertEqual(memory.count(), 2)
+        self.assertEqual(len(memory), 2)
+        memory.clear()
+        self.assertEqual(memory.count(), 0)
+        memory.close()
+
+    def test_namespaces_are_isolated(self):
+        path = self.temp_path()
+        alice = KVMemory(path, namespace="alice")
+        bob = KVMemory(path, namespace="bob")
+        alice.write("level", "中级")
+        bob.write("level", "入门")
+        self.assertEqual(alice.read("level"), "中级")
+        self.assertEqual(bob.read("level"), "入门")
+        alice.clear()
+        self.assertEqual(alice.count(), 0)
+        self.assertEqual(bob.read("level"), "入门")
+        self.assertEqual(alice.namespaces(), ["bob"])
+        alice.close()
+        bob.close()
+
+    def test_persists_across_instances(self):
+        path = self.temp_path()
+        first = KVMemory(path)
+        first.write("level", "中级")
+        first.close()
+        second = KVMemory(path)
+        self.assertEqual(second.read("level"), "中级")
+        second.close()
+
+    def test_in_memory_database(self):
+        memory = KVMemory(":memory:")
+        memory.write("x", 1)
+        self.assertEqual(memory.read("x"), 1)
+        memory.close()
+
+    def test_pydantic_and_dataclass_values(self):
+        import dataclasses
+
+        class Point(BaseModel):
+            x: int
+
+        @dataclasses.dataclass
+        class Plain:
+            y: int
+
+        memory = KVMemory(self.temp_path())
+        memory.write("point", Point(x=1))
+        memory.write("plain", Plain(y=2))
+        self.assertEqual(memory.read("point"), {"x": 1})
+        self.assertEqual(memory.read("plain"), {"y": 2})
+        memory.close()
+
+    def test_unserializable_value_raises(self):
+        memory = KVMemory(self.temp_path())
+        with self.assertRaises(MemoryError) as cm:
+            memory.write("bad", object())
+        self.assertIn("JSON", str(cm.exception))
+        memory.close()
+
+    def test_context_manager_closes(self):
+        with KVMemory(self.temp_path()) as memory:
+            memory.write("x", 1)
+        self.assertIsNone(memory._conn)
+
+
+class TestSessionMemory(MemoryTestCase):
+    def test_reads_the_bound_agent(self):
+        agent = FakeChatAgent()
+        agent.history = [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": "在"},
+        ]
+        agent.start_prompts = [{"role": "system", "content": "你是导师"}]
+        agent.rebuild()
+        memory = SessionMemory(agent)
+
+        self.assertEqual(memory.read("history")[0]["content"], "你好")
+        self.assertEqual(memory.read("turns"), 1)
+        self.assertEqual(memory.read("last")["content"], "在")
+        self.assertEqual(memory.read("last_user"), "你好")
+        self.assertEqual(memory.read("last_assistant"), "在")
+        self.assertEqual(memory.read("system"), "你是导师")
+        self.assertIn("用户：你好", memory.read("text"))
+        self.assertEqual(memory.read("nope", "兜底"), "兜底")
+
+    def test_messages_include_system_only_when_asked(self):
+        agent = FakeChatAgent()
+        agent.history = [{"role": "user", "content": "hi"}]
+        agent.start_prompts = [{"role": "system", "content": "sys"}]
+        agent.rebuild()
+        # `messages` 就是「真正发给模型的那串」，system 当然在里面
+        self.assertEqual(SessionMemory(agent).read("messages")[0]["role"], "system")
+        # `history` 默认不含 system
+        self.assertEqual(SessionMemory(agent).read("history")[0]["role"], "user")
+        with_system = SessionMemory(agent, include_system=True)
+        self.assertEqual(with_system.read("history")[0]["role"], "system")
+        self.assertIn("系统：sys", with_system.read("text"))
+
+    def test_uses_the_default_agent_when_none(self):
+        agent = FakeChatAgent()
+        agent.history = [{"role": "user", "content": "默认"}]
+        Agent.set_default(agent)
+        self.assertEqual(SessionMemory().read("last_user"), "默认")
+
+    def test_without_any_agent_raises(self):
+        Agent.set_default(None)
+        with self.assertRaises(MemoryError) as cm:
+            SessionMemory().read("history")
+        self.assertIn("Agent()", str(cm.exception))
+
+    def test_write_is_rejected(self):
+        with self.assertRaises(MemoryError) as cm:
+            SessionMemory(FakeChatAgent()).write("history", [])
+        self.assertIn("只读", str(cm.exception))
+
+    def test_recall_is_not_implemented(self):
+        with self.assertRaises(NotImplementedError):
+            SessionMemory(FakeChatAgent()).recall("x")
+
+
+class TestChunkingAndCosine(MemoryTestCase):
+    def test_chunk_text_sizes_and_overlap(self):
+        text = "".join(str(i % 10) for i in range(25))
+        chunks = memory_chunk_text(text, size=10, overlap=3)
+        self.assertEqual(len(chunks), 4)
+        self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
+        # 相邻块重叠 3 个字符：第二块的前 3 个字符 == 第一块的后 3 个
+        self.assertEqual(chunks[0][-3:], chunks[1][:3])
+        self.assertEqual(chunks[0] + chunks[1][3:], text[:17])
+
+    def test_chunk_text_edge_cases(self):
+        self.assertEqual(memory_chunk_text(""), [])
+        self.assertEqual(memory_chunk_text(None), [])
+        self.assertEqual(memory_chunk_text("   "), [])          # 全是空白不切
+        self.assertEqual(memory_chunk_text("abc", size=10, overlap=0), ["abc"])
+
+    def test_chunk_text_rejects_bad_params(self):
+        with self.assertRaises(ValueError):
+            memory_chunk_text("abc", size=0)
+        with self.assertRaises(ValueError):
+            memory_chunk_text("abc", size=5, overlap=5)
+
+    def test_cosine(self):
+        self.assertAlmostEqual(cosine([1, 0], [1, 0]), 1.0)
+        self.assertAlmostEqual(cosine([1, 0], [0, 1]), 0.0)
+        self.assertAlmostEqual(cosine([1, 0], [-1, 0]), -1.0)
+        self.assertEqual(cosine([0, 0], [1, 1]), 0.0)
+        self.assertEqual(cosine([], [1]), 0.0)
+        with self.assertRaises(ValueError):
+            cosine([1, 2], [1])
+
+
+class TestInMemoryVectorStore(MemoryTestCase):
+    def test_upsert_search_and_ranking(self):
+        store = InMemoryVectorStore()
+        store.upsert("u1", MemoryItem(id="a", text="甲", vector=[1.0, 0.0]))
+        store.upsert("u1", MemoryItem(id="b", text="乙", vector=[0.0, 1.0]))
+        hits = store.search("u1", [1.0, 0.0], top_k=2)
+        self.assertEqual(hits[0].id, "a")
+        self.assertAlmostEqual(hits[0].score, 1.0)
+        self.assertEqual(store.count("u1"), 2)
+
+    def test_namespace_isolation(self):
+        store = InMemoryVectorStore()
+        store.upsert("u1", MemoryItem(id="a", text="甲", vector=[1.0]))
+        store.upsert("u2", MemoryItem(id="b", text="乙", vector=[1.0]))
+        self.assertEqual([item.id for item in store.search("u1", [1.0])], ["a"])
+        self.assertEqual(store.count("u2"), 1)
+        store.clear("u1")
+        self.assertEqual(store.count("u1"), 0)
+        self.assertEqual(store.count("u2"), 1)
+
+    def test_delete_by_ids_and_by_key(self):
+        store = InMemoryVectorStore()
+        store.upsert("u1", MemoryItem(id="a#0", text="甲", vector=[1.0], metadata={"key": "a"}))
+        store.upsert("u1", MemoryItem(id="a#1", text="甲2", vector=[1.0], metadata={"key": "a"}))
+        store.upsert("u1", MemoryItem(id="b#0", text="乙", vector=[1.0], metadata={"key": "b"}))
+        self.assertEqual(store.delete("u1", ids=["a#0"]), 1)
+        self.assertEqual(store.delete("u1", key="a"), 1)
+        self.assertEqual(store.count("u1"), 1)
+
+    def test_upsert_copies_metadata(self):
+        store = InMemoryVectorStore()
+        metadata = {"key": "a"}
+        store.upsert("u1", MemoryItem(id="a#0", text="甲", vector=[1.0], metadata=metadata))
+        metadata["key"] = "改掉了"
+        self.assertEqual(store.search("u1", [1.0])[0].key, "a")
+
+
+class TestVectorMemory(MemoryTestCase):
+    def make_memory(self, **kwargs):
+        options = {
+            "chunk_size": 40,
+            "overlap": 5,
+            "namespace": "u1",
+        }
+        options.update(kwargs)
+        return VectorMemory(HashEmbedding(dimension=128), **options)
+
+    def test_write_chunks_and_count(self):
+        memory = self.make_memory()
+        text = "退款政策：" + "无理由退款。" * 20
+        memory.write("notes", text)
+        self.assertGreater(memory.count(), 1)
+        self.assertEqual(memory.count(), len(memory_chunk_text(text, 40, 5)))
+
+    def test_recall_prefers_relevant_chunks(self):
+        memory = self.make_memory()
+        memory.write("refund", "退款政策：7 天内无理由退款，需要订单号。")
+        memory.write("weather", "今天多云转晴，最高气温 26 度，适合出门。")
+        hits = memory.recall("退款需要订单号吗", top_k=2)
+        self.assertTrue(hits)
+        self.assertIn("退款", hits[0]["text"])
+        self.assertGreater(hits[0]["score"], 0.0)
+        self.assertIn("metadata", hits[0])
+
+    def test_min_score_filters_noise(self):
+        memory = VectorMemory(KeywordEmbedding(["退款", "天气"]), namespace="u1")
+        memory.write("refund", "退款政策：7 天内无理由退款。")
+        self.assertEqual(memory.recall("量子色动力学胶子禁闭"), [])
+        # 放宽阈值就又能看到「零相关」的东西
+        loose = VectorMemory(
+            KeywordEmbedding(["退款", "天气"]), namespace="u1", min_score=None
+        )
+        loose.write("refund", "退款政策：7 天内无理由退款。")
+        self.assertTrue(loose.recall("量子色动力学胶子禁闭", top_k=1))
+
+    def test_overwrite_removes_stale_chunks(self):
+        memory = self.make_memory()
+        memory.write("notes", "一" * 200)
+        before = memory.count()
+        memory.write("notes", "短")
+        self.assertEqual(memory.count(), 1)
+        self.assertLess(memory.count(), before)
+        self.assertEqual(memory.recall("短", top_k=1)[0]["text"], "短")
+
+    def test_write_empty_clears(self):
+        memory = self.make_memory()
+        memory.write("notes", "有内容")
+        self.assertEqual(memory.count(), 1)
+        memory.write("notes", "")
+        self.assertEqual(memory.count(), 0)
+
+    def test_forget(self):
+        memory = self.make_memory()
+        memory.write("notes", "有内容")
+        self.assertTrue(memory.forget("notes"))
+        self.assertFalse(memory.forget("notes"))
+        self.assertEqual(memory.recall("有内容"), [])
+
+    def test_read_is_not_supported(self):
+        with self.assertRaises(NotImplementedError) as cm:
+            self.make_memory().read("notes")
+        self.assertIn("KVMemory", str(cm.exception))
+
+    def test_budget_is_applied(self):
+        memory = self.make_memory(budget=TokenBudget(max_tokens=10))
+        memory.write("notes", "退款政策：" + "无理由退款。" * 20)
+        hits = memory.recall("退款", top_k=5)
+        self.assertEqual(len(hits), 1)                    # 只留得下一条
+        self.assertLessEqual(
+            estimate_tokens(hits[0]["text"]), 10
+        )
+
+    def test_reranker_is_called_and_can_reorder(self):
+        reranker = ReverseReranker()
+        memory = self.make_memory(reranker=reranker)
+        memory.write("a", "退款政策：7 天无理由。")
+        memory.write("b", "退款需要订单号。")
+        hits = memory.recall("退款", top_k=2)
+        self.assertTrue(reranker.calls)
+        query, candidate_count, top_k = reranker.calls[0]
+        self.assertEqual((query, top_k), ("退款", 2))
+        self.assertGreaterEqual(candidate_count, 1)
+        self.assertEqual(len(hits), 2)
+
+    def test_max_age_filters_old_items(self):
+        store = InMemoryVectorStore()
+        memory = self.make_memory(store=store, max_age=10)
+        memory.write("notes", "退款政策")
+        for item in store._items.values():
+            item.metadata["ts"] = 1.0                      # 很久以前
+        self.assertEqual(memory.recall("退款"), [])
+
+    def test_decay_pushes_old_items_down(self):
+        import time
+
+        store = InMemoryVectorStore()
+        memory = self.make_memory(store=store, decay_half_life=1.0, min_score=None)
+        memory.write("old", "退款政策 甲")
+        memory.write("new", "退款政策 乙")
+        for (_, item_id), item in store._items.items():
+            item.metadata["ts"] = 1.0 if item_id.startswith("old") else time.time()
+        hits = memory.recall("退款政策", top_k=2)
+        self.assertEqual(hits[0]["metadata"]["key"], "new")
+
+    def test_clear(self):
+        memory = self.make_memory()
+        memory.write("a", "甲")
+        memory.clear()
+        self.assertEqual(memory.count(), 0)
+
+    def test_embedding_client_is_required(self):
+        with self.assertRaises(ValueError):
+            VectorMemory(None)
+
+
+class TestMemorySteps(MemoryTestCase):
+    def test_read_memory(self):
+        memory = RecordingMemory({"level": "中级"})
+        ctx = Workflow(
+            ReadMemory(memory, "level", output_key="level"),
+        ).run()
+        self.assertEqual(ctx["level"], "中级")
+        self.assertEqual(memory.events, [("read", "level")])
+        self.assertIn("read_memory:level", ctx.trace)
+
+    def test_read_memory_defaults_output_to_key_name(self):
+        memory = RecordingMemory()
+        ctx = Workflow(ReadMemory(memory, "level", default="新手")).run()
+        self.assertEqual(ctx["level"], "新手")
+
+    def test_read_memory_dynamic_key(self):
+        memory = RecordingMemory({"u1_level": "高级"})
+        ctx = Workflow(
+            ReadMemory(memory, Var("who") + "_level", output_key="level"),
+        ).run(who="u1")
+        self.assertEqual(ctx["level"], "高级")
+
+    def test_write_memory_literal_expression_and_from_key(self):
+        memory = RecordingMemory()
+        ctx = Workflow(
+            WriteMemory(memory, "a", "字面量"),
+            WriteMemory(memory, "b", Var("n") * 2),
+            WriteMemory(memory, "c", from_key="n"),
+        ).run(n=3)
+        self.assertEqual(memory.values, {"a": "字面量", "b": 6, "c": 3})
+        self.assertIn("write_memory:a", ctx.trace)
+
+    def test_write_memory_skips_missing_variable(self):
+        memory = RecordingMemory()
+        ctx = Workflow(WriteMemory(memory, "c", from_key="nope")).run()
+        self.assertEqual(memory.values, {})
+        self.assertIn("write_memory:skip", ctx.trace)
+
+    def test_write_memory_can_write_none_when_missing(self):
+        memory = RecordingMemory()
+        Workflow(WriteMemory(memory, "c", from_key="nope", missing="write")).run()
+        self.assertEqual(memory.values, {"c": None})
+
+    def test_write_memory_needs_a_source(self):
+        with self.assertRaises(ValueError):
+            WriteMemory(RecordingMemory(), "k")
+
+    def test_forget_memory(self):
+        memory = RecordingMemory({"level": "中级"})
+        ctx = Workflow(ForgetMemory(memory, "level")).run()
+        self.assertEqual(memory.events, [("forget", "level")])
+        self.assertIn("forget_memory:level:ok", ctx.trace)
+
+    def test_steps_validate_the_memory_object(self):
+        with self.assertRaises(TypeError):
+            ReadMemory(object(), "k")
+        with self.assertRaises(TypeError):
+            WriteMemory(object(), "k", 1)
+        with self.assertRaises(TypeError):
+            ForgetMemory(object(), "k")
+
+    def test_memory_step_compiles_into_plain_steps(self):
+        memory = RecordingMemory({"a": 1, "b": 2})
+        step = MemoryStep(memory, read=["a", "b"], write=["w"])
+        ctx = Workflow(step).run(w="值")
+        self.assertEqual([s.name for s in step.children()], ["read_memory", "read_memory", "write_memory"])
+        self.assertEqual(ctx["a"], 1)
+        self.assertEqual(memory.values["w"], "值")
+        self.assertIn("read=2", step.describe())
+        self.assertIn("write=1", step.describe())
+
+    def test_memory_step_with_recall_config(self):
+        memory = RecordingMemory(hits=[{"text": "退款政策", "score": 0.9}])
+        step = MemoryStep(
+            memory,
+            recall=RecallConfig(query_key="q", output_key="hits", top_k=3),
+        )
+        ctx = Workflow(step).run(q="退款")
+        self.assertIn("退款政策", ctx["hits"])
+        self.assertEqual(memory.recalls, [("退款", 3)])
+        self.assertIn("recall", step.describe())
+
+    def test_memory_step_accepts_a_recall_dict(self):
+        memory = RecordingMemory(hits=[{"text": "x"}])
+        step = MemoryStep(memory, recall={"query_key": "q", "output_key": "hits"})
+        ctx = Workflow(step).run(q="问题")
+        self.assertEqual(ctx["hits"], "[1] x")
+
+    def test_memory_step_tuple_write(self):
+        memory = RecordingMemory()
+        Workflow(MemoryStep(memory, write=[("key_a", "var_a")])).run(var_a="值")
+        self.assertEqual(memory.values["key_a"], "值")
+
+    def test_memory_step_needs_something_to_do(self):
+        with self.assertRaises(ValueError):
+            MemoryStep(RecordingMemory())
+
+    def test_memory_step_counts_as_one_trace_entry(self):
+        memory = RecordingMemory({"a": 1})
+        ctx = Workflow(MemoryStep(memory, read=["a"])).run()
+        self.assertEqual(ctx.trace.count("memory"), 1)
+
+
+class TestRecallMemory(MemoryTestCase):
+    HITS = [
+        {"text": "退款政策：7 天无理由", "score": 0.9},
+        {"text": "发货时间：48 小时内", "score": 0.2},
+    ]
+
+    def test_default_output_is_readable_text(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(
+            RecallMemory(memory, query=Var("q"), output_key="recalled", top_k=2),
+        ).run(q="退款")
+        self.assertEqual(
+            ctx["recalled"], "[1] 退款政策：7 天无理由\n[2] 发货时间：48 小时内"
+        )
+        self.assertEqual(memory.recalls, [("退款", 2)])
+        self.assertIn("recall_memory:2", ctx.trace)
+
+    def test_raw_output_is_structured(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(
+            RecallMemory(memory, query="退款", output_key="raw", raw=True)
+        ).run()
+        self.assertEqual(ctx["raw"], self.HITS)
+
+    def test_query_key_reads_the_context(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(
+            RecallMemory(memory, query_key="usr_input", output_key="hits"),
+        ).run(usr_input="发货")
+        self.assertEqual(memory.recalls[0][0], "发货")
+        self.assertTrue(ctx["hits"])
+
+    def test_literal_query(self):
+        memory = RecordingMemory(hits=self.HITS)
+        Workflow(RecallMemory(memory, query="写死的查询")).run()
+        self.assertEqual(memory.recalls[0][0], "写死的查询")
+
+    def test_empty_query_skips_recall(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(RecallMemory(memory, query_key="q", output_key="hits")).run(q="  ")
+        self.assertEqual(memory.recalls, [])
+        self.assertEqual(ctx["hits"], "")
+        self.assertIn("recall_memory:skip", ctx.trace)
+
+    def test_min_score_filters(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(
+            RecallMemory(memory, query="x", output_key="hits", min_score=0.5)
+        ).run()
+        self.assertEqual(ctx["hits"], "[1] 退款政策：7 天无理由")
+
+    def test_budget_trims(self):
+        memory = RecordingMemory(hits=self.HITS)
+        ctx = Workflow(
+            RecallMemory(
+                memory, query="x", output_key="hits", budget=TokenBudget(max_tokens=4)
+            )
+        ).run()
+        self.assertNotIn("发货时间", ctx["hits"])
+
+    def test_max_chars_truncates_each_item(self):
+        memory = RecordingMemory(hits=[{"text": "甲" * 50, "score": 0.9}])
+        ctx = Workflow(
+            RecallMemory(memory, query="x", output_key="hits", max_chars=10)
+        ).run()
+        self.assertEqual(ctx["hits"], "[1] " + "甲" * 9 + "…")
+
+    def test_needs_a_query(self):
+        with self.assertRaises(ValueError):
+            RecallMemory(RecordingMemory())
+
+    def test_needs_a_recall_capable_memory(self):
+        with self.assertRaises(TypeError):
+            RecallMemory(InMemoryMemory(), query="x")
+
+    def test_top_k_validation(self):
+        with self.assertRaises(ValueError):
+            RecallMemory(RecordingMemory(), query="x", top_k=0)
+
+    def test_describe(self):
+        step = RecallMemory(RecordingMemory(), query_key="q", top_k=3)
+        self.assertIn("top_k=3", step.describe())
+        self.assertIn("-> recalled", step.describe())
+
+
+class TestRecallMemoryTool(MemoryTestCase):
+    def make_tool(self, memory=None, **kwargs):
+        memory = memory if memory is not None else RecordingMemory(
+            hits=[
+                {"text": "退款政策：7 天无理由", "score": 0.9, "metadata": {"owner": "u1", "phone": "123"}},
+                {"text": "发货时间：48 小时内", "score": 0.4, "metadata": {"owner": "u1"}},
+            ]
+        )
+        return RecallMemoryTool(memory, **kwargs), memory
+
+    def test_returns_results_and_calls_recall(self):
+        tool, memory = self.make_tool()
+        result = tool.run("退款")
+        self.assertEqual(result["query"], "退款")
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(memory.recalls, [("退款", 3)])
+        self.assertEqual(result["results"][0]["text"], "退款政策：7 天无理由")
+
+    def test_tool_call_returns_json_text(self):
+        tool, _ = self.make_tool()
+        payload = json.loads(tool.call({"query": "退款", "top_k": 2}))
+        self.assertEqual(payload["count"], 2)
+
+    def test_top_k_is_capped(self):
+        tool, memory = self.make_tool()
+        tool.run("x", top_k=99)
+        self.assertEqual(memory.recalls[0][1], 5)          # max_top_k 默认 5
+
+    def test_call_limit(self):
+        tool, memory = self.make_tool(max_calls=2)
+        tool.run("a")
+        tool.run("b")
+        third = tool.run("c")
+        self.assertIn("error", third)
+        self.assertEqual(len(memory.recalls), 2)
+        self.assertEqual(tool.calls, 2)
+        tool.reset()
+        self.assertEqual(tool.calls, 0)
+        self.assertEqual(tool.run("d")["count"], 2)
+
+    def test_empty_query_is_rejected(self):
+        tool, memory = self.make_tool()
+        self.assertIn("error", tool.run("   "))
+        self.assertEqual(memory.recalls, [])
+
+    def test_long_items_are_truncated(self):
+        tool, _ = self.make_tool(
+            RecordingMemory(hits=[{"text": "甲" * 100, "score": 0.9}]),
+            max_item_chars=10,
+        )
+        text = tool.run("x")["results"][0]["text"]
+        self.assertEqual(len(text), 10)
+        self.assertTrue(text.endswith("…"))
+
+    def test_metadata_is_hidden_by_default(self):
+        tool, _ = self.make_tool()
+        self.assertNotIn("metadata", tool.run("退款")["results"][0])
+
+    def test_metadata_can_be_included_and_redacted(self):
+        tool, _ = self.make_tool(include_metadata=True, redact=["phone"])
+        metadata = tool.run("退款")["results"][0]["metadata"]
+        self.assertEqual(metadata, {"owner": "u1"})
+
+    def test_budget_is_applied(self):
+        tool, _ = self.make_tool(budget=TokenBudget(max_tokens=6))
+        self.assertEqual(tool.run("退款")["count"], 1)
+
+    def test_kv_memory_gives_a_clear_error(self):
+        tool = RecallMemoryTool(InMemoryMemory())
+        result = tool.run("x")
+        self.assertIn("error", result)
+
+    def test_schema(self):
+        tool, _ = self.make_tool()
+        schema = tool.schema()["function"]
+        self.assertEqual(schema["name"], "recall_memory")
+        self.assertEqual(schema["parameters"]["required"], ["query"])
+
+    def test_invalid_limits(self):
+        for kwargs in ({"max_top_k": 0}, {"max_calls": 0}, {"max_item_chars": 0}):
+            with self.assertRaises(ValueError):
+                RecallMemoryTool(RecordingMemory(), **kwargs)
+
+    def test_audit_log(self):
+        tool, _ = self.make_tool()
+        with self.assertLogs("promptkit.memory", level="INFO") as captured:
+            tool.run("退款")
+        self.assertIn("recall_memory", captured.output[0])
+
+
+class TestLayeredMemory(MemoryTestCase):
+    def make(self, **kwargs):
+        kv = kwargs.pop("kv", None) or KVMemory(self.temp_path(), namespace="u1")
+        vector = kwargs.pop("vector", None)
+        if vector is None:
+            vector = VectorMemory(HashEmbedding(dimension=64), namespace="u1")
+        memory = LayeredMemory(kv=kv, vector=vector, **kwargs)
+        self.addCleanup(kv.close)
+        return memory
+
+    def test_read_write_recall_forget(self):
+        memory = self.make()
+        memory.write("level", "中级")
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertEqual(memory.read("level"), "中级")
+        hits = memory.recall("退款", top_k=1)
+        self.assertIn("退款", hits[0]["text"])
+        self.assertTrue(memory.forget("notes"))
+        self.assertEqual(memory.read("notes"), None)
+        self.assertEqual(memory.recall("退款", top_k=1), [])
+
+    def test_mirror_off_skips_the_vector_store(self):
+        memory = self.make(mirror=False)
+        memory.write("level", "中级")
+        self.assertEqual(memory.read("level"), "中级")
+        self.assertEqual(memory.recall("中级", top_k=1), [])
+
+    def test_kv_only(self):
+        memory = LayeredMemory(kv=KVMemory(self.temp_path()))
+        self.addCleanup(memory.kv.close)
+        memory.write("k", "v")
+        self.assertEqual(memory.read("k"), "v")
+        with self.assertRaises(NotImplementedError):
+            memory.recall("v")
+
+    def test_vector_only(self):
+        memory = LayeredMemory(vector=VectorMemory(HashEmbedding(dimension=32)))
+        memory.write("k", "退款")
+        self.assertTrue(memory.recall("退款", top_k=1))
+        with self.assertRaises(NotImplementedError):
+            memory.read("k")
+
+    def test_requires_at_least_one_backend(self):
+        with self.assertRaises(ValueError):
+            LayeredMemory()
+
+    def test_repr_mentions_both_backends(self):
+        text = repr(self.make())
+        self.assertIn("KVMemory", text)
+        self.assertIn("VectorMemory", text)
+        self.assertIn("u1", text)
+
+    def test_long_term_memory_without_embedding_is_kv_only(self):
+        memory = long_term_memory("u1", path=self.temp_path())
+        self.addCleanup(memory.kv.close)
+        memory.write("level", "中级")
+        self.assertEqual(memory.read("level"), "中级")
+        with self.assertRaises(NotImplementedError):
+            memory.recall("中级")
+
+    def test_long_term_memory_with_embedding(self):
+        memory = long_term_memory(
+            "u1",
+            path=self.temp_path(),
+            vector_path=self.temp_path("vectors"),
+            embed_client=HashEmbedding(dimension=64),
+        )
+        self.addCleanup(memory.close)
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertTrue(memory.recall("退款", top_k=1))
+
+
+class TestChatWorkflowMemory(MemoryTestCase):
+    def run_chat(self, chat, inputs, **kwargs):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=[*inputs, "exit"]):
+            ctx = chat.run(
+                agent=agent,
+                verbose=Verbosity.SILENT,
+                out=io.StringIO(),
+                **kwargs,
+            )
+        return ctx, agent
+
+    def test_read_happens_before_the_system_prompt(self):
+        memory = RecordingMemory({"level": "中级"})
+        chat = ChatWorkflow(
+            role="课程导师",
+            rules=["学员水平：{{level}}"],
+            memory=memory,
+            memory_config=MemoryConfig(read=["level"]),
+        )
+        ctx, agent = self.run_chat(chat, ["你好"])
+        self.assertEqual(ctx["level"], "中级")
+        self.assertIn("学员水平：中级", agent.start_prompts[0]["content"])
+
+    def test_recall_runs_every_turn_and_is_injected_into_the_prompt(self):
+        memory = VectorMemory(HashEmbedding(dimension=128), namespace="u1",
+                              chunk_size=60, overlap=10)
+        memory.write("notes", "退款政策：7 天内无理由退款，需要订单号。")
+        chat = ChatWorkflow(
+            role="客服",
+            memory=memory,
+            memory_config=MemoryConfig(
+                recall=RecallConfig(query_key="usr_input", output_key="related", top_k=1)
+            ),
+        )
+        ctx, agent = self.run_chat(chat, ["退款怎么办"])
+        self.assertIn("相关片段", agent.prompts[0])
+        self.assertIn("退款政策", agent.prompts[0])
+        self.assertIn("退款政策", ctx["related"])
+
+    def test_recall_template_can_be_turned_off_for_raw_output(self):
+        memory = RecordingMemory(hits=[{"text": "退款", "score": 0.9}])
+        chat = ChatWorkflow(
+            role="客服",
+            memory=memory,
+            memory_config=MemoryConfig(
+                recall=RecallConfig(query_key="usr_input", output_key="related", raw=True)
+            ),
+        )
+        self.assertIsNone(chat.turn_template())
+        ctx, agent = self.run_chat(chat, ["问题"])
+        self.assertEqual(ctx["related"], [{"text": "退款", "score": 0.9}])
+
+    def test_write_on_end_happens_after_the_loop(self):
+        memory = RecordingMemory()
+        chat = ChatWorkflow(
+            role="导师",
+            memory=memory,
+            memory_config=MemoryConfig(write=["topics_covered"], write_on="end"),
+        )
+        ctx, _ = self.run_chat(chat, ["第一轮"], topics_covered="退款政策")
+        self.assertEqual(memory.values["topics_covered"], "退款政策")
+        self.assertGreater(
+            ctx.trace.index("write_memory:topics_covered"),
+            ctx.trace.index("while:done"),
+        )
+
+    def test_write_on_each_turn_happens_inside_the_loop(self):
+        memory = RecordingMemory()
+        chat = ChatWorkflow(
+            role="导师",
+            memory=memory,
+            memory_config=MemoryConfig(write=["topics_covered"], write_on="each_turn"),
+        )
+        ctx, _ = self.run_chat(chat, ["第一轮"], topics_covered="退款政策")
+        self.assertEqual(memory.values["topics_covered"], "退款政策")
+        self.assertLess(
+            ctx.trace.index("write_memory:topics_covered"),
+            ctx.trace.index("while:done"),
+        )
+
+    def test_deliverables_still_save_each_turn_with_memory(self):
+        memory = RecordingMemory()
+        folder = os.path.dirname(self.temp_path("x.md"))
+        chat = ChatWorkflow(
+            role="导师",
+            deliverables=[
+                Deliverable("笔记", save_to=folder, when="each_turn"),
+            ],
+            memory=memory,
+            memory_config=MemoryConfig(read=["level"]),
+        )
+        self.run_chat(chat, ["第一轮"], level="中级")
+        self.assertEqual(os.listdir(folder), ["笔记.md"])
+
+    def test_memory_without_config_raises(self):
+        with self.assertRaises(ValueError):
+            ChatWorkflow(memory=RecordingMemory())
+
+    def test_config_without_memory_raises(self):
+        with self.assertRaises(ValueError):
+            ChatWorkflow(memory_config=MemoryConfig(read=["x"]))
+
+    def test_empty_config_raises(self):
+        with self.assertRaises(ValueError):
+            ChatWorkflow(memory=RecordingMemory(), memory_config=MemoryConfig())
+
+    def test_config_must_be_a_memory_config(self):
+        with self.assertRaises(TypeError):
+            ChatWorkflow(memory=RecordingMemory(), memory_config=object())
+
+    def test_config_accepts_a_dict(self):
+        chat = ChatWorkflow(
+            memory=RecordingMemory({"level": "中级"}),
+            memory_config={"read": ["level"]},
+        )
+        ctx, _ = self.run_chat(chat, ["你好"])
+        self.assertEqual(ctx["level"], "中级")
+
+    def test_build_puts_reads_before_the_system_prompt(self):
+        chat = ChatWorkflow(
+            role="导师",
+            memory=RecordingMemory(),
+            memory_config=MemoryConfig(read=["level"]),
+        )
+        descriptions = [step.describe() for step in chat.build().steps]
+        self.assertLess(
+            next(i for i, text in enumerate(descriptions) if "read=" in text),
+            next(i for i, text in enumerate(descriptions) if "SystemPrompt" in text),
+        )
+
+    def test_memory_is_visible_in_the_step_tree(self):
+        chat = ChatWorkflow(
+            role="导师",
+            memory=RecordingMemory(),
+            memory_config=MemoryConfig(
+                read=["level"],
+                recall=RecallConfig(query_key="usr_input", output_key="related"),
+                write=["topics_covered"],
+            ),
+        )
+        tree = chat.build().render()
+        self.assertIn("MemoryStep", tree)
+        self.assertIn("RecallMemory", tree)
+        self.assertIn("WriteMemory", tree)
+
+
+class TestChatLoopTurnTemplate(MemoryTestCase):
+    def test_default_turn_content_is_the_input(self):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["你好", "exit"]):
+            Workflow(ChatLoop()).run(
+                agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        self.assertEqual(agent.prompts[0], "你好")
+
+    def test_custom_turn_template(self):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["你好", "exit"]):
+            Workflow(
+                ChatLoop(turn_template="{{usr_input}}\n\n附加：{{extra}}"),
+            ).run(
+                agent=agent,
+                verbose=Verbosity.SILENT,
+                out=io.StringIO(),
+                extra="参考记忆",
+            )
+        self.assertEqual(agent.prompts[0], "你好\n\n附加：参考记忆")
+
+
+class TestMemoryAdapters(MemoryTestCase):
+    def test_hash_embedding_is_deterministic_and_normalized(self):
+        embedder = HashEmbedding(dimension=64)
+        left = embedder.embed("退款政策")
+        right = embedder.embed("退款政策")
+        self.assertEqual(left, right)
+        self.assertEqual(embedder.dimension, 64)
+        self.assertAlmostEqual(sum(value * value for value in left), 1.0, places=6)
+        self.assertEqual(embedder.embed(""), [0.0] * 64)
+
+    def test_hash_embedding_reflects_lexical_similarity(self):
+        embedder = HashEmbedding(dimension=256)
+        query = embedder.embed("退款政策")
+        near = embedder.embed("退款政策说明")
+        far = embedder.embed("今天天气很好")
+        self.assertGreater(cosine(query, near), cosine(query, far))
+        self.assertGreater(cosine(query, far), -1.0)
+
+    def test_hash_embedding_validation(self):
+        with self.assertRaises(ValueError):
+            HashEmbedding(dimension=4)
+        with self.assertRaises(ValueError):
+            HashEmbedding(ngram=0)
+
+    def test_openai_embedding_uses_the_client(self):
+        api = SimpleNamespace(calls=[], create=None)
+
+        def create(**kwargs):
+            api.calls.append(kwargs)
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=index, embedding=[float(len(text))])
+                    for index, text in enumerate(kwargs["input"])
+                ]
+            )
+
+        api.create = create
+        embedder = OpenAIEmbedding(client=SimpleNamespace(embeddings=api))
+        vectors = embedder.embed_many(["a", "bb", "ccc"])
+        self.assertEqual(vectors, [[1.0], [2.0], [3.0]])
+        self.assertEqual(api.calls[0]["model"], "text-embedding-3-small")
+        self.assertEqual(api.calls[0]["input"], ["a", "bb", "ccc"])
+
+    def test_openai_embedding_batches(self):
+        calls = []
+
+        def create(**kwargs):
+            calls.append(list(kwargs["input"]))
+            return SimpleNamespace(
+                data=[SimpleNamespace(index=0, embedding=[0.0]) for _ in kwargs["input"]]
+            )
+
+        client = SimpleNamespace(embeddings=SimpleNamespace(create=create))
+        embedder = OpenAIEmbedding(client=client, batch_size=2)
+        embedder.embed_many(["a", "b", "c"])
+        self.assertEqual(calls, [["a", "b"], ["c"]])
+
+    def test_openai_embedding_known_dimension(self):
+        embedder = OpenAIEmbedding(client=SimpleNamespace(embeddings=SimpleNamespace()))
+        self.assertEqual(embedder.dimension, 1536)
+
+    def test_sentence_transformer_embedding(self):
+        class FakeModel:
+            def __init__(self):
+                self.calls = []
+
+            def get_sentence_embedding_dimension(self):
+                return 3
+
+            def encode(self, texts, normalize_embeddings=True):
+                self.calls.append((list(texts), normalize_embeddings))
+                return [[float(len(text)), 1.0, 0.0] for text in texts]
+
+        model = FakeModel()
+        embedder = SentenceTransformerEmbedding(model=model)
+        self.assertEqual(embedder.dimension, 3)
+        self.assertEqual(embedder.embed("ab"), [2.0, 1.0, 0.0])
+        self.assertEqual(model.calls[0][1], True)
+
+    def test_sentence_transformer_needs_encode(self):
+        with self.assertRaises(TypeError):
+            SentenceTransformerEmbedding(model=object())
+
+    def test_callable_embedding(self):
+        from promptkit.memory.adapters import CallableEmbedding
+
+        embedder = CallableEmbedding(lambda text: [float(len(text))], dimension=1)
+        self.assertEqual(embedder.embed("abc"), [3.0])
+
+    def test_chroma_store(self):
+        collection = FakeChromaCollection()
+        store = ChromaVectorStore(collection)
+        store.upsert("u1", MemoryItem(id="a#0", text="退款政策", vector=[1.0, 0.0],
+                                      metadata={"key": "a", "nested": {"x": 1}}))
+        store.upsert("u2", MemoryItem(id="b#0", text="别的用户", vector=[1.0, 0.0],
+                                      metadata={"key": "b"}))
+        self.assertEqual(store.count("u1"), 1)
+
+        hits = store.search("u1", [1.0, 0.0], top_k=3)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].text, "退款政策")
+        self.assertNotIn("namespace", hits[0].metadata)
+        self.assertEqual(hits[0].score, 1.0)
+        self.assertIsInstance(hits[0].metadata["nested"], str)   # 复杂值被 JSON 化
+
+        self.assertEqual(store.delete("u1", key="a"), 1)
+        self.assertEqual(store.count("u1"), 0)
+        self.assertEqual(store.count("u2"), 1)
+        store.clear("u2")
+        self.assertEqual(store.count("u2"), 0)
+
+    def test_qdrant_store(self):
+        models = FakeQdrantModels()
+        client = FakeQdrantClient()
+        store = QdrantVectorStore(client, "notes", models=models)
+        store.upsert("u1", MemoryItem(id="a#0", text="退款政策", vector=[1.0, 0.0],
+                                      metadata={"key": "a"}))
+        store.upsert("u2", MemoryItem(id="b#0", text="别人的", vector=[1.0, 0.0],
+                                      metadata={"key": "b"}))
+
+        payload = client.points[next(iter(client.points))].payload
+        self.assertEqual(payload["text"], "退款政策")
+        self.assertEqual(payload["namespace"], "u1")
+        self.assertEqual(payload["key"], "a")
+
+        hits = store.search("u1", [1.0, 0.0], top_k=2)
+        self.assertEqual([item.text for item in hits], ["退款政策"])
+        self.assertEqual(store.count("u1"), 1)
+        store.delete("u1", key="a")
+        self.assertTrue(client.deletes)
+
+    def test_cohere_reranker(self):
+        client = SimpleNamespace(
+            calls=[],
+            rerank=None,
+        )
+
+        def rerank(model, query, documents, top_n):
+            client.calls.append((model, query, documents, top_n))
+            return SimpleNamespace(
+                results=[
+                    SimpleNamespace(index=index, relevance_score=1.0 - index * 0.1)
+                    for index in reversed(range(min(top_n, len(documents))))
+                ]
+            )
+
+        client.rerank = rerank
+        reranker = CohereReranker(client, model="rerank-v3")
+        items = [MemoryItem(id="a", text="甲"), MemoryItem(id="b", text="乙")]
+        result = reranker.rerank("q", items, top_k=2)
+        self.assertEqual([item.id for item in result], ["b", "a"])
+        self.assertEqual(client.calls[0][0], "rerank-v3")
+        self.assertEqual(client.calls[0][2], ["甲", "乙"])
+
+    def test_cohere_reranker_ignores_bad_indexes(self):
+        client = SimpleNamespace(
+            rerank=lambda **kwargs: SimpleNamespace(
+                results=[SimpleNamespace(index=5, relevance_score=0.9)]
+            )
+        )
+        self.assertEqual(
+            CohereReranker(client).rerank("q", [MemoryItem(id="a", text="甲")]), []
+        )
+
+    def test_cross_encoder_reranker(self):
+        class FakeCross:
+            def predict(self, pairs):
+                return [float(len(text)) for _, text in pairs]
+
+        items = [MemoryItem(id="a", text="短"), MemoryItem(id="b", text="长很多")]
+        result = CrossEncoderReranker(FakeCross()).rerank("q", items, top_k=1)
+        self.assertEqual(result[0].id, "b")
+
+    def test_llm_reranker(self):
+        agent = FakeAgent(['{"order": [2, 0, 1]}'])
+        items = [
+            MemoryItem(id="a", text="甲"),
+            MemoryItem(id="b", text="乙"),
+            MemoryItem(id="c", text="丙"),
+        ]
+        result = LlmReranker(agent).rerank("q", items, top_k=2)
+        self.assertEqual([item.id for item in result], ["c", "a"])
+        self.assertGreater(result[0].score, result[1].score)
+
+    def test_llm_reranker_fills_missing_indexes(self):
+        agent = FakeAgent(['{"order": [1]}'])
+        items = [MemoryItem(id="a", text="甲"), MemoryItem(id="b", text="乙"),
+                 MemoryItem(id="c", text="丙")]
+        result = LlmReranker(agent).rerank("q", items)
+        self.assertEqual([item.id for item in result], ["b", "a", "c"])
+
+    def test_llm_reranker_falls_back_to_numbers(self):
+        agent = FakeAgent(["排序结果：2 0"])
+        items = [MemoryItem(id="a", text="甲"), MemoryItem(id="b", text="乙"),
+                 MemoryItem(id="c", text="丙")]
+        result = LlmReranker(agent).rerank("q", items)
+        self.assertEqual([item.id for item in result], ["c", "a", "b"])
+
+    def test_llm_reranker_needs_an_agent(self):
+        Agent.set_default(None)
+        items = [MemoryItem(id="a", text="甲"), MemoryItem(id="b", text="乙")]
+        with self.assertRaises(ValueError):
+            LlmReranker().rerank("q", items)
+
+    def test_noop_reranker(self):
+        items = [MemoryItem(id="a", text="甲"), MemoryItem(id="b", text="乙")]
+        self.assertEqual(len(NoopReranker().rerank("q", items, top_k=1)), 1)
+
+
+class TestStoragePaths(MemoryTestCase):
+    def test_data_dir_honors_the_env_override(self):
+        folder = self.temp_dir()
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": folder}):
+            self.assertEqual(default_data_dir(), os.path.abspath(folder))
+
+    def test_windows_default_dir(self):
+        with mock.patch.dict(
+            os.environ,
+            {"PROMPTKIT_DATA_DIR": "", "APPDATA": r"C:\Users\me\AppData\Roaming"},
+            clear=True,
+        ):
+            with mock.patch("os.name", "nt"):
+                self.assertEqual(
+                    default_data_dir(),
+                    os.path.join(r"C:\Users\me\AppData\Roaming", "promptkit"),
+                )
+
+    @unittest.skipIf(os.name == "nt", "POSIX 路径语义在 Windows 上不适用（ntpath）")
+    def test_macos_default_dir(self):
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": ""}, clear=True):
+            with mock.patch("os.name", "posix"), mock.patch("sys.platform", "darwin"):
+                with mock.patch("os.path.expanduser", return_value="/Users/me"):
+                    self.assertEqual(
+                        default_data_dir(),
+                        "/Users/me/Library/Application Support/promptkit",
+                    )
+
+    @unittest.skipIf(os.name == "nt", "POSIX 路径语义在 Windows 上不适用（ntpath）")
+    def test_linux_respects_xdg(self):
+        with mock.patch.dict(
+            os.environ, {"PROMPTKIT_DATA_DIR": "", "XDG_DATA_HOME": "/data"}, clear=True
+        ):
+            with mock.patch("os.name", "posix"), mock.patch("sys.platform", "linux"):
+                self.assertEqual(default_data_dir(), "/data/promptkit")
+
+    @unittest.skipIf(os.name == "nt", "POSIX 路径语义在 Windows 上不适用（ntpath）")
+    def test_linux_falls_back_to_local_share(self):
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": ""}, clear=True):
+            with mock.patch("os.name", "posix"), mock.patch("sys.platform", "linux"):
+                with mock.patch("os.path.expanduser", return_value="/home/me"):
+                    self.assertEqual(
+                        default_data_dir(), "/home/me/.local/share/promptkit"
+                    )
+
+    def test_default_paths_follow_the_namespace(self):
+        folder = self.temp_dir()
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": folder}):
+            self.assertTrue(
+                default_kv_path("user_001").endswith(os.path.join("memory", "kv", "user_001.db"))
+            )
+            self.assertTrue(
+                default_vector_dir("user_001").endswith(os.path.join("memory", "vector", "user_001"))
+            )
+
+    def test_namespace_is_made_file_safe(self):
+        # 中文原样保留（好认）
+        self.assertEqual(safe_namespace_name("张三"), "张三")
+        # 路径分隔符不能出现在文件名里，而且不能和 a_b 撞车
+        unsafe = safe_namespace_name("a/b")
+        self.assertNotIn("/", unsafe)
+        self.assertNotIn(os.sep, unsafe)
+        self.assertNotEqual(unsafe, "a_b")
+        self.assertEqual(unsafe, safe_namespace_name("a/b"))     # 稳定
+        # `..` 这种不能原样用
+        self.assertNotIn("..", safe_namespace_name(".."))
+
+    def test_expand_path(self):
+        from promptkit.memory.paths import expand_path
+
+        self.assertEqual(expand_path("/tmp/x"), os.path.abspath("/tmp/x"))
+        self.assertTrue(os.path.isabs(expand_path("~/x")))
+
+
+class TestStorageConfig(MemoryTestCase):
+    def test_namespace_is_required(self):
+        with self.assertRaises(TypeError):
+            StorageConfig(backend="sqlite")            # type: ignore[call-arg]
+
+    def test_namespace_cannot_be_blank(self):
+        with self.assertRaises(ValueError) as cm:
+            StorageConfig(backend="sqlite", namespace="   ")
+        self.assertIn("namespace", str(cm.exception))
+
+    def test_backend_is_normalized(self):
+        self.assertEqual(
+            StorageConfig(backend=" SQLite ", namespace="u1").backend, "sqlite"
+        )
+
+    def test_path_is_expanded(self):
+        config = StorageConfig(backend="sqlite", namespace="u1", path="~/data/a.db")
+        self.assertTrue(os.path.isabs(config.path))
+        self.assertTrue(config.path.endswith(os.path.join("data", "a.db")))
+
+    def test_remote_backend_needs_a_url(self):
+        with self.assertRaises(ValueError):
+            StorageConfig(backend="qdrant", namespace="u1")
+
+    def test_local_backend_rejects_url(self):
+        with self.assertRaises(ValueError):
+            StorageConfig(backend="sqlite", namespace="u1", url="http://x")
+
+    def test_chroma_needs_path_or_url(self):
+        with self.assertRaises(ValueError):
+            StorageConfig(backend="chroma", namespace="u1")
+        StorageConfig(backend="chroma", namespace="u1", path=self.temp_dir())
+        StorageConfig(backend="chroma", namespace="u1", url="http://localhost:8000")
+
+    def test_options_must_be_a_dict(self):
+        with self.assertRaises(TypeError):
+            StorageConfig(backend="sqlite", namespace="u1", options="nope")
+
+    def test_paths_and_collection_name(self):
+        folder = self.temp_dir()
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": folder}):
+            config = StorageConfig(backend="sqlite", namespace="user_001")
+            self.assertEqual(config.kv_path(), default_kv_path("user_001"))
+            self.assertEqual(config.vector_path(), default_vector_dir("user_001"))
+            self.assertIn("user_001", config.collection_name())
+
+            explicit = StorageConfig(
+                backend="sqlite", namespace="u1", path=os.path.join(folder, "x.db")
+            )
+            self.assertEqual(explicit.kv_path(), os.path.join(folder, "x.db"))
+
+            named = StorageConfig(
+                backend="qdrant", namespace="u1", url="http://x",
+                options={"collection": "tutor"},
+            )
+            self.assertEqual(named.collection_name(), "tutor")
+            self.assertIn("qdrant", named.describe())
+            self.assertIn("u1", named.describe())
+
+
+class TestCreateMemory(MemoryTestCase):
+    def setUp(self):
+        super().setUp()
+        self.data_dir = self.temp_dir()
+        patcher = mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": self.data_dir})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_sqlite_backend_lands_in_the_default_dir(self):
+        memory = create_memory(StorageConfig(backend="sqlite", namespace="user_001"))
+        self.addCleanup(memory.close)
+        self.assertIsInstance(memory, KVMemory)
+        self.assertEqual(memory.path, default_kv_path("user_001"))
+        self.assertTrue(os.path.isdir(os.path.dirname(memory.path)))
+        memory.write("level", "中级")
+        self.assertEqual(memory.read("level"), "中级")
+
+    def test_sqlite_backend_rejects_a_folder(self):
+        with self.assertRaises(ValueError) as cm:
+            create_memory(
+                StorageConfig(backend="sqlite", namespace="u1", path=self.temp_dir())
+            )
+        self.assertIn("文件夹", str(cm.exception))
+
+    def test_jsonl_backend_is_persistent(self):
+        config = StorageConfig(backend="jsonl", namespace="u1")
+        memory = create_memory(config, embed_client=HashEmbedding(dimension=64))
+        self.assertIsInstance(memory, VectorMemory)
+        self.assertIsInstance(memory.store, FolderVectorStore)
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertTrue(memory.recall("退款", top_k=1))
+        memory.close()
+
+        again = create_memory(config, embed_client=HashEmbedding(dimension=64))
+        self.addCleanup(again.close)
+        self.assertEqual(again.count(), len(FolderVectorStore(config.vector_path())))
+        self.assertTrue(again.recall("退款", top_k=1))
+
+    def test_vector_backends_need_an_embedder(self):
+        with self.assertRaises(ValueError) as cm:
+            create_memory(StorageConfig(backend="jsonl", namespace="u1"))
+        self.assertIn("embed_client", str(cm.exception))
+
+    def test_memory_and_session_backends(self):
+        self.assertIsInstance(
+            create_memory(StorageConfig(backend="memory", namespace="u1")),
+            InMemoryMemory,
+        )
+        self.assertIsInstance(
+            create_memory(StorageConfig(backend="session", namespace="u1")),
+            SessionMemory,
+        )
+
+    def test_layered_backend(self):
+        memory = create_memory(
+            StorageConfig(backend="layered", namespace="u1"),
+            embed_client=HashEmbedding(dimension=64),
+        )
+        self.addCleanup(memory.close)
+        self.assertIsInstance(memory, LayeredMemory)
+        memory.write("level", "中级")
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertEqual(memory.read("level"), "中级")
+        self.assertTrue(memory.recall("退款", top_k=1))
+
+    def test_dict_config_and_kwargs_forwarding(self):
+        memory = create_memory(
+            {"backend": "sqlite", "namespace": "u1"}, timeout=1.5
+        )
+        self.addCleanup(memory.close)
+        self.assertEqual(memory.timeout, 1.5)
+
+    def test_unknown_backend_lists_the_choices(self):
+        with self.assertRaises(ValueError) as cm:
+            create_memory(StorageConfig(backend="redis", namespace="u1"))
+        message = str(cm.exception)
+        self.assertIn("sqlite", message)
+        self.assertIn("register_memory_backend", message)
+
+    def test_register_a_custom_backend(self):
+        memory = InMemoryMemory(namespace="u1")
+        try:
+            register_memory_backend(
+                "dummy", lambda config, **kwargs: memory, aliases=("dummy_alias",)
+            )
+            self.assertIn("dummy", BACKENDS)
+            self.assertIs(
+                create_memory(StorageConfig(backend="dummy", namespace="u1")), memory
+            )
+            self.assertIs(
+                create_memory(StorageConfig(backend="dummy-alias", namespace="u1")),
+                memory,
+            )
+        finally:
+            BACKENDS.pop("dummy", None)
+            BACKENDS.pop("dummy_alias", None)
+
+    def test_chroma_backend_uses_the_client(self):
+        module = self.fake_chromadb()
+        config = StorageConfig(
+            backend="chroma", namespace="u1", path=self.temp_dir(),
+            options={"collection": "tutor"},
+        )
+        with mock.patch.dict(sys.modules, {"chromadb": module}):
+            memory = create_memory(config, embed_client=HashEmbedding(dimension=64))
+        self.addCleanup(memory.close)
+        self.assertIsInstance(memory.store, ChromaVectorStore)
+        self.assertEqual(memory.store.collection.name, "tutor")
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertTrue(memory.recall("退款", top_k=1))
+
+    def test_qdrant_backend_uses_the_client(self):
+        import types
+
+        module = types.ModuleType("qdrant_client")
+        module.QdrantClient = FakeQdrantClient
+        module.models = FakeQdrantModels()
+        config = StorageConfig(
+            backend="qdrant", namespace="u1", url="http://localhost:6333",
+            options={"api_key": "secret"},
+        )
+        with mock.patch.dict(sys.modules, {"qdrant_client": module}):
+            memory = create_memory(config, embed_client=HashEmbedding(dimension=64))
+        self.addCleanup(memory.close)
+        self.assertIsInstance(memory.store, QdrantVectorStore)
+        self.assertEqual(memory.store.client.kwargs["url"], "http://localhost:6333")
+        self.assertEqual(memory.store.client.kwargs["api_key"], "secret")
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertTrue(memory.recall("退款", top_k=1))
+
+    # ---------------- 辅助 ----------------
+    @staticmethod
+    def fake_chromadb():
+        import types
+
+        module = types.ModuleType("chromadb")
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def get_or_create_collection(self, name, metadata=None):
+                collection = FakeChromaCollection()
+                collection.name = name
+                collection.metadata = metadata
+                return collection
+
+        module.PersistentClient = FakeClient
+        module.HttpClient = FakeClient
+        return module
+
+
+class TestKVLifecycle(MemoryTestCase):
+    def setUp(self):
+        super().setUp()
+        self.path = self.temp_path()
+
+    def test_backup_is_a_usable_copy(self):
+        memory = KVMemory(self.path, namespace="u1")
+        memory.write("level", "中级")
+        target = memory.backup(os.path.join(self.temp_dir(), "backup", "u1.db"))
+        memory.close()
+
+        self.assertTrue(os.path.isfile(target))
+        restored = KVMemory(target, namespace="u1")
+        self.addCleanup(restored.close)
+        self.assertEqual(restored.read("level"), "中级")
+
+    def test_export_and_import_roundtrip(self):
+        memory = KVMemory(self.path, namespace="u1")
+        memory.write("level", "中级")
+        memory.write("topics", ["退款"])
+        exported = memory.export_json(os.path.join(self.temp_dir(), "u1.json"))
+        memory.clear()
+        self.assertEqual(memory.count(), 0)
+
+        self.assertEqual(memory.import_json(exported), 2)
+        self.assertEqual(memory.read("level"), "中级")
+        self.assertEqual(memory.read("topics"), ["退款"])
+        memory.close()
+
+    def test_import_replaces_when_asked(self):
+        source = KVMemory(self.temp_path("source.db"), namespace="u1")
+        source.write("level", "中级")
+        exported = source.export_json(os.path.join(self.temp_dir(), "u1.json"))
+        source.close()
+
+        target = KVMemory(self.path, namespace="u1")
+        self.addCleanup(target.close)
+        target.write("stale", "旧值")
+        target.import_json(exported, replace=True)
+        self.assertEqual(target.keys(), ["level"])
+
+    def test_import_writes_into_its_own_namespace(self):
+        memory = KVMemory(self.path, namespace="u1")
+        memory.write("level", "中级")
+        exported = memory.export_json(os.path.join(self.temp_dir(), "u1.json"))
+        memory.close()
+
+        other = KVMemory(self.path, namespace="u2")
+        self.addCleanup(other.close)
+        other.import_json(exported)
+        self.assertEqual(other.read("level"), "中级")
+        self.assertEqual(other.namespaces(), ["u1", "u2"])
+
+    def test_import_rejects_foreign_files(self):
+        bad = os.path.join(self.temp_dir(), "bad.json")
+        with open(bad, "w", encoding="utf-8") as handle:
+            handle.write('{"items": "nope"}')
+        memory = KVMemory(self.path)
+        self.addCleanup(memory.close)
+        with self.assertRaises(MemoryError):
+            memory.import_json(bad)
+
+    def test_vacuum_keeps_the_data(self):
+        memory = KVMemory(self.path, namespace="u1")
+        for index in range(50):
+            memory.write(f"k{index}", index)
+        for index in range(50):
+            memory.forget(f"k{index}")
+        memory.write("level", "中级")
+        memory.vacuum()
+        self.assertEqual(memory.items(), {"level": "中级"})
+        memory.close()
+
+    def test_destroy_removes_the_file(self):
+        memory = KVMemory(self.path, namespace="u1")
+        memory.write("level", "中级")
+        self.assertGreater(memory.size_bytes(), 0)
+        self.assertTrue(memory.destroy())
+        self.assertFalse(os.path.exists(memory.path))
+        self.assertFalse(memory.destroy())          # 第二次：本来就没有
+        self.assertEqual(memory.size_bytes(), 0)
+
+    def test_destroy_on_an_in_memory_database(self):
+        memory = KVMemory(":memory:")
+        self.assertFalse(memory.destroy())
+        self.assertEqual(memory.size_bytes(), 0)
+
+    def test_default_path_creates_parents(self):
+        with mock.patch.dict(os.environ, {"PROMPTKIT_DATA_DIR": self.temp_dir()}):
+            memory = KVMemory(namespace="fresh_user")
+            self.addCleanup(memory.close)
+            self.assertEqual(memory.path, default_kv_path("fresh_user"))
+            self.assertTrue(os.path.isdir(os.path.dirname(memory.path)))
+            memory.write("k", 1)
+            self.assertEqual(memory.read("k"), 1)
+
+
+class TestFolderVectorStore(MemoryTestCase):
+    def make(self, **kwargs):
+        path = self.temp_path("vectors")
+        store = FolderVectorStore(path, **kwargs)
+        self.addCleanup(store.close)
+        return store, path
+
+    def test_upsert_search_delete(self):
+        store, _ = self.make()
+        store.upsert("u1", MemoryItem(id="a#0", text="退款", vector=[1.0, 0.0],
+                                      metadata={"key": "a"}))
+        store.upsert("u1", MemoryItem(id="b#0", text="天气", vector=[0.0, 1.0],
+                                      metadata={"key": "b"}))
+        self.assertEqual(store.count("u1"), 2)
+        hits = store.search("u1", [1.0, 0.0], top_k=1)
+        self.assertEqual(hits[0].id, "a#0")
+        self.assertEqual(store.delete("u1", key="a"), 1)
+        self.assertEqual(store.count("u1"), 1)
+        self.assertEqual(store.delete("u1", ids=["b#0"]), 1)
+        self.assertEqual(store.count("u1"), 0)
+
+    def test_namespaces_share_one_folder_without_mixing(self):
+        store, _ = self.make()
+        store.upsert("u1", MemoryItem(id="a", text="甲的", vector=[1.0]))
+        store.upsert("u2", MemoryItem(id="b", text="乙的", vector=[1.0]))
+        self.assertEqual(store.count("u1"), 1)
+        self.assertEqual([item.id for item in store.search("u2", [1.0])], ["b"])
+        store.clear("u1")
+        self.assertEqual(store.count("u2"), 1)
+
+    def test_data_survives_a_restart(self):
+        first, path = self.make()
+        first.upsert("u1", MemoryItem(id="a", text="退款政策", vector=[1.0, 0.0],
+                                     metadata={"key": "a"}))
+        first.close()
+
+        second = FolderVectorStore(path)
+        self.addCleanup(second.close)
+        self.assertEqual(second.count("u1"), 1)
+        self.assertEqual(second.search("u1", [1.0, 0.0])[0].text, "退款政策")
+
+    def test_appends_then_compacts(self):
+        store, path = self.make(compact_every=2)
+        for index in range(4):
+            store.upsert("u1", MemoryItem(id=f"n{index}", text=f"第{index}条", vector=[1.0]))
+        with open(store.index_path, encoding="utf-8") as handle:
+            lines = [line for line in handle if line.strip()]
+        self.assertEqual(len(lines), 4)              # 压实过，没有重复行
+        self.assertEqual(store.count("u1"), 4)
+
+        store.flush()
+        with open(store.index_path, encoding="utf-8") as handle:
+            self.assertEqual(len([line for line in handle if line.strip()]), 4)
+
+    def test_deleted_rows_do_not_come_back_after_compaction(self):
+        store, path = self.make(compact_every=1)
+        store.upsert("u1", MemoryItem(id="a", text="甲", vector=[1.0]))
+        store.delete("u1")                           # 不给过滤条件 = 清空这个 namespace
+        store.flush()
+        again = FolderVectorStore(path)
+        self.addCleanup(again.close)
+        self.assertEqual(again.count("u1"), 0)
+
+    def test_corrupt_lines_are_skipped(self):
+        store, path = self.make()
+        store.upsert("u1", MemoryItem(id="a", text="甲", vector=[1.0]))
+        store.close()
+        with open(store.index_path, "a", encoding="utf-8") as handle:
+            handle.write("这不是 JSON\n")
+            handle.write('{"op": "put"}\n')          # 缺 id
+        again = FolderVectorStore(path)
+        self.addCleanup(again.close)
+        self.assertEqual(again.count("u1"), 1)
+        self.assertEqual(again.search("u1", [1.0])[0].text, "甲")
+
+    def test_size_and_repr(self):
+        store, _ = self.make()
+        store.upsert("u1", MemoryItem(id="a", text="甲", vector=[1.0]))
+        self.assertGreater(store.size_bytes(), 0)
+        self.assertIn("rows=1", repr(store))
+
+    def test_vector_memory_with_a_folder(self):
+        path = self.temp_path("vm-vectors")
+        memory = VectorMemory(HashEmbedding(dimension=64), namespace="u1", path=path)
+        memory.write("notes", "退款政策：7 天无理由退款。")
+        self.assertTrue(memory.recall("退款", top_k=1))
+        memory.close()
+
+        again = VectorMemory(HashEmbedding(dimension=64), namespace="u1", path=path)
+        self.addCleanup(again.close)
+        self.assertTrue(again.recall("退款", top_k=1))
+
+    def test_store_and_path_are_exclusive(self):
+        with self.assertRaises(ValueError):
+            VectorMemory(
+                HashEmbedding(dimension=8),
+                store=InMemoryVectorStore(),
+                path=self.temp_path("x"),
+            )
+
+    def test_close_on_an_in_memory_store_is_a_noop(self):
+        memory = VectorMemory(HashEmbedding(dimension=8))
+        memory.close()                                # 不炸就行
+
+
+class TestMemoryLayering(MemoryTestCase):
+    def test_core_steps_do_not_import_memory_at_module_level(self):
+        '''依赖方向：`core.steps` 不认识 memory 包（只在函数里延迟导入）。
+
+        否则 `import promptkit.core` 就会把 SQLite、向量库那些一起拖进来，
+        「步骤是底层」这条线就断了。
+        '''
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        pattern = re.compile(
+            r"^(?:from\s+(promptkit[\w.]*)\s+import|import\s+(promptkit[\w.]*))",
+            re.MULTILINE,
+        )
+        offenders = []
+        for path in sorted((root / "core" / "steps").rglob("*.py")):
+            for match in pattern.finditer(path.read_text(encoding="utf-8")):
+                dep = match.group(1) or match.group(2)
+                if "promptkit.memory" in dep:
+                    offenders.append(f"{path.name}: {dep}")
+        self.assertEqual(offenders, [])
+
+
+# ==================== 编码任务（coding） ====================
+CALC = "def add(a, b):\n    return a - b\n"
+FIX_DIFF = (
+    "--- a/calc.py\n"
+    "+++ b/calc.py\n"
+    "@@ -1,2 +1,2 @@\n"
+    " def add(a, b):\n"
+    "-    return a - b\n"
+    "+    return a + b\n"
+)
+
+
+class CodingTestCase(MemoryTestCase):
+    '''编码任务测试的底子：一个临时项目目录 + 读写小工具。'''
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.temp_dir()
+
+    def write(self, relative, text):
+        path = os.path.join(self.root, *relative.split("/"))
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        return path
+
+    def read(self, relative):
+        with open(
+            os.path.join(self.root, *relative.split("/")), encoding="utf-8"
+        ) as handle:
+            return handle.read()
+
+    def sandbox(self, **kwargs):
+        kwargs.setdefault("allow_write", True)
+        return Sandbox(self.root, **kwargs)
+
+
+class CounterStep(Step):
+    '''每执行一次就 +1（FixLoop 测试用）。'''
+
+    name = "tick"
+
+    def __init__(self, key="n"):
+        self.key = key
+
+    def execute(self, context):
+        context[self.key] = context.get(self.key, 0) + 1
+
+
+class TestDiffParsing(CodingTestCase):
+    def test_parses_one_file(self):
+        patches = parse_patch(FIX_DIFF)
+        self.assertEqual(len(patches), 1)
+        patch = patches[0]
+        self.assertEqual((patch.old_path, patch.new_path), ("calc.py", "calc.py"))
+        self.assertFalse(patch.is_creation)
+        self.assertEqual(len(patch.hunks), 1)
+        hunk = patch.hunks[0]
+        self.assertEqual((hunk.old_start, hunk.old_count), (1, 2))
+        self.assertEqual((hunk.new_start, hunk.new_count), (1, 2))
+        self.assertEqual(hunk.old_lines(), ["def add(a, b):", "    return a - b"])
+        self.assertEqual(hunk.new_lines(), ["def add(a, b):", "    return a + b"])
+
+    def test_parses_multiple_files(self):
+        text = FIX_DIFF + (
+            "--- a/other.py\n+++ b/other.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        )
+        self.assertEqual([p.path for p in parse_patch(text)], ["calc.py", "other.py"])
+
+    def test_strips_code_fences_and_prose(self):
+        fenced = "好的，修改如下：\n```diff\n" + FIX_DIFF + "```\n"
+        self.assertEqual(len(parse_patch(fenced)), 1)
+        self.assertTrue(strip_code_fence("```\nabc\n```") == "abc")
+
+    def test_ignores_git_style_headers(self):
+        text = (
+            "diff --git a/x.py b/x.py\n"
+            "index 1234567..89abcde 100644\n"
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -1 +1 @@\n-a\n+b\n"
+        )
+        patch = parse_patch(text)[0]
+        self.assertEqual(patch.path, "x.py")
+
+    def test_creation_and_deletion(self):
+        created = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+x = 1\n+y = 2\n"
+        patch = parse_patch(created)[0]
+        self.assertTrue(patch.is_creation)
+        self.assertEqual(patch.path, "new.py")
+
+        deleted = "--- a/old.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-x = 1\n"
+        patch = parse_patch(deleted)[0]
+        self.assertTrue(patch.is_deletion)
+        self.assertEqual(patch.path, "old.py")
+
+    def test_no_newline_marker_is_ignored(self):
+        text = (
+            "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+b\n"
+        )
+        self.assertEqual(len(parse_patch(text)[0].hunks), 1)
+
+    def test_empty_context_lines_are_tolerated(self):
+        # 模型常把「空的上下文行」写成空行而不是一个空格
+        text = "--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n a\n\n-b\n+c\n"
+        hunk = parse_patch(text)[0].hunks[0]
+        self.assertEqual(hunk.old_lines(), ["a", "", "b"])
+
+    def test_hunk_line_count_mismatch(self):
+        text = "--- a/x.py\n+++ b/x.py\n@@ -1,3 +1,3 @@\n a\n-b\n+c\n"
+        with self.assertRaises(DiffError) as cm:
+            parse_patch(text)
+        self.assertIn("行数对不上", str(cm.exception))
+
+    def test_file_without_hunks(self):
+        with self.assertRaises(DiffError) as cm:
+            parse_patch("--- a/x.py\n+++ b/x.py\n")
+        self.assertIn("没有任何 @@ hunk", str(cm.exception))
+
+    def test_missing_file_header(self):
+        with self.assertRaises(DiffError) as cm:
+            parse_patch("@@ -1 +1 @@\n-a\n+b\n")
+        self.assertIn("--- 旧文件", str(cm.exception))
+
+    def test_empty_patch(self):
+        for text in ("", "   ", "```\n```"):
+            with self.assertRaises(DiffError):
+                parse_patch(text)
+
+    def test_unsafe_paths_are_rejected(self):
+        for header in ("/etc/passwd", "C:/Windows/x.py", "a/../../x.py"):
+            text = f"--- {header}\n+++ {header}\n@@ -1 +1 @@\n-a\n+b\n"
+            with self.assertRaises(DiffError):
+                validate_patch(text)
+
+    def test_path_checks_can_be_skipped(self):
+        text = "--- /abs/x.py\n+++ /abs/x.py\n@@ -1 +1 @@\n-a\n+b\n"
+        self.assertEqual(len(validate_patch(text, check_paths=False)), 1)
+
+    def test_file_patch_repr(self):
+        self.assertIn("FilePatch", repr(parse_patch(FIX_DIFF)[0]))
+
+
+class TestDiffApply(CodingTestCase):
+    def test_replaces_lines(self):
+        self.assertEqual(apply_patch_text(CALC, FIX_DIFF), "def add(a, b):\n    return a + b\n")
+
+    def test_line_numbers_can_be_off(self):
+        source = "# 头部注释\n# 又一行\n\n" + CALC
+        text = (
+            "--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n"
+            " def add(a, b):\n-    return a - b\n+    return a + b\n"
+        )
+        result = apply_patch_text(source, text)
+        self.assertIn("return a + b", result)
+        self.assertTrue(result.startswith("# 头部注释"))
+
+    def test_multiple_hunks(self):
+        source = "a = 1\nb = 2\nc = 3\nd = 4\n"
+        text = (
+            "--- a/x.py\n+++ b/x.py\n"
+            "@@ -1,1 +1,1 @@\n-a = 1\n+a = 10\n"
+            "@@ -4,1 +4,1 @@\n-d = 4\n+d = 40\n"
+        )
+        self.assertEqual(apply_patch_text(source, text), "a = 10\nb = 2\nc = 3\nd = 40\n")
+
+    def test_insertion_into_empty_file(self):
+        text = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,2 @@\n+x = 1\n+y = 2\n"
+        self.assertEqual(apply_patch_text("", text), "x = 1\ny = 2\n")
+
+    def test_deletion_to_empty(self):
+        text = "--- a/x.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x = 1\n-y = 2\n"
+        self.assertEqual(apply_patch_text("x = 1\ny = 2\n", text), "\n")
+
+    def test_missing_context_raises(self):
+        with self.assertRaises(DiffError) as cm:
+            apply_patch_text("完全不同\n", FIX_DIFF, path="calc.py")
+        self.assertIn("上下文找不到", str(cm.exception))
+        self.assertIn("calc.py", str(cm.exception))
+
+    def test_trailing_newline_is_preserved(self):
+        self.assertTrue(apply_patch_text("a\n", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n").endswith("b\n"))
+        self.assertEqual(
+            apply_patch_text("a", "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"), "b"
+        )
+
+    def test_crlf_source_is_normalized(self):
+        result = apply_patch_text("a\r\nb\r\n", "--- a/x\n+++ b/x\n@@ -2 +2 @@\n-b\n+c\n")
+        self.assertEqual(result, "a\nc\n")
+
+    def test_apply_hunks_directly(self):
+        hunk = parse_patch(FIX_DIFF)[0].hunks[0]
+        self.assertEqual(apply_hunks(CALC, [hunk]), "def add(a, b):\n    return a + b\n")
+
+    def test_empty_patch_text_is_rejected(self):
+        with self.assertRaises(DiffError):
+            apply_patch_text(CALC, "   ")
+
+
+class TestSandbox(CodingTestCase):
+    def test_read_and_write_inside_base(self):
+        sandbox = self.sandbox()
+        self.write("calc.py", CALC)
+        self.assertEqual(sandbox.read_text("calc.py"), CALC)
+        sandbox.write_text("sub/new.py", "x = 1\n")
+        self.assertEqual(self.read("sub/new.py"), "x = 1\n")
+
+    def test_write_is_denied_by_default(self):
+        sandbox = Sandbox(self.root)
+        with self.assertRaises(SandboxError):
+            sandbox.write_text("x.py", "x = 1")
+
+    def test_escapes_are_blocked(self):
+        sandbox = self.sandbox()
+        for path in ("../x.py", "a/../../x.py", "/etc/passwd", "C:/Windows/x.py"):
+            with self.assertRaises(SandboxError):
+                sandbox.resolve(path)
+
+    def test_sensitive_files_are_blocked(self):
+        sandbox = self.sandbox()
+        self.write(".env", "SECRET=1")
+        for path in (".env", ".env.local"):
+            with self.assertRaises(SandboxError):
+                sandbox.read_text(path)
+        with self.assertRaises(SandboxError):
+            sandbox.write_text("id_rsa", "x")
+
+    def test_sensitive_files_can_be_whitelisted(self):
+        self.write(".env.example", "KEY=xxx")
+        sandbox = self.sandbox(allow=[".env.example"])
+        self.assertEqual(sandbox.read_text(".env.example"), "KEY=xxx")
+
+    def test_read_is_truncated(self):
+        self.write("big.txt", "甲" * 50)
+        sandbox = Sandbox(self.root, max_read_chars=10)
+        text = sandbox.read_text("big.txt")
+        self.assertTrue(text.startswith("甲" * 10))
+        self.assertIn("已截断", text)
+
+    def test_missing_file_message(self):
+        with self.assertRaises(SandboxError) as cm:
+            self.sandbox().read_text("nope.py")
+        self.assertIn("不存在", str(cm.exception))
+
+    def test_list_dir_skips_noise_and_filters(self):
+        self.write("a.py", "x = 1\n")
+        self.write("b.txt", "hello\n")
+        self.write("pkg/c.py", "y = 2\n")
+        os.makedirs(os.path.join(self.root, "__pycache__"), exist_ok=True)
+        sandbox = self.sandbox()
+        files = sandbox.list_dir()
+        self.assertIn("a.py", files)
+        self.assertIn("pkg/c.py", files)
+        self.assertNotIn("__pycache__", " ".join(files))
+        self.assertEqual(sandbox.list_dir(pattern="*.py"), ["a.py", "pkg/c.py"])
+
+    def test_search(self):
+        self.write("calc.py", "def add(a, b):\n    return a - b\n")
+        sandbox = self.sandbox()
+        hits = sandbox.search("def add")
+        self.assertEqual(hits[0]["path"], "calc.py")
+        self.assertEqual(hits[0]["line"], 1)
+        # `add(a` 不是合法正则（括号没闭合），这时按普通字符串搜
+        self.assertEqual(sandbox.search("add(a")[0]["path"], "calc.py")
+
+    def test_command_allowlist(self):
+        sandbox = Sandbox(self.root, allow_commands=["python"])
+        sandbox.check_command("python -c \"print(1)\"")
+        with self.assertRaises(CommandError):
+            sandbox.check_command("ls")
+        with self.assertRaises(CommandError):
+            sandbox.check_command("python -c \"print(1)\" ; rm -rf /")
+
+    def test_audit_log(self):
+        self.write("calc.py", CALC)
+        sandbox = self.sandbox()
+        with self.assertLogs("promptkit.coding", level="INFO") as captured:
+            sandbox.read_text("calc.py")
+            sandbox.write_text("calc.py", CALC)
+        self.assertIn("read calc.py", "\n".join(captured.output))
+
+    def test_repr(self):
+        self.assertIn("只读", repr(Sandbox(self.root)))
+        self.assertIn("读写", repr(self.sandbox()))
+
+
+class TestCodeFormats(CodingTestCase):
+    def test_diff_output_passes_structure(self):
+        self.assertEqual(get_output("diff").name, "diff")
+        self.assertEqual(DiffOutput().parse(FIX_DIFF).strip(), FIX_DIFF.strip())
+
+    def test_diff_output_dry_run_success(self):
+        self.write("calc.py", CALC)
+        text = DiffOutput().parse(FIX_DIFF, sandbox=self.sandbox(), path="calc.py")
+        self.assertIn("return a + b", text)
+
+    def test_diff_output_dry_run_catches_misalignment(self):
+        self.write("calc.py", "完全不同\n")
+        with self.assertRaises(CodeFormatError) as cm:
+            DiffOutput().parse(FIX_DIFF, sandbox=self.sandbox(), path="calc.py")
+        self.assertIn("干跑失败", str(cm.exception))
+
+    def test_diff_output_requires_existing_file_unless_creation(self):
+        with self.assertRaises(CodeFormatError) as cm:
+            DiffOutput().parse(
+                FIX_DIFF, sandbox=self.sandbox(), path="missing.py"
+            )
+        self.assertIn("读不到", str(cm.exception))
+
+    def test_full_file_output(self):
+        code = FullFileOutput().parse("```python\ndef f():\n    return 1\n```")
+        self.assertEqual(code, "def f():\n    return 1\n")
+
+    def test_full_file_syntax_error(self):
+        with self.assertRaises(CodeFormatError) as cm:
+            FullFileOutput().parse("def f(:\n    pass\n")
+        self.assertIn("语法错误", str(cm.exception))
+
+    def test_full_file_custom_syntax_check(self):
+        output = FullFileOutput(
+            language="js", syntax_check=lambda text: (_ for _ in ()).throw(ValueError("坏代码"))
+        )
+        with self.assertRaises(CodeFormatError):
+            output.parse("function f() {}")
+        # 非 python 且没有 checker：不做语法检查
+        self.assertEqual(
+            FullFileOutput(language="js").parse("function f() {}\n"), "function f() {}\n"
+        )
+
+    def test_changes_output(self):
+        import json as _json
+
+        raw = _json.dumps(
+            {
+                "changes": [
+                    {"path": "a.py", "action": "create", "content": "x = 1\n"},
+                    {"path": "b.py", "action": "delete"},
+                ]
+            }
+        )
+        data = ChangesOutput().parse(raw)
+        self.assertEqual(len(data["changes"]), 2)
+        self.assertEqual(data["changes"][0]["path"], "a.py")
+
+    def test_changes_output_accepts_a_bare_list(self):
+        import json as _json
+
+        raw = _json.dumps([{"path": "a.py", "content": "x = 1\n"}])
+        self.assertEqual(ChangesOutput().parse(raw)["changes"][0]["action"], "modify")
+
+    def test_changes_output_validation(self):
+        import json as _json
+
+        cases = [
+            (_json.dumps({"changes": []}), "changes 是空的"),
+            (_json.dumps({"changes": [{"action": "create", "content": "x"}]}), "path"),
+            (
+                _json.dumps({"changes": [{"path": "a.py", "action": "rename", "content": "x"}]}),
+                "不合法",
+            ),
+            (
+                _json.dumps({"changes": [{"path": "a.py", "action": "create"}]}),
+                "必须给 content",
+            ),
+            (
+                _json.dumps(
+                    {"changes": [
+                        {"path": "a.py", "action": "create", "content": "x"},
+                        {"path": "a.py", "action": "delete"},
+                    ]}
+                ),
+                "出现了两次",
+            ),
+            ("不是 JSON", "JSON"),
+        ]
+        for raw, expected in cases:
+            with self.assertRaises(CodeFormatError) as cm:
+                ChangesOutput().parse(raw)
+            self.assertIn(expected, str(cm.exception))
+
+    def test_changes_modify_requires_existing_file_when_sandbox_given(self):
+        import json as _json
+
+        raw = _json.dumps(
+            {"changes": [{"path": "nope.py", "action": "modify", "content": "x = 1\n"}]}
+        )
+        self.assertEqual(len(ChangesOutput().parse(raw)["changes"]), 1)  # 没沙箱不查
+        with self.assertRaises(CodeFormatError):
+            ChangesOutput().parse(raw, sandbox=self.sandbox())
+
+    def test_unknown_format(self):
+        with self.assertRaises(ValueError) as cm:
+            get_output("yaml")
+        self.assertIn("diff", str(cm.exception))
+
+
+class TestCodingStep(CodingTestCase):
+    def test_writes_the_validated_patch(self):
+        self.write("calc.py", CALC)
+        agent = FakeAgent([FIX_DIFF])
+        ctx = Workflow(
+            CodingStep(
+                task="把减法改成加法",
+                context={"calc.py": CALC},
+                path="calc.py",
+                base_dir=self.root,
+            )
+        ).run(agent=agent)
+        self.assertIn("return a + b", ctx["patch"])
+        self.assertEqual(ctx.trace[-1], "coding:1")
+        self.assertEqual(len(agent.prompts), 1)
+
+    def test_prompt_contains_task_files_error_and_format(self):
+        agent = FakeAgent([FIX_DIFF])
+        ctx_workflow = Workflow(
+            CodingStep(
+                task=Var("task"),
+                context={"src/calc.py": CALC},
+                error=Var("last_error"),
+                cautions=[Custom("不要修改测试文件")],
+                base_dir=self.root,
+            )
+        )
+        ctx_workflow.run(
+            agent=agent, task="修复 add", last_error={"output": "AssertionError: 2 != 5"}
+        )
+        prompt = prompt_text(agent.prompts[0])
+        self.assertIn("修复 add", prompt)
+        self.assertIn("src/calc.py", prompt)
+        self.assertIn("return a - b", prompt)
+        self.assertIn("AssertionError: 2 != 5", prompt)
+        self.assertIn("unified diff", prompt)
+        self.assertIn("不要修改测试文件", prompt)
+
+    def test_retries_after_bad_patch(self):
+        self.write("calc.py", CALC)
+        agent = FakeAgent(["这不是补丁", FIX_DIFF])
+        ctx = Workflow(
+            CodingStep(task="改", path="calc.py", base_dir=self.root)
+        ).run(agent=agent)
+        self.assertIn("return a + b", ctx["patch"])
+        self.assertEqual(len(agent.prompts), 2)
+        self.assertIn("你上一次的输出不能用", prompt_text(agent.prompts[1]))
+        self.assertEqual(ctx.trace[-1], "coding:2")
+
+    def test_gives_up_after_max_retries(self):
+        self.write("calc.py", CALC)
+        agent = FakeAgent(["坏", "还是坏"])
+        with self.assertRaises(CodeFormatError) as cm:
+            Workflow(
+                CodingStep(task="改", path="calc.py", base_dir=self.root, max_retries=1)
+            ).run(agent=agent)
+        self.assertIn("连续 2 次", str(cm.exception))
+        self.assertEqual(agent.replies, [])
+
+    def test_dry_run_rejects_a_misaligned_patch(self):
+        self.write("calc.py", "完全不同\n")
+        agent = FakeAgent([FIX_DIFF, FIX_DIFF])
+        with self.assertRaises(CodeFormatError):
+            Workflow(
+                CodingStep(task="改", path="calc.py", base_dir=self.root, max_retries=1)
+            ).run(agent=agent)
+        self.assertIn("干跑失败", prompt_text(agent.prompts[1]))
+
+    def test_verify_can_be_disabled(self):
+        self.write("calc.py", "完全不同\n")
+        ctx = Workflow(
+            CodingStep(task="改", path="calc.py", base_dir=self.root, verify=False)
+        ).run(agent=FakeAgent([FIX_DIFF]))
+        self.assertIn("return a + b", ctx["patch"])
+
+    def test_full_file_format(self):
+        agent = FakeAgent(["```python\ndef f():\n    return 1\n```"])
+        ctx = Workflow(
+            CodingStep(task="写个函数", output_format="full_file", output_key="code")
+        ).run(agent=agent)
+        self.assertEqual(ctx["code"], "def f():\n    return 1\n")
+        self.assertIn("完整的文件内容", prompt_text(agent.prompts[0]))
+
+    def test_json_format(self):
+        import json as _json
+
+        agent = FakeAgent(
+            [_json.dumps({"changes": [{"path": "a.py", "action": "create", "content": "x = 1\n"}]})]
+        )
+        ctx = Workflow(
+            CodingStep(task="新建文件", output_format="json", output_key="changes",
+                        base_dir=self.root)
+        ).run(agent=agent)
+        self.assertEqual(ctx["changes"]["changes"][0]["path"], "a.py")
+
+    def test_custom_output_object(self):
+        output = FullFileOutput(language="js")
+        ctx = Workflow(
+            CodingStep(task="写 js", output=output, output_key="code")
+        ).run(agent=FakeAgent(["function f() {}\n"]))
+        self.assertEqual(ctx["code"], "function f() {}\n")
+        self.assertEqual(Workflow(CodingStep(task="x", output=output)).run(
+            agent=FakeAgent(["x\n"])
+        )["patch"], "x\n")
+
+    def test_needs_an_agent(self):
+        Agent.set_default(None)
+        with self.assertRaises(ValueError) as cm:
+            Workflow(CodingStep(task="x")).run()
+        self.assertIn("agent", str(cm.exception))
+
+    def test_validation(self):
+        with self.assertRaises(ValueError):
+            CodingStep(task="x", max_retries=-1)
+        with self.assertRaises(TypeError):
+            CodingStep(task="x", output=object())
+        with self.assertRaises(ValueError):
+            CodingStep(task="x", output_format="yaml")
+
+    def test_describe(self):
+        self.assertIn("Coding(diff", CodingStep(task="改一行").describe())
+        self.assertIn("-> patch", CodingStep(task="改一行").describe())
+        self.assertIn("src/a.py", CodingStep(task="改", path="src/a.py").describe())
+
+
+class TestCodingIO(CodingTestCase):
+    def test_read_file_step(self):
+        self.write("calc.py", CALC)
+        ctx = Workflow(
+            ReadFileStep("calc.py", base_dir=self.root, max_chars=10)
+        ).run()
+        self.assertIn("已截断", ctx["source"])
+
+        ctx = Workflow(
+            ReadFileStep(Var("p"), output_key="code", base_dir=self.root)
+        ).run(p="calc.py")
+        self.assertEqual(ctx["code"], CALC)
+
+    def test_read_file_step_blocks_escape(self):
+        with self.assertRaises(SandboxError):
+            Workflow(ReadFileStep("../x.py", base_dir=self.root)).run()
+
+    def test_write_file_step(self):
+        ctx = Workflow(
+            WriteFileStep("out/a.txt", content=Var("text"), output_key="written",
+                          base_dir=self.root)
+        ).run(text="你好")
+        self.assertEqual(self.read("out/a.txt"), "你好")
+        self.assertEqual(ctx["written"]["path"], "out/a.txt")
+        self.assertEqual(ctx["written"]["chars"], 2)
+
+    def test_apply_diff_single_file(self):
+        self.write("calc.py", CALC)
+        ctx = Workflow(
+            ApplyDiff("calc.py", diff=Var("patch"), base_dir=self.root)
+        ).run(patch=FIX_DIFF)
+        self.assertEqual(self.read("calc.py"), "def add(a, b):\n    return a + b\n")
+        self.assertEqual(ctx["apply_result"]["files"], ["calc.py"])
+        self.assertEqual(ctx["apply_result"]["hunks"], 1)
+
+    def test_apply_diff_keyword_path(self):
+        self.write("calc.py", CALC)
+        Workflow(
+            ApplyDiff(path="calc.py", diff=FIX_DIFF, base_dir=self.root)
+        ).run()
+        self.assertIn("return a + b", self.read("calc.py"))
+
+    def test_apply_diff_multi_file(self):
+        self.write("a.py", "x = 1\n")
+        self.write("b.py", "y = 2\n")
+        patch = (
+            "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 10\n"
+            "--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-y = 2\n+y = 20\n"
+        )
+        ctx = Workflow(ApplyDiff(diff=patch, base_dir=self.root)).run()
+        self.assertEqual(sorted(ctx["apply_result"]["files"]), ["a.py", "b.py"])
+        self.assertEqual(self.read("a.py"), "x = 10\n")
+        self.assertEqual(self.read("b.py"), "y = 20\n")
+
+    def test_apply_diff_creates_and_deletes(self):
+        self.write("old.py", "x = 1\n")
+        patch = (
+            "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1,1 @@\n+x = 1\n"
+            "--- a/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x = 1\n"
+        )
+        ctx = Workflow(ApplyDiff(diff=patch, base_dir=self.root)).run()
+        self.assertEqual(ctx["apply_result"]["created"], ["new.py"])
+        self.assertEqual(ctx["apply_result"]["deleted"], ["old.py"])
+        self.assertTrue(os.path.exists(os.path.join(self.root, "new.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "old.py")))
+
+    def test_apply_diff_backup(self):
+        self.write("calc.py", CALC)
+        Workflow(
+            ApplyDiff("calc.py", diff=FIX_DIFF, base_dir=self.root, backup=True)
+        ).run()
+        self.assertEqual(self.read("calc.py.orig"), CALC)
+
+    def test_apply_diff_failure_leaves_file_untouched(self):
+        self.write("calc.py", "完全不同\n")
+        with self.assertRaises(DiffError):
+            Workflow(ApplyDiff("calc.py", diff=FIX_DIFF, base_dir=self.root)).run()
+        self.assertEqual(self.read("calc.py"), "完全不同\n")
+
+    def test_apply_diff_needs_a_diff(self):
+        with self.assertRaises(ValueError):
+            ApplyDiff("calc.py")
+
+    def test_apply_changes(self):
+        self.write("gone.py", "x = 1\n")
+        changes = {
+            "changes": [
+                {"path": "a.py", "action": "create", "content": "x = 1\n"},
+                {"path": "gone.py", "action": "delete"},
+            ]
+        }
+        ctx = Workflow(
+            ApplyChanges(Var("changes"), base_dir=self.root)
+        ).run(changes=changes)
+        self.assertEqual(ctx["apply_result"]["files"], ["a.py"])
+        self.assertEqual(ctx["apply_result"]["deleted"], ["gone.py"])
+        self.assertEqual(self.read("a.py"), "x = 1\n")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "gone.py")))
+
+    def test_list_dir_and_search_code_steps(self):
+        self.write("pkg/a.py", "def calculate():\n    return 1\n")
+        self.write("pkg/b.txt", "hello\n")
+        ctx = Workflow(
+            ListDir("pkg", pattern="*.py", output_key="files", base_dir=self.root),
+            SearchCode("def calculate", output_key="hits", base_dir=self.root),
+        ).run()
+        self.assertEqual(ctx["files"], ["pkg/a.py"])
+        self.assertEqual(ctx["hits"][0]["path"], "pkg/a.py")
+
+    def test_apply_patch_helper(self):
+        self.write("calc.py", CALC)
+        result = apply_patch(self.sandbox(), FIX_DIFF, path="calc.py")
+        self.assertEqual(result["files"], ["calc.py"])
+        self.assertIn("return a + b", self.read("calc.py"))
+
+
+class TestCommandExecution(CodingTestCase):
+    def test_run_command_success(self):
+        result = coding_run_command('python -c "print(42)"')
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["output"].strip(), "42")
+        self.assertFalse(result["timed_out"])
+
+    def test_run_command_failure(self):
+        result = coding_run_command('python -c "import sys; sys.exit(3)"')
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["returncode"], 3)
+        self.assertIn("退出码 3", result["output"])
+
+    def test_run_command_timeout(self):
+        result = coding_run_command('python -c "import time; time.sleep(5)"', timeout=1)
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["passed"])
+        self.assertIn("超时", result["output"])
+
+    def test_run_command_empty(self):
+        with self.assertRaises(CommandError):
+            coding_run_command("   ")
+
+    def test_output_truncation(self):
+        result = coding_run_command(
+            'python -c "print(1234567890)"', max_output_chars=5
+        )
+        self.assertIn("已截断", result["output"])
+
+    def test_run_tests_step(self):
+        ctx = Workflow(
+            RunTests('python -c "print(1)"', base_dir=self.root)
+        ).run()
+        self.assertTrue(ctx["test_result"]["passed"])
+        self.assertEqual(ctx["test_result"]["command"], 'python -c "print(1)"')
+
+    def test_run_tests_defaults(self):
+        step = RunTests("x")
+        self.assertEqual(step.output_key, "test_result")
+        self.assertEqual(step.timeout, 600.0)
+        self.assertEqual(step.name, "run_tests")
+        self.assertEqual(LintStep("y").output_key, "lint_result")
+
+    def test_allowlist_is_enforced(self):
+        with self.assertRaises(CommandError):
+            Workflow(
+                RunCommand("echo hi", allowlist=["python"], base_dir=self.root)
+            ).run()
+
+    def test_shell_metacharacters_are_rejected_with_allowlist(self):
+        with self.assertRaises(CommandError):
+            coding_run_command(
+                'python -c "print(1)" ; echo x',
+                sandbox=Sandbox(self.root, allow_commands=["python"]),
+            )
+
+    def test_cwd(self):
+        os.makedirs(os.path.join(self.root, "sub"), exist_ok=True)
+        ctx = Workflow(
+            RunCommand(
+                'python -c "import os; print(os.path.basename(os.getcwd()))"',
+                cwd="sub",
+                base_dir=self.root,
+            )
+        ).run()
+        self.assertIn("sub", ctx["command_result"]["output"])
+
+    def test_cwd_escape_is_blocked(self):
+        with self.assertRaises(SandboxError):
+            Workflow(
+                RunCommand('python -c "print(1)"', cwd="..", base_dir=self.root)
+            ).run()
+
+
+class TestFixLoop(CodingTestCase):
+    def test_stops_when_condition_holds(self):
+        ctx = Workflow(
+            FixLoop([CounterStep()], until=Var("n") >= 3, max_rounds=5)
+        ).run()
+        self.assertEqual(ctx["n"], 3)
+        self.assertEqual(ctx["fix_round"], 3)
+        self.assertFalse(ctx["fix_exhausted"])
+        self.assertIn("fix_loop:done", ctx.trace)
+
+    def test_marks_exhausted(self):
+        ctx = Workflow(
+            FixLoop([CounterStep()], until=Var("n") >= 10, max_rounds=2)
+        ).run()
+        self.assertEqual(ctx["n"], 2)
+        self.assertTrue(ctx["fix_exhausted"])
+        self.assertIn("fix_loop:exhausted", ctx.trace)
+
+    def test_can_raise_instead(self):
+        with self.assertRaises(LoopLimitExceeded):
+            Workflow(
+                FixLoop(
+                    [CounterStep()],
+                    until=Var("n") >= 10,
+                    max_rounds=2,
+                    on_exhausted="raise",
+                )
+            ).run()
+
+    def test_break_stops_without_marking_exhausted(self):
+        ctx = Workflow(
+            FixLoop([CounterStep(), Break()], until=Var("n") >= 10, max_rounds=3)
+        ).run()
+        self.assertEqual(ctx["n"], 1)
+        self.assertFalse(ctx["fix_exhausted"])
+        self.assertIn("fix_loop:done", ctx.trace)
+
+    def test_keys_can_be_disabled(self):
+        ctx = Workflow(
+            FixLoop(
+                [CounterStep()],
+                until=Var("n") >= 1,
+                round_key=None,
+                exhausted_key=None,
+            )
+        ).run()
+        self.assertNotIn("fix_round", ctx)
+        self.assertNotIn("fix_exhausted", ctx)
+
+    def test_do_chaining(self):
+        step = FixLoop(until=Var("n") >= 2, max_rounds=3).Do(CounterStep())
+        ctx = Workflow(step).run()
+        self.assertEqual(ctx["n"], 2)
+
+    def test_empty_body_is_reported_at_run_time(self):
+        with self.assertRaises(ValueError) as cm:
+            Workflow(FixLoop(until=True)).run()
+        self.assertIn("body 是空的", str(cm.exception))
+
+    def test_tree(self):
+        step = FixLoop([CounterStep()], until=Var("n") >= 1)
+        self.assertEqual(len(step.children()), 1)
+        self.assertIn("FixLoop", step.describe())
+        self.assertIn("tick", step.render())
+
+    def test_validation(self):
+        for kwargs in (
+            {"body": [CounterStep()]},                                   # 没有 until
+            {"body": [CounterStep()], "until": True, "max_rounds": 0},
+            {"body": [CounterStep()], "until": True, "on_exhausted": "explode"},
+        ):
+            with self.assertRaises((ValueError, TypeError)):
+                FixLoop(**kwargs)
+
+
+class TestGitSteps(CodingTestCase):
+    def setUp(self):
+        super().setUp()
+        import shutil
+
+        if shutil.which("git") is None:
+            self.skipTest("没有 git")
+        self.git = lambda *args: git(list(args), cwd=self.root)
+        self.assertEqual(self.git("init", "-q")["returncode"], 0)
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "tester")
+        self.write("calc.py", CALC)
+        self.git("add", "-A")
+        self.git("commit", "-m", "init")
+
+    def test_git_diff_shows_changes(self):
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        ctx = Workflow(GitDiff(output_key="diff", base_dir=self.root)).run()
+        self.assertIn("-    return a - b", ctx["diff"])
+        self.assertIn("+    return a + b", ctx["diff"])
+        self.assertTrue(ctx["diff_result"]["passed"])
+
+    def test_git_commit(self):
+        self.write("calc.py", "def add(a, b):\n    return a + b\n")
+        ctx = Workflow(
+            GitCommit(message="fix add", base_dir=self.root)
+        ).run()
+        self.assertTrue(ctx["commit_result"]["passed"])
+        log = self.git("log", "--oneline")
+        self.assertIn("fix add", log["output"])
+        self.assertIn("init", log["output"])
+
+    def test_commit_message_is_required(self):
+        with self.assertRaises(CommandError):
+            Workflow(GitCommit(message="  ", base_dir=self.root)).run()
+
+    def test_empty_repo_has_empty_diff(self):
+        other = self.temp_dir()
+        self.assertEqual(git(["init", "-q"], cwd=other)["returncode"], 0)
+        ctx = Workflow(GitDiff(base_dir=other)).run()
+        self.assertEqual(ctx["git_diff"], "")
+        self.assertTrue(ctx["git_diff_result"]["passed"])
+
+
+class TestCodingTools(CodingTestCase):
+    def test_read_file_tool(self):
+        self.write("calc.py", CALC)
+        tool = ReadFileTool(base_dir=self.root)
+        self.assertEqual(tool.run("calc.py"), CALC)
+        self.assertEqual(tool.call({"path": "calc.py"}), CALC)
+        self.assertTrue(tool.run("../secret").startswith("错误："))
+
+    def test_write_file_tool_is_read_only_by_default(self):
+        tool = WriteFileTool(base_dir=self.root)
+        self.assertTrue(tool.run("x.py", "x = 1\n").startswith("错误："))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "x.py")))
+
+        writable = WriteFileTool(base_dir=self.root, allow_write=True)
+        self.assertIn("已写入", writable.run("x.py", "x = 1\n"))
+        self.assertEqual(self.read("x.py"), "x = 1\n")
+
+    def test_apply_diff_tool(self):
+        self.write("calc.py", CALC)
+        tool = ApplyDiffTool(base_dir=self.root, allow_write=True)
+        result = tool.run(FIX_DIFF)
+        self.assertEqual(result["files"], ["calc.py"])
+        self.assertIn("return a + b", self.read("calc.py"))
+
+        readonly = ApplyDiffTool(base_dir=self.root)
+        self.write("calc.py", CALC)
+        self.assertTrue(readonly.run(FIX_DIFF).startswith("错误："))
+
+    def test_list_and_search_tools(self):
+        self.write("pkg/a.py", "def calculate():\n    return 1\n")
+        self.assertIn("pkg/a.py", ListDirTool(base_dir=self.root).run("pkg"))
+        hits = SearchCodeTool(base_dir=self.root).run("def calculate")
+        self.assertIn("pkg/a.py:1:", hits)
+
+    def test_run_command_tool_and_allowlist(self):
+        tool = RunCommandTool(base_dir=self.root, allow_commands=["python"])
+        result = tool.run('python -c "print(7)"')
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["output"].strip(), "7")
+        self.assertTrue(tool.run("ls").startswith("错误："))
+
+    def test_run_tests_tool(self):
+        tool = RunTestsTool(
+            base_dir=self.root,
+            command='python -c "print(1)"',
+            allow_commands=["python"],
+        )
+        self.assertIn("通过", tool.run())
+
+    def test_default_coding_tools(self):
+        self.write("calc.py", CALC)
+        tools = default_coding_tools(self.root)
+        self.assertEqual(
+            [tool.name for tool in tools],
+            ["read_file", "list_dir", "search_code", "apply_diff", "run_tests"],
+        )
+        self.assertTrue(tools[0].call({"path": "calc.py"}).startswith("def add"))
+        self.assertTrue(tools[3].call({"diff": FIX_DIFF}).startswith("错误："))  # 只读
+
+    def test_default_coding_tools_can_write(self):
+        self.write("calc.py", CALC)
+        tools = default_coding_tools(self.root, allow_write=True)
+        tools[3].call({"diff": FIX_DIFF})
+        self.assertIn("return a + b", self.read("calc.py"))
+
+    def test_tool_schemas(self):
+        for tool in default_coding_tools(self.root):
+            function = tool.schema()["function"]
+            self.assertEqual(function["name"], tool.name)
+            self.assertIn("parameters", function)
+
+    def test_tool_audit_log(self):
+        self.write("calc.py", CALC)
+        with self.assertLogs("promptkit.coding", level="INFO"):
+            ReadFileTool(base_dir=self.root).run("calc.py")
+
+
+class TestCodeSearch(CodingTestCase):
+    '''代码搜索：上下文、每文件上限、files_only、排除、预算。'''
+
+    SOURCE = (
+        "alpha = 1\n"
+        "target = 2\n"
+        "beta = 3\n"
+        "target = 4\n"
+        "gamma = 5\n"
+        "target = 6\n"
+        "delta = 7\n"
+    )
+
+    def test_context_lines_are_included(self):
+        self.write("mod.py", self.SOURCE)
+        hits = Sandbox(self.root).search("target", context=1)
+        self.assertEqual([hit["line"] for hit in hits], [2, 4, 6])
+        first = hits[0]
+        self.assertEqual(first["before"], ["alpha = 1"])
+        self.assertEqual(first["after"], ["beta = 3"])
+
+    def test_context_is_clipped_at_file_edges(self):
+        self.write("edge.py", "target\n")
+        hit = Sandbox(self.root).search("target", context=3)[0]
+        self.assertEqual(hit["before"], [])
+        self.assertEqual(hit["after"], [])
+
+    def test_max_per_file(self):
+        self.write("mod.py", self.SOURCE)
+        hits = Sandbox(self.root).search("target", max_per_file=2)
+        self.assertEqual(len(hits), 2)
+
+    def test_files_only_returns_counts(self):
+        self.write("a.py", "target = 1\ntarget = 2\n")
+        self.write("b.py", "target = 3\n")
+        files = Sandbox(self.root).search("target", files_only=True)
+        self.assertEqual(
+            {item["path"]: item["matches"] for item in files},
+            {"a.py": 2, "b.py": 1},
+        )
+
+    def test_exclude_globs(self):
+        self.write("src/a.py", "target\n")
+        self.write("tests/b.py", "target\n")
+        hits = Sandbox(self.root).search("target", exclude=("tests/*",))
+        self.assertEqual([hit["path"] for hit in hits], ["src/a.py"])
+
+    def test_file_budget(self):
+        for index in range(5):
+            self.write(f"m{index}.py", "target\n")
+        hits = Sandbox(self.root, max_search_files=2).search("target")
+        self.assertEqual(len(hits), 2)
+
+    def test_hit_budget(self):
+        self.write("mod.py", "target\n" * 20)
+        hits = Sandbox(self.root, max_search_hits=3, max_per_file=10).search("target")
+        self.assertEqual(len(hits), 3)
+
+    def test_long_lines_are_truncated(self):
+        self.write("long.py", "x" * 400 + "target\n")
+        hit = Sandbox(self.root, max_line_chars=20).search("target")[0]
+        self.assertLessEqual(len(hit["text"]), 20)
+
+    def test_empty_query(self):
+        with self.assertRaises(SandboxError):
+            Sandbox(self.root).search("   ")
+
+    def test_invalid_regex_falls_back_to_literal(self):
+        self.write("mod.py", "compute(a, b)\n")
+        hits = Sandbox(self.root).search("compute(a")
+        self.assertEqual(hits[0]["path"], "mod.py")
+
+    def test_format_hits_text(self):
+        self.write("mod.py", self.SOURCE)
+        hits = Sandbox(self.root).search("target", context=1)
+        text = format_hits(hits)
+        self.assertIn("mod.py:2: target = 2", text)
+        self.assertIn("| alpha = 1", text)
+        self.assertEqual(format_hits([]), "（没有匹配）")
+
+    def test_format_hits_for_files_only(self):
+        self.write("a.py", "target\n")
+        text = format_hits(Sandbox(self.root).search("target", files_only=True))
+        self.assertEqual(text, "a.py（1 处）")
+
+    def test_search_code_step_with_text_and_context(self):
+        self.write("mod.py", self.SOURCE)
+        ctx = Workflow(
+            SearchCode(
+                "target",
+                base_dir=self.root,
+                context=1,
+                as_text=True,
+                output_key="where",
+            )
+        ).run()
+        self.assertIn("mod.py:4: target = 4", ctx["where"])
+        self.assertIn("| beta = 3", ctx["where"])
+
+    def test_search_code_step_structured_is_the_default(self):
+        self.write("mod.py", self.SOURCE)
+        ctx = Workflow(
+            SearchCode("target", base_dir=self.root, max_per_file=1)
+        ).run()
+        self.assertEqual(ctx["hits"][0]["path"], "mod.py")
+        self.assertEqual(ctx["hits"][0]["line"], 2)
+        # 结构化结果可以直接喂给 ReadFileStep 式的取值表达式
+        self.assertEqual(Var("hits")[0]["path"].eval(ctx), "mod.py")
+
+    def test_search_code_step_files_only(self):
+        self.write("a.py", "target\n")
+        ctx = Workflow(
+            SearchCode("target", base_dir=self.root, files_only=True)
+        ).run()
+        self.assertEqual(ctx["hits"], [{"path": "a.py", "matches": 1}])
+
+    def test_search_tool_exposes_context(self):
+        self.write("mod.py", self.SOURCE)
+        tool = SearchCodeTool(base_dir=self.root)
+        text = tool.call({"query": "target", "context": 1})
+        self.assertIn("mod.py:2: target = 2", text)
+        self.assertIn("| alpha = 1", text)
+        schema = tool.schema()["function"]["parameters"]["properties"]
+        self.assertIn("context", schema)
+
+    def test_search_tool_is_sandboxed(self):
+        outside = self.temp_dir()
+        with open(os.path.join(outside, "secret.py"), "w", encoding="utf-8") as handle:
+            handle.write("target\n")
+        tool = SearchCodeTool(base_dir=self.root)
+        self.assertEqual(tool.call({"query": "target"}), "（没有匹配）")
+
+
+class TestCodingLayering(CodingTestCase):
+    def test_core_does_not_import_coding(self):
+        '''`coding` 是上层：core 不能反过来依赖它（否则 import core 就拖进沙箱/进程）。'''
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        pattern = re.compile(
+            r"^(?:from\s+(promptkit[\w.]*)\s+import|import\s+(promptkit[\w.]*))",
+            re.MULTILINE,
+        )
+        offenders = []
+        for path in sorted((root / "core").rglob("*.py")):
+            for match in pattern.finditer(path.read_text(encoding="utf-8")):
+                dep = match.group(1) or match.group(2)
+                if "promptkit.coding" in dep:
+                    offenders.append(f"{path.name}: {dep}")
+        self.assertEqual(offenders, [])
+
+
+# ==================== 多代理编排（orchestrate） ====================
+import time  # noqa: E402  （并发 / 超时测试要用）
+
+
+class OrchAgent:
+    '''编排测试用的假 agent：按顺序回话、可选发 USAGE、可选慢、可选失败。'''
+
+    def __init__(self, replies=None, *, tokens=0, delay=0.0, fail_times=0):
+        self.replies = list(replies or ["好的"])
+        self.tokens = tokens
+        self.delay = delay
+        self.fail_times = fail_times
+        self.prompts = []
+        self.tools_seen = []
+        self.resets = 0
+        self.calls = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def ask(self, prompt, tools=None, bus=None, **kwargs):
+        from promptkit.core.event_sys import Event, EventType
+
+        self.calls += 1
+        text = prompt["content"] if isinstance(prompt, dict) else str(prompt)
+        self.prompts.append(text)
+        self.tools_seen.append(tools)
+        if self.calls <= self.fail_times:
+            raise RuntimeError(f"第 {self.calls} 次挂了")
+        if bus is not None and self.tokens:
+            bus.emit(Event(EventType.USAGE, {"total_tokens": self.tokens}))
+        if self.delay:
+            time.sleep(self.delay)
+        return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+
+
+class TestTask(PromptkitTestCase):
+    def test_defaults(self):
+        task = Task("research")
+        self.assertEqual(task.description, "research")
+        self.assertEqual(task.key, "research")
+        self.assertEqual(task.depends_on, ())
+        self.assertEqual(task.max_retries, 1)
+        self.assertEqual(task.on_failure, "retry")
+
+    def test_output_key_wins(self):
+        self.assertEqual(Task("a", output_key="result").key, "result")
+
+    def test_empty_name(self):
+        with self.assertRaises(PlanError):
+            Task("   ")
+
+    def test_bad_on_failure(self):
+        with self.assertRaises(PlanError):
+            Task("a", on_failure="explode")
+
+    def test_fallback_needs_an_agent(self):
+        with self.assertRaises(PlanError):
+            Task("a", on_failure="fallback")
+
+    def test_negative_retries(self):
+        with self.assertRaises(PlanError):
+            Task("a", max_retries=-1)
+
+    def test_bad_timeout(self):
+        with self.assertRaises(PlanError):
+            Task("a", timeout=0)
+
+    def test_deps_are_normalised(self):
+        task = Task("a", depends_on=["b", "b", " c "], input_keys=["x", "x"])
+        self.assertEqual(task.depends_on, ("b", "c"))
+        self.assertEqual(task.input_keys, ("x",))
+
+    def test_to_spec(self):
+        spec = Task("a", "做点事", depends_on=("b",), output_key="out").to_spec()
+        self.assertEqual(spec["name"], "a")
+        self.assertEqual(spec["depends_on"], ["b"])
+        self.assertEqual(spec["output_key"], "out")
+        self.assertIn("on_failure", spec)
+
+    def test_repr(self):
+        self.assertIn("a", repr(Task("a", depends_on=("b",))))
+
+
+class TestPlan(PromptkitTestCase):
+    def test_empty_plan(self):
+        with self.assertRaises(PlanError):
+            Plan([])
+
+    def test_duplicate_names(self):
+        with self.assertRaises(PlanError) as cm:
+            Plan((Task("a"), Task("a")))
+        self.assertIn("重复", str(cm.exception))
+
+    def test_unknown_dependency(self):
+        with self.assertRaises(PlanError) as cm:
+            Plan((Task("a", depends_on=("nope",)),))
+        self.assertIn("不在计划里", str(cm.exception))
+
+    def test_self_dependency(self):
+        with self.assertRaises(PlanError) as cm:
+            Plan((Task("a", depends_on=("a",)),))
+        self.assertIn("自己", str(cm.exception))
+
+    def test_cycle(self):
+        with self.assertRaises(PlanError) as cm:
+            Plan((Task("a", depends_on=("b",)), Task("b", depends_on=("a",))))
+        self.assertIn("环", str(cm.exception))
+
+    def test_topological_order_is_stable(self):
+        plan = Plan(
+            (Task("c", depends_on=("b",)), Task("a"), Task("b", depends_on=("a",)))
+        )
+        self.assertEqual([task.name for task in plan.topological()], ["a", "b", "c"])
+
+    def test_waves(self):
+        plan = Plan(
+            (
+                Task("a"),
+                Task("b", depends_on=("a",)),
+                Task("c", depends_on=("a",)),
+                Task("d", depends_on=("b", "c")),
+            )
+        )
+        self.assertEqual(
+            [[task.name for task in layer] for layer in plan.waves()],
+            [["a"], ["b", "c"], ["d"]],
+        )
+
+    def test_from_template_with_dicts(self):
+        plan = Plan.from_template([{"name": "a"}, {"name": "b", "depends_on": ["a"]}])
+        self.assertEqual(plan.names, ["a", "b"])
+
+    def test_from_template_max_tasks(self):
+        with self.assertRaises(PlanError):
+            Plan.from_template([Task("a"), Task("b")], max_tasks=1)
+
+    def test_navigation(self):
+        plan = Plan((Task("a"), Task("b", depends_on=("a",))), task="原文")
+        self.assertEqual(len(plan), 2)
+        self.assertEqual([task.name for task in plan], ["a", "b"])
+        self.assertEqual(plan["b"].name, "b")
+        self.assertEqual(plan.task, "原文")
+        self.assertIn("a -> b", plan.describe())
+
+    def test_plan_from(self):
+        plan = Plan((Task("a"),))
+        self.assertIs(plan_from(plan), plan)
+        self.assertEqual(plan_from([Task("a")]).names, ["a"])
+        self.assertEqual(plan_from({"tasks": [{"name": "x"}]}).names, ["x"])
+        with self.assertRaises(PlanError):
+            plan_from("不是计划")
+
+
+class TestOrchestrator(PromptkitTestCase):
+    def test_runs_in_dependency_order_and_passes_outputs(self):
+        research = OrchAgent(["调研结果"])
+        writer = OrchAgent(["报告正文"])
+        plan = Plan.from_template(
+            [
+                Task("research", "调研一下", agent=research),
+                Task("write", "根据 {{research}} 写报告", agent=writer,
+                     depends_on=("research",), output_key="report"),
+            ]
+        )
+        result = Orchestrator().run(plan)
+        self.assertTrue(result.ok)
+        self.assertEqual(writer.prompts[0], "根据 调研结果 写报告")
+        self.assertEqual(result.to_context(), {"research": "调研结果", "report": "报告正文"})
+
+    def test_agents_get_their_own_prompt(self):
+        first, second = OrchAgent(["一"]), OrchAgent(["二"])
+        plan = Plan.from_template([Task("a", agent=first), Task("b", agent=second)])
+        Orchestrator().run(plan)
+        self.assertEqual(first.prompts, ["a"])
+        self.assertEqual(second.prompts, ["b"])
+
+    def test_upstream_outputs_are_attached_when_not_referenced(self):
+        research = OrchAgent(["调研结果"])
+        writer = OrchAgent(["报告"])
+        plan = Plan.from_template(
+            [
+                Task("research", "调研一下", agent=research),
+                Task("write", "写一份报告", agent=writer, depends_on=("research",)),
+            ]
+        )
+        Orchestrator().run(plan)
+        self.assertIn("上游任务的结果", writer.prompts[0])
+        self.assertIn("调研结果", writer.prompts[0])
+
+    def test_upstream_is_not_duplicated_when_referenced(self):
+        research = OrchAgent(["调研结果"])
+        writer = OrchAgent(["报告"])
+        plan = Plan.from_template(
+            [
+                Task("research", "调研一下", agent=research),
+                Task("write", "根据 {{research}} 写报告", agent=writer,
+                     depends_on=("research",)),
+            ]
+        )
+        Orchestrator().run(plan)
+        self.assertEqual(writer.prompts[0], "根据 调研结果 写报告")
+
+    def test_dependent_is_skipped_when_dependency_fails(self):
+        failing = OrchAgent(fail_times=99)
+        child = OrchAgent(["不该被调用"])
+        plan = Plan.from_template(
+            [
+                Task("a", agent=failing, max_retries=0),
+                Task("b", agent=child, depends_on=("a",)),
+            ]
+        )
+        result = Orchestrator().run(plan)
+        self.assertEqual(result.by_name("a").status, "failed")
+        self.assertEqual(result.by_name("b").status, "skipped")
+        self.assertIn("依赖", result.by_name("b").error)
+        self.assertEqual(child.calls, 0)
+
+    def test_retry_then_success(self):
+        agent = OrchAgent(["好了"], fail_times=1)
+        result = Orchestrator().run(
+            Plan.from_template([Task("a", agent=agent, max_retries=2)])
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.results[0].attempts, 2)
+        self.assertIn("上一次执行出错了", agent.prompts[1])
+
+    def test_retries_are_bounded(self):
+        agent = OrchAgent(fail_times=99)
+        result = Orchestrator().run(
+            Plan.from_template([Task("a", agent=agent, max_retries=2)])
+        )
+        self.assertEqual(result.results[0].status, "failed")
+        self.assertEqual(result.results[0].attempts, 3)
+        self.assertEqual(agent.calls, 3)
+
+    def test_fallback_agent(self):
+        primary = OrchAgent(fail_times=99)
+        backup = OrchAgent(["备用答案"])
+        result = Orchestrator().run(
+            Plan.from_template(
+                [
+                    Task(
+                        "a",
+                        agent=primary,
+                        max_retries=0,
+                        on_failure="fallback",
+                        fallback_agent=backup,
+                    )
+                ]
+            )
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.results[0].output, "备用答案")
+        self.assertIn("fallback", result.results[0].error)
+
+    def test_abort_stops_the_plan(self):
+        agent = OrchAgent(fail_times=99)
+        plan = Plan.from_template(
+            [
+                Task("a", agent=agent, max_retries=0, on_failure="abort"),
+                Task("b", agent=OrchAgent(["x"])),
+            ]
+        )
+        with self.assertRaises(TaskError) as cm:
+            Orchestrator().run(plan)
+        partial = cm.exception.result
+        self.assertEqual(partial.by_name("a").status, "failed")
+        self.assertEqual(partial.by_name("b").status, "skipped")
+        self.assertIn("中止", partial.by_name("b").error)
+
+    def test_stop_on_error(self):
+        agent = OrchAgent(fail_times=99)
+        plan = Plan.from_template(
+            [Task("a", agent=agent, max_retries=0), Task("b", agent=OrchAgent(["x"]))]
+        )
+        with self.assertRaises(TaskError):
+            Orchestrator(OrchestratorConfig(stop_on_error=True)).run(plan)
+
+    def test_skip_policy_marks_skipped(self):
+        '''`skip` = 不重试、标 skipped（依赖它的任务也会被跳过）。'''
+        agent = OrchAgent(fail_times=99)
+        result = Orchestrator().run(
+            Plan.from_template([Task("a", agent=agent, on_failure="skip")])
+        )
+        self.assertEqual(result.results[0].status, "skipped")
+        self.assertEqual(agent.calls, 1)
+
+    def test_abort_does_not_retry(self):
+        agent = OrchAgent(fail_times=99)
+        with self.assertRaises(TaskError):
+            Orchestrator().run(
+                Plan.from_template(
+                    [Task("a", agent=agent, on_failure="abort", max_retries=3)]
+                )
+            )
+        self.assertEqual(agent.calls, 1)
+
+    def test_budget(self):
+        agents = [OrchAgent(tokens=100) for _ in range(3)]
+        plan = Plan.from_template(
+            [Task(f"t{index}", agent=agents[index]) for index in range(3)]
+        )
+        result = Orchestrator(OrchestratorConfig(max_total_tokens=150)).run(plan)
+        self.assertEqual(
+            [item.status for item in result.results],
+            ["success", "success", "skipped"],
+        )
+        self.assertIn("预算", result.by_name("t2").error)
+        self.assertEqual(result.tokens, 200)
+
+    def test_missing_agent(self):
+        Agent.set_default(None)
+        result = Orchestrator().run(Plan.from_template([Task("a")]))
+        self.assertEqual(result.results[0].status, "failed")
+        self.assertIn("没有可用的 agent", result.results[0].error)
+
+    def test_missing_variable(self):
+        result = Orchestrator().run(
+            Plan.from_template([Task("a", "写 {{不存在}}", agent=OrchAgent(["x"]))])
+        )
+        self.assertEqual(result.results[0].status, "failed")
+        self.assertIn("变量不存在", result.results[0].error)
+
+    def test_max_tasks(self):
+        plan = Plan.from_template([Task(f"t{index}") for index in range(3)])
+        with self.assertRaises(PlanError):
+            Orchestrator(OrchestratorConfig(max_tasks=2)).run(plan)
+
+    def test_isolation_resets_agent(self):
+        agent = OrchAgent(["x"])
+        Orchestrator().run(Plan.from_template([Task("a", agent=agent)]))
+        self.assertEqual(agent.resets, 1)
+
+        agent2 = OrchAgent(["x"])
+        Orchestrator(OrchestratorConfig(isolate=False)).run(
+            Plan.from_template([Task("a", agent=agent2)])
+        )
+        self.assertEqual(agent2.resets, 0)
+
+    def test_on_result_callback(self):
+        seen = []
+        Orchestrator(on_result=lambda task, result: seen.append((task.name, result.status))).run(
+            Plan.from_template([Task("a", agent=OrchAgent(["x"]))])
+        )
+        self.assertEqual(seen, [("a", "success")])
+
+    def test_concurrency(self):
+        slow = [OrchAgent(["a"], delay=0.3), OrchAgent(["b"], delay=0.3)]
+        plan = Plan.from_template(
+            [Task("a", agent=slow[0]), Task("b", agent=slow[1])]
+        )
+        started = time.perf_counter()
+        result = Orchestrator(OrchestratorConfig(max_concurrency=2)).run(plan)
+        elapsed = time.perf_counter() - started
+        self.assertTrue(result.ok)
+        self.assertLess(elapsed, 0.55)      # 串行要 0.6s 以上
+        self.assertEqual([item.name for item in result.results], ["a", "b"])
+
+    def test_timeout(self):
+        result = Orchestrator(
+            OrchestratorConfig(per_task_timeout=0.05)
+        ).run(
+            Plan.from_template(
+                [Task("slow", agent=OrchAgent(["x"], delay=0.4), max_retries=0)]
+            )
+        )
+        self.assertEqual(result.results[0].status, "failed")
+        self.assertIn("超时", result.results[0].error)
+
+    def test_agent_factory_receives_task(self):
+        seen = []
+
+        def factory(task):
+            seen.append(task.name)
+            return OrchAgent([f"{task.name} 的结果"])
+
+        result = Orchestrator(agent_factory=factory).run(
+            Plan.from_template([Task("a"), Task("b", depends_on=("a",))])
+        )
+        self.assertEqual(seen, ["a", "b"])
+        self.assertEqual(result.to_context(), {"a": "a 的结果", "b": "b 的结果"})
+
+    def test_config_validation(self):
+        for kwargs in ({"max_concurrency": 0}, {"max_tasks": 0}, {"max_total_tokens": 0},
+                       {"per_task_timeout": -1}):
+            with self.assertRaises(ValueError):
+                OrchestratorConfig(**kwargs)
+
+
+class TestPlanResult(PromptkitTestCase):
+    def test_views(self):
+        result = PlanResult(
+            task="x",
+            results=[
+                TaskResult("a", "success", output="A", tokens=10),
+                TaskResult("b", "failed", error="坏了", tokens=5),
+                TaskResult("c", "skipped", error="依赖没成功"),
+            ],
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual([item.name for item in result.succeeded], ["a"])
+        self.assertEqual([item.name for item in result.failed], ["b"])
+        self.assertEqual([item.name for item in result.skipped], ["c"])
+        self.assertEqual(result.tokens, 15)
+        self.assertEqual(result.to_context(), {"a": "A"})
+        self.assertIn("失败 1", result.summary())
+        self.assertIn("✗ b", result.summary())
+        data = result.to_dict()
+        self.assertEqual(data["tokens"], 15)
+        self.assertEqual(len(data["results"]), 3)
+        self.assertIn("PlanResult", repr(result))
+
+    def test_all_success(self):
+        result = PlanResult(results=[TaskResult("a", "success", output=1)])
+        self.assertTrue(result.ok)
+
+
+class TestTemplatePlanner(PromptkitTestCase):
+    def test_returns_plan(self):
+        planner = TemplatePlanner([Task("a"), Task("b", depends_on=("a",))])
+        plan = planner.plan("需求", {})
+        self.assertEqual(plan.names, ["a", "b"])
+        self.assertIn("TemplatePlanner", repr(planner))
+
+    def test_max_tasks(self):
+        with self.assertRaises(PlanError):
+            TemplatePlanner([Task("a"), Task("b")], max_tasks=1).plan("x", {})
+
+    def test_task_text_is_carried(self):
+        plan = TemplatePlanner([Task("a")]).plan("原始需求", {})
+        self.assertEqual(plan.task, "原始需求")
+
+
+class TestLLMPlanner(PromptkitTestCase):
+    def planner(self, replies, **kwargs):
+        return LLMPlanner(OrchAgent(replies), **kwargs)
+
+    def test_parses_tasks(self):
+        import json as _json
+
+        raw = _json.dumps(
+            {
+                "tasks": [
+                    {"name": "research", "description": "调研", "role": "researcher"},
+                    {
+                        "name": "write",
+                        "description": "写报告",
+                        "role": "writer",
+                        "depends_on": ["research"],
+                        "output_key": "report",
+                    },
+                ],
+                "reasoning": "先调研再写",
+            }
+        )
+        plan = self.planner([raw]).plan("做个报告", {})
+        self.assertEqual(plan.names, ["research", "write"])
+        self.assertEqual(plan["write"].depends_on, ("research",))
+        self.assertEqual(plan["write"].output_key, "report")
+        self.assertEqual(plan.task, "做个报告")
+
+    def test_truncates_to_max_tasks(self):
+        import json as _json
+
+        raw = _json.dumps(
+            {"tasks": [{"name": f"t{index}", "description": "x"} for index in range(5)]}
+        )
+        self.assertEqual(self.planner([raw], max_tasks=2).plan("x", {}).names, ["t0", "t1"])
+
+    def test_drops_unknown_dependencies(self):
+        import json as _json
+
+        raw = _json.dumps(
+            {
+                "tasks": [
+                    {"name": "a", "description": "A", "depends_on": ["不存在"]},
+                    {"name": "b", "description": "B", "depends_on": ["a"]},
+                ]
+            }
+        )
+        plan = self.planner([raw]).plan("x", {})
+        self.assertEqual(plan["a"].depends_on, ())
+        self.assertEqual(plan["b"].depends_on, ("a",))
+
+    def test_retries_on_bad_json(self):
+        import json as _json
+
+        agent = OrchAgent(["不是 JSON", _json.dumps({"tasks": [{"name": "a", "description": "A"}]})])
+        plan = LLMPlanner(agent).plan("x", {})
+        self.assertEqual(plan.names, ["a"])
+        self.assertIn("上一次的输出无法使用", agent.prompts[1])
+
+    def test_empty_plan(self):
+        import json as _json
+
+        with self.assertRaises(PlanError):
+            self.planner([_json.dumps({"tasks": []})]).plan("x", {})
+
+    def test_prompt_contains_limits_and_context(self):
+        import json as _json
+
+        agent = OrchAgent([_json.dumps({"tasks": [{"name": "a", "description": "A"}]})])
+        LLMPlanner(agent, max_tasks=3).plan("原始需求", {"usr_input": "内容"})
+        prompt = agent.prompts[0]
+        self.assertIn("原始需求", prompt)
+        self.assertIn("最多 3 个", prompt)
+        self.assertIn("usr_input", prompt)
+
+    def test_invalid_on_failure_is_rejected(self):
+        import json as _json
+
+        raw = _json.dumps({"tasks": [{"name": "a", "description": "A", "on_failure": "x"}]})
+        with self.assertRaises(Exception):
+            self.planner([raw]).plan("x", {})
+
+
+class TestPlanSteps(PromptkitTestCase):
+    def test_plan_step_with_template(self):
+        ctx = Workflow(
+            PlanStep(task="需求", planner=TemplatePlanner([Task("a"), Task("b", depends_on=("a",))]))
+        ).run()
+        self.assertIsInstance(ctx["plan"], Plan)
+        self.assertEqual(ctx["plan"].names, ["a", "b"])
+        self.assertIn("plan:2", ctx.trace)
+
+    def test_plan_step_with_agent_uses_llm_planner(self):
+        import json as _json
+
+        raw = _json.dumps({"tasks": [{"name": "a", "description": "A"}]})
+        agent = OrchAgent([raw])
+        ctx = Workflow(PlanStep(task=Var("需求"), planner=agent, max_tasks=2)).run(需求="做个东西")
+        self.assertEqual(ctx["plan"].names, ["a"])
+        self.assertIn("做个东西", agent.prompts[0])
+
+    def test_plan_step_without_planner(self):
+        with self.assertRaises(ValueError):
+            Workflow(PlanStep(task="x")).run()
+
+    def test_plan_step_passes_context_keys(self):
+        captured = {}
+
+        class Recorder(Planner):
+            def plan(self, task, context):
+                captured.update(context)
+                return Plan((Task("a"),))
+
+        Workflow(
+            PlanStep(task="x", planner=Recorder(), context_keys=("name",))
+        ).run(name="小明", other="忽略")
+        self.assertEqual(captured, {"name": "小明"})
+
+    def test_execute_plan_writes_results_and_outputs(self):
+        plan = Plan.from_template([Task("a", agent=OrchAgent(["结果A"]), output_key="out_a")])
+        ctx = Workflow(ExecutePlan(plan=plan)).run()
+        self.assertEqual(ctx["task_results"][0]["name"], "a")
+        self.assertEqual(ctx["task_results"][0]["status"], "success")
+        self.assertIsInstance(ctx["plan_result"], PlanResult)
+        self.assertEqual(ctx["out_a"], "结果A")
+        self.assertIn("execute_plan:1/1", ctx.trace)
+
+    def test_execute_plan_strict(self):
+        plan = Plan.from_template([Task("a", agent=OrchAgent(fail_times=99), max_retries=0)])
+        with self.assertRaises(TaskError):
+            Workflow(ExecutePlan(plan=plan, strict=True)).run()
+
+    def test_execute_plan_from_template_list(self):
+        ctx = Workflow(
+            ExecutePlan(plan=[Task("a", agent=OrchAgent(["x"]))])
+        ).run()
+        self.assertTrue(ctx["plan_result"].ok)
+
+    def test_execute_plan_with_factory(self):
+        ctx = Workflow(
+            ExecutePlan(
+                plan=Plan.from_template([Task("a", role="writer")]),
+                agent_factory=lambda task: OrchAgent([f"{task.role} 写的"]),
+            )
+        ).run()
+        self.assertEqual(ctx["a"], "writer 写的")
+
+    def test_aggregate_step_text(self):
+        agent = OrchAgent(["合并后的答复"])
+        ctx = Workflow(
+            ExecutePlan(plan=Plan.from_template([Task("a", agent=OrchAgent(["结果A"]))])),
+            AggregateStep(agent=agent),
+        ).run()
+        self.assertEqual(ctx["final"], "合并后的答复")
+        self.assertIn("## a [success]", agent.prompts[0])
+
+    def test_aggregate_step_structured(self):
+        ctx = Workflow(
+            ExecutePlan(plan=Plan.from_template([Task("a", agent=OrchAgent(["结果A"]))])),
+            AggregateStep(agent=OrchAgent(['{"status": "ok"}']), output_model=Order),
+        ).run()
+        self.assertIsInstance(ctx["final"], Order)
+        self.assertEqual(ctx["final"].status, "ok")
+
+    def test_aggregate_step_without_results(self):
+        with self.assertRaises(ValueError):
+            Workflow(AggregateStep(agent=OrchAgent(["x"]))).run()
+
+    def test_format_task_results_marks_failures(self):
+        text = format_task_results(
+            [
+                {"name": "a", "status": "success", "output": "好"},
+                {"name": "b", "status": "failed", "error": "坏了"},
+            ]
+        )
+        self.assertIn("## a [success]", text)
+        self.assertIn("（错误：坏了）", text)
+        self.assertIn("这些任务没有成功：b", text)
+
+    def test_format_task_results_truncates(self):
+        text = format_task_results(
+            [{"name": "a", "status": "success", "output": "x" * 200}], max_chars=10
+        )
+        self.assertIn("已截断", text)
+
+
+class TestDelegateTool(PromptkitTestCase):
+    def test_delegates_and_prefixes(self):
+        researcher = OrchAgent(["调研结果"])
+        tool = DelegateTool({"researcher": researcher}, max_delegations=2)
+        self.assertEqual(tool.run("researcher", "调研一下"), "【researcher】调研结果")
+        self.assertEqual(researcher.prompts, ["调研一下"])
+
+    def test_unknown_agent(self):
+        tool = DelegateTool({"researcher": OrchAgent(["x"])})
+        self.assertIn("没有叫", tool.run("nobody", "x"))
+
+    def test_max_delegations(self):
+        tool = DelegateTool({"a": OrchAgent(["x"])}, max_delegations=1)
+        tool.run("a", "第一次")
+        self.assertIn("上限", tool.run("a", "第二次"))
+        tool.reset()
+        self.assertIn("【a】", tool.run("a", "重置后"))
+
+    def test_depth_limit(self):
+        tool = DelegateTool({"a": OrchAgent(["x"])}, max_depth=1, depth=1)
+        self.assertIn("深度", tool.run("a", "x"))
+
+    def test_nested_agent_gets_a_deeper_tool(self):
+        sub = OrchAgent(["内层"])
+        tool = DelegateTool({"a": sub}, max_depth=2)
+        tool.run("a", "x")
+        passed = sub.tools_seen[0]
+        self.assertEqual(len(passed), 1)
+        self.assertIsInstance(passed[0], DelegateTool)
+        self.assertEqual(passed[0].depth, 1)
+
+    def test_max_depth_one_means_no_further_tool(self):
+        sub = OrchAgent(["内层"])
+        DelegateTool({"a": sub}, max_depth=1).run("a", "x")
+        self.assertIsNone(sub.tools_seen[0])
+
+    def test_agent_factory(self):
+        tool = DelegateTool({}, agent_factory=lambda name: OrchAgent([f"{name} 干的"]))
+        self.assertEqual(tool.run("coder", "写代码"), "【coder】coder 干的")
+
+    def test_empty_task(self):
+        self.assertIn("不能是空的", DelegateTool({"a": OrchAgent(["x"])}).run("a", " "))
+
+    def test_schema_lists_agents(self):
+        tool = DelegateTool({"writer": OrchAgent(["x"]), "coder": OrchAgent(["y"])})
+        function = tool.schema()["function"]
+        self.assertEqual(function["parameters"]["properties"]["agent"]["enum"], ["coder", "writer"])
+
+    def test_needs_agents_or_factory(self):
+        with self.assertRaises(ValueError):
+            DelegateTool({})
+        with self.assertRaises(ValueError):
+            DelegateTool({"a": OrchAgent(["x"])}, max_delegations=0)
+
+
+class TestSubAgents(PromptkitTestCase):
+    def test_sub_agent_has_its_own_history(self):
+        before = Agent.default()
+        agent = sub_agent("你是调研员", api_key="sk-test")
+        self.assertEqual(agent.start_prompts[-1]["content"], "你是调研员")
+        self.assertEqual(agent.history, [])
+        self.assertIs(Agent.default(), before)      # 不抢默认 agent
+
+    def test_sub_agent_needs_a_system_prompt(self):
+        with self.assertRaises(ValueError):
+            sub_agent("   ", api_key="sk-test")
+
+    def test_role_factory(self):
+        factory = RoleFactory({"writer": "你是写手", "researcher": "你是调研员"})
+        agent = factory(Task("x", role="writer"))
+        self.assertEqual(agent.start_prompts[-1]["content"], "你是写手")
+        with self.assertRaises(KeyError):
+            factory(Task("y", role="nope"))
+
+    def test_role_factory_default(self):
+        factory = RoleFactory({"writer": "你是写手"}, default_system="你是通用助手")
+        agent = factory(Task("x", role="unknown"))
+        self.assertEqual(agent.start_prompts[-1]["content"], "你是通用助手")
+
+    def test_structured_answer(self):
+        agent = OrchAgent(['{"status": "ok"}'])
+        value = structured_answer(agent, "给我个结构", Order)
+        self.assertEqual(value.status, "ok")
+
+    def test_structured_answer_retries(self):
+        agent = OrchAgent(["不是 JSON", '{"status": "ok"}'])
+        self.assertEqual(structured_answer(agent, "x", Order).status, "ok")
+        self.assertIn("上一次的输出无法使用", agent.prompts[1])
+
+    def test_structured_answer_gives_up(self):
+        from promptkit.executor import MaxRetriesExceeded
+
+        with self.assertRaises(MaxRetriesExceeded):
+            structured_answer(OrchAgent(["坏"]), "x", Order, max_retries=1)
+
+    def test_structured_answer_does_not_render_braces(self):
+        '''任务输出里带 `{{x}}` 时不能被当成模板（这是不用 Executor 的原因）。'''
+        agent = OrchAgent(['{"status": "ok"}'])
+        structured_answer(agent, "数据：{{x}} 和 {y}", Order)
+        self.assertIn("{{x}}", agent.prompts[0])
+
+
+class TestOrchestrateLayering(PromptkitTestCase):
+    def test_core_does_not_import_orchestrate(self):
+        '''编排是上层：core 不能反过来依赖它。'''
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        pattern = re.compile(
+            r"^(?:from\s+(promptkit[\w.]*)\s+import|import\s+(promptkit[\w.]*))",
+            re.MULTILINE,
+        )
+        offenders = []
+        for path in sorted((root / "core").rglob("*.py")):
+            for match in pattern.finditer(path.read_text(encoding="utf-8")):
+                dependency = match.group(1) or match.group(2)
+                if "promptkit.orchestrate" in dependency:
+                    offenders.append(f"{path.name}: {dependency}")
+        self.assertEqual(offenders, [])
+
+
+# ==================== Skill（可注册的能力单元） ====================
+from promptkit.skill import (  # noqa: E402
+    Skill,
+    SkillAlreadyExists,
+    SkillContext,
+    SkillError,
+    SkillExecutionError,
+    SkillNotFound,
+    SkillRegistry,
+    SkillSpec,
+    SkillStep,
+    SkillTool,
+    SkillValidationError,
+    build_parameters,
+    build_spec,
+    result_text,
+    skill,
+    type_schema,
+    validate_args,
+)
+
+
+class TestSkillSchema(PromptkitTestCase):
+    def test_basic_types_and_required(self):
+        def handler(text: str, count: int, ratio: float, flag: bool) -> None:
+            pass
+
+        schema = build_parameters(handler)
+        self.assertEqual(
+            {name: item["type"] for name, item in schema["properties"].items()},
+            {"text": "string", "count": "integer", "ratio": "number", "flag": "boolean"},
+        )
+        self.assertEqual(
+            schema["required"], ["text", "count", "ratio", "flag"]
+        )
+
+    def test_defaults_are_optional_and_recorded(self):
+        def handler(text: str, max_words: int = 100) -> None:
+            pass
+
+        schema = build_parameters(handler)
+        self.assertEqual(schema["required"], ["text"])
+        self.assertEqual(schema["properties"]["max_words"], {"type": "integer", "default": 100})
+
+    def test_ctx_is_skipped(self):
+        def handler(text: str, ctx: SkillContext) -> None:
+            pass
+
+        self.assertEqual(list(build_parameters(handler)["properties"]), ["text"])
+
+    def test_varargs_are_skipped(self):
+        def handler(text: str, *args, **kwargs) -> None:
+            pass
+
+        self.assertEqual(list(build_parameters(handler)["properties"]), ["text"])
+
+    def test_optional_literal_enum_and_collections(self):
+        from enum import Enum
+        from typing import Literal, Optional
+
+        class Color(Enum):
+            RED = "red"
+            BLUE = "blue"
+
+        def handler(
+            a: Optional[str],
+            b: Literal["x", "y"],
+            c: list[int],
+            d: dict[str, int],
+            e: Color,
+        ) -> None:
+            pass
+
+        properties = build_parameters(handler)["properties"]
+        self.assertEqual(properties["a"]["type"], ["string", "null"])
+        self.assertEqual(properties["b"]["enum"], ["x", "y"])
+        self.assertEqual(properties["c"], {"type": "array", "items": {"type": "integer"}})
+        self.assertEqual(
+            properties["d"], {"type": "object", "additionalProperties": {"type": "integer"}}
+        )
+        self.assertEqual(properties["e"]["enum"], ["red", "blue"])
+
+    def test_pydantic_model_becomes_object_schema(self):
+        def handler(order: Order) -> None:
+            pass
+
+        schema = build_parameters(handler)["properties"]["order"]
+        self.assertEqual(schema["type"], "object")
+        self.assertIn("status", schema["properties"])
+
+    def test_any_and_missing_annotations(self):
+        from typing import Any
+
+        def handler(a: Any, b) -> None:
+            pass
+
+        properties = build_parameters(handler)["properties"]
+        self.assertEqual(properties["a"], {})
+        self.assertEqual(properties["b"], {"type": "string"})
+
+    def test_type_schema_fallbacks(self):
+        from typing import Any
+
+        self.assertEqual(type_schema(Any), {})
+        self.assertEqual(type_schema(list), {"type": "array"})
+        self.assertEqual(type_schema(dict), {"type": "object"})
+
+    def test_validate_args(self):
+        spec = SkillSpec(
+            "s", "描述", lambda text: text,
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}, "n": {"type": "integer"}},
+                "required": ["text"],
+            },
+        )
+        validate_args(spec, {"text": "a"})
+        with self.assertRaises(SkillValidationError) as cm:
+            validate_args(spec, {})
+        self.assertIn("缺少必填参数", str(cm.exception))
+        with self.assertRaises(SkillValidationError) as cm:
+            validate_args(spec, {"text": "a", "nope": 1})
+        self.assertIn("不认识", str(cm.exception))
+        with self.assertRaises(SkillValidationError) as cm:
+            validate_args(spec, {"text": 1})
+        self.assertIn("应该是 string", str(cm.exception))
+        with self.assertRaises(SkillValidationError):
+            validate_args(spec, {"text": "a", "n": True})
+
+    def test_validate_args_enum(self):
+        spec = SkillSpec(
+            "s", "描述", lambda label: label,
+            parameters={
+                "type": "object",
+                "properties": {"label": {"type": "string", "enum": ["a", "b"]}},
+                "required": ["label"],
+            },
+        )
+        with self.assertRaises(SkillValidationError) as cm:
+            validate_args(spec, {"label": "c"})
+        self.assertIn("只能是", str(cm.exception))
+
+
+class TestSkillSpec(PromptkitTestCase):
+    def test_name_validation(self):
+        for bad in ("", "1abc", "有 空格", "x" * 65):
+            with self.assertRaises(SkillValidationError):
+                SkillSpec(bad, "描述", lambda: None)
+
+    def test_description_is_required(self):
+        with self.assertRaises(SkillValidationError) as cm:
+            SkillSpec("s", "  ", lambda: None)
+        self.assertIn("description", str(cm.exception))
+
+    def test_handler_must_be_callable(self):
+        with self.assertRaises(TypeError):
+            SkillSpec("s", "描述", "不是函数")
+
+    def test_parameters_must_be_object(self):
+        with self.assertRaises(SkillValidationError):
+            SkillSpec("s", "描述", lambda: None, parameters={"type": "array"})
+
+    def test_openai_schema(self):
+        spec = SkillSpec("s", "描述", lambda: None, tags=("a",))
+        schema = spec.openai_schema()
+        self.assertEqual(schema["type"], "function")
+        self.assertEqual(schema["function"]["name"], "s")
+        self.assertEqual(schema["function"]["parameters"], {"type": "object", "properties": {}})
+
+    def test_to_dict(self):
+        spec = SkillSpec("s", "描述", lambda: None, tags=("a",), version="1.2")
+        data = spec.to_dict()
+        self.assertEqual(data["version"], "1.2")
+        self.assertEqual(data["tags"], ["a"])
+
+    def test_repr(self):
+        self.assertIn("s", repr(SkillSpec("s", "描述", lambda: None)))
+
+
+class TestSkillDecorator(PromptkitTestCase):
+    def test_bare_decorator(self):
+        @skill
+        def summarize(text: str) -> str:
+            '''把文本压缩一下。'''
+            return text[:5]
+
+        self.assertIsInstance(summarize, Skill)
+        self.assertEqual(summarize.name, "summarize")
+        self.assertEqual(summarize.description, "把文本压缩一下。")
+        self.assertEqual(summarize("abcdefg"), "abcde")
+
+    def test_decorator_with_arguments(self):
+        @skill(name="s2", description="自定义描述", tags=["a", "b"])
+        def thing(text: str) -> str:
+            return text
+
+        self.assertEqual(thing.name, "s2")
+        self.assertEqual(thing.description, "自定义描述")
+        self.assertEqual(thing.tags, ("a", "b"))
+
+    def test_description_falls_back_to_name(self):
+        @skill
+        def no_doc(text: str) -> str:
+            return text
+
+        self.assertIn("no_doc", no_doc.description)
+
+    def test_output_model_becomes_returns(self):
+        @skill(output_model=Order)
+        def make(status: str) -> Order:
+            return Order(status=status)
+
+        self.assertEqual(make.returns["type"], "object")
+        self.assertIn("status", make.returns["properties"])
+
+    def test_manual_parameters_win(self):
+        params = {"type": "object", "properties": {}, "required": []}
+
+        @skill(parameters=params)
+        def thing(text: str) -> str:
+            return text
+
+        self.assertEqual(thing.parameters, params)
+
+    def test_registry_auto_registration(self):
+        registry = SkillRegistry()
+
+        @skill(registry=registry)
+        def auto(text: str) -> str:
+            return text
+
+        self.assertIn("auto", registry)
+
+    def test_context_detection(self):
+        def plain(text: str) -> str:
+            return text
+
+        def with_ctx(text: str, ctx: SkillContext) -> str:
+            return text
+
+        self.assertFalse(build_spec(plain).accepts_ctx)
+        self.assertTrue(build_spec(with_ctx).accepts_ctx)
+
+    def test_skill_is_callable_without_ctx(self):
+        @skill
+        def plain(text: str, n: int = 2) -> str:
+            return text * n
+
+        self.assertEqual(plain("a"), "aa")
+        self.assertEqual(plain(text="b", n=3), "bbb")
+
+    def test_ctx_skill_without_agent_reports_clearly(self):
+        @skill
+        def needs_model(text: str, ctx: SkillContext) -> str:
+            return ctx.ask(text)
+
+        Agent.set_default(None)
+        with self.assertRaises(SkillError) as cm:
+            needs_model("hi")
+        self.assertIn("agent", str(cm.exception))
+
+    def test_two_skills_same_function_name_are_ok_if_named(self):
+        @skill(name="a")
+        def one(text: str) -> str:
+            return text
+
+        @skill(name="b")
+        def two(text: str) -> str:
+            return text
+
+        self.assertNotEqual(one.name, two.name)
+
+    def test_invalid_function(self):
+        with self.assertRaises(TypeError):
+            build_spec(42)
+
+
+class TestSkillRegistry(PromptkitTestCase):
+    def skill(self, name="sum", **kwargs):
+        @skill(name=name, description=f"{name} 的描述", **kwargs)
+        def handler(text: str) -> str:
+            return text
+
+        return handler
+
+    def test_register_accepts_skill_spec_and_function(self):
+        def plain(text: str) -> str:
+            return text
+
+        registry = SkillRegistry()
+        registry.register(self.skill("a"))
+        registry.register(SkillSpec("b", "描述", lambda: None))
+        registry.register(plain)
+        self.assertEqual(registry.names, ["a", "b", "plain"])
+
+    def test_duplicate_registration(self):
+        registry = SkillRegistry()
+        registry.register(self.skill("a"))
+        with self.assertRaises(SkillAlreadyExists):
+            registry.register(self.skill("a"))
+
+    def test_replace(self):
+        registry = SkillRegistry()
+        registry.register(self.skill("a"))
+        new = self.skill("a")
+        registry.register(new, replace=True)
+        self.assertIs(registry.get("a"), new)
+
+    def test_get_missing(self):
+        with self.assertRaises(SkillNotFound) as cm:
+            SkillRegistry().get("nope")
+        self.assertIn("没有叫", str(cm.exception))
+
+    def test_find(self):
+        registry = SkillRegistry()
+        registry.register(self.skill("a"))
+        self.assertIsNotNone(registry.find("a"))
+        self.assertIsNone(registry.find("b"))
+
+    def test_unregister(self):
+        registry = SkillRegistry([self.skill("a")])
+        registry.unregister("a")
+        self.assertEqual(len(registry), 0)
+        with self.assertRaises(SkillNotFound):
+            registry.unregister("a")
+
+    def test_list_by_tag_and_query(self):
+        registry = SkillRegistry(
+            [self.skill("a", tags=["nlp"]), self.skill("b", tags=["file"])]
+        )
+        self.assertEqual([item.name for item in registry.list(tag="nlp")], ["a"])
+        self.assertEqual([item.name for item in registry.list(query="B")], ["b"])
+
+    def test_dunder(self):
+        registry = SkillRegistry([self.skill("a"), self.skill("b")])
+        self.assertEqual(len(registry), 2)
+        self.assertIn("a", registry)
+        self.assertEqual([item.name for item in registry], ["a", "b"])
+        self.assertIn("SkillRegistry", repr(registry))
+
+    def test_register_rejects_other_types(self):
+        with self.assertRaises(TypeError):
+            SkillRegistry().register(42)
+
+
+class TestSkillExport(PromptkitTestCase):
+    def test_to_openai_tools(self):
+        @skill(name="a", description="A", tags=["x"])
+        def a(text: str) -> str:
+            return text
+
+        registry = SkillRegistry([a])
+        tools = registry.to_openai_tools()
+        self.assertEqual(tools[0]["function"]["name"], "a")
+        self.assertEqual(tools[0]["function"]["parameters"]["required"], ["text"])
+
+    def test_to_tools_returns_bound_tools(self):
+        @skill(name="a", description="A")
+        def a(text: str) -> str:
+            return text.upper()
+
+        registry = SkillRegistry([a])
+        ctx = SkillContext()
+        tools = registry.to_tools(ctx)
+        self.assertEqual(len(tools), 1)
+        self.assertIsInstance(tools[0], SkillTool)
+        self.assertEqual(tools[0].call({"text": "hi"}), "HI")
+        self.assertIs(ctx.skills, registry)
+
+    def test_tool_errors_become_text(self):
+        @skill(name="boom", description="一定炸")
+        def boom(text: str) -> str:
+            raise RuntimeError("炸了")
+
+        tool = SkillRegistry([boom]).to_tools()[0]
+        self.assertIn("错误：", tool.call({"text": "x"}))
+        self.assertIn("炸了", tool.call({"text": "x"}))
+
+    def test_tool_validation_errors_become_text(self):
+        @skill(name="a", description="A")
+        def a(text: str) -> str:
+            return text
+
+        tool = SkillRegistry([a]).to_tools()[0]
+        self.assertIn("错误：", tool.call({}))
+
+    def test_tool_serialises_pydantic(self):
+        @skill(name="a", description="A")
+        def a(text: str) -> Order:
+            return Order(status=text)
+
+        tool = SkillRegistry([a]).to_tools()[0]
+        self.assertEqual(tool.call({"text": "ok"}), '{"status": "ok"}')
+
+    def test_result_text(self):
+        self.assertEqual(result_text("x"), "x")
+        self.assertEqual(result_text({"a": 1}), '{"a": 1}')
+        self.assertEqual(result_text(Order(status="s")), '{"status": "s"}')
+        self.assertEqual(result_text(3), "3")
+
+
+class TestSkillToolReentrancy(PromptkitTestCase):
+    def test_skill_tool_can_call_the_agent_without_corrupting_history(self):
+        '''Skill 当工具用时，内部 `ctx.ask` 是**另一次对话**：
+
+        工具执行期间 agent 的历史是副本，跑完丢掉 —— 否则消息序列会变成
+        「assistant(tool_calls) -> user -> assistant -> tool」，API 直接 400。
+        '''
+        agent = fake_agent(
+            [
+                fake_message(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[tool_call("nested", "{}")],
+                ),
+                fake_message(role="assistant", content="内层回答"),
+                fake_message(role="assistant", content="外层最终回答"),
+            ]
+        )
+
+        def nested(**_kwargs):
+            return agent.ask("内层问题")
+
+        reply = agent.ask("外层问题", tools=[nested], max_tool_rounds=3)
+        self.assertEqual(reply, "外层最终回答")
+        self.assertEqual(
+            [message["role"] for message in agent.history],
+            ["user", "assistant", "tool", "assistant"],
+        )
+        self.assertTrue(agent.history[1].get("tool_calls"))
+        self.assertEqual(agent.history[2]["content"], "内层回答")
+
+
+class TestSkillFunctionAttributes(PromptkitTestCase):
+    '''先给函数挂字段，再套装饰器 —— 接口字段读出来，其余进 metadata。'''
+
+    def build(self):
+        def summarize(text: str, max_words: int = 100) -> str:
+            '''把文本压缩到指定字数。'''
+            return text[:max_words]
+
+        summarize.tags = ["nlp", "text"]
+        summarize.version = "1.2"
+        summarize.owner = "content-team"
+        summarize.cost = "cheap"
+        summarize.metadata = {"docs_url": "https://example.com"}
+        summarize._internal = "不该进 metadata"
+        return skill(summarize)
+
+    def test_interface_fields_are_read(self):
+        built = self.build()
+        self.assertEqual(built.tags, ("nlp", "text"))
+        self.assertEqual(built.spec.version, "1.2")
+        self.assertEqual(built.description, "把文本压缩到指定字数。")
+
+    def test_arbitrary_attributes_become_metadata(self):
+        built = self.build()
+        self.assertEqual(built.metadata["owner"], "content-team")
+        self.assertEqual(built.metadata["cost"], "cheap")
+
+    def test_metadata_dict_merges_with_attributes(self):
+        built = self.build()
+        self.assertEqual(built.metadata["docs_url"], "https://example.com")
+        self.assertEqual(built.metadata["owner"], "content-team")
+
+    def test_private_attributes_are_skipped(self):
+        self.assertNotIn("_internal", self.build().metadata)
+
+    def test_explicit_arguments_win(self):
+        def handler(text: str) -> str:
+            '''原始描述'''
+            return text
+
+        handler.tags = ["old"]
+        handler.description = "挂上去的描述"
+        handler.owner = "old-team"
+        built = skill(handler, tags=["new"], description="显式描述", metadata={"owner": "new-team"})
+        self.assertEqual(built.tags, ("new",))
+        self.assertEqual(built.description, "显式描述")
+        self.assertEqual(built.metadata["owner"], "new-team")
+
+    def test_attributes_can_supply_parameters_and_returns(self):
+        def handler(text: str) -> str:
+            return text
+
+        handler.parameters = {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "要处理的文本"}},
+            "required": ["text"],
+        }
+        handler.returns = {"type": "string"}
+        built = skill(handler)
+        self.assertEqual(
+            built.parameters["properties"]["text"]["description"], "要处理的文本"
+        )
+        self.assertEqual(built.returns, {"type": "string"})
+
+    def test_output_model_attribute(self):
+        def handler(status: str) -> Order:
+            return Order(status=status)
+
+        handler.output_model = Order
+        built = skill(handler)
+        self.assertEqual(built.returns["type"], "object")
+        self.assertIn("status", built.returns["properties"])
+
+    def test_version_defaults_to_0_1(self):
+        def handler(text: str) -> str:
+            return text
+
+        self.assertEqual(skill(handler).spec.version, "0.1")
+
+    def test_metadata_is_not_in_the_api_schema(self):
+        built = self.build()
+        function = built.schema()["function"]
+        self.assertNotIn("metadata", function)
+        self.assertEqual(function["name"], "summarize")
+
+    def test_to_dict_includes_metadata(self):
+        data = self.build().spec.to_dict()
+        self.assertEqual(data["metadata"]["cost"], "cheap")
+
+    def test_with_metadata_can_extend_after_decoration(self):
+        built = self.build()
+        same = built.with_metadata(owner="platform", level=2)
+        self.assertIs(same, built)
+        self.assertEqual(built.metadata["owner"], "platform")
+        self.assertEqual(built.metadata["level"], 2)
+
+    def test_metadata_is_writable(self):
+        built = self.build()
+        built.metadata["owner"] = "hotfix"
+        self.assertEqual(built.metadata["owner"], "hotfix")
+
+    def test_registry_routes_by_metadata(self):
+        built = self.build()
+
+        def other(text: str) -> str:
+            '''另一个'''
+            return text
+
+        other = skill(other).with_metadata(owner="platform")
+        registry = SkillRegistry([built, other])
+        names = [item.name for item in registry.list(metadata={"owner": "platform"})]
+        self.assertEqual(names, ["other"])
+        self.assertEqual(
+            [item.name for item in registry.list(metadata={"cost": "cheap"})],
+            ["summarize"],
+        )
+
+    def test_decorating_an_already_decorated_skill_keeps_metadata(self):
+        built = self.build()
+        again = skill(built)
+        self.assertEqual(again.metadata["owner"], "content-team")
+        self.assertEqual(again.tags, ("nlp", "text"))
+
+    def test_skill_attributes_are_still_callable(self):
+        built = self.build()
+        self.assertEqual(built("abcdef", max_words=3), "abc")
+
+
+class TestSkillStep(PromptkitTestCase):
+    '''SkillStep：在 DSL 里调 Skill（FunctionStep 是 Step，@skill 套不上）。'''
+
+    def skill(self, name="summarize", fn=None):
+        if fn is None:
+            def fn(text: str) -> str:
+                return text[:5]
+        return skill(name=name, description=f"{name} 的描述")(fn)
+
+    def test_runs_and_writes_to_skill_name_by_default(self):
+        ctx = Workflow(SkillStep(self.skill(), text="提示词工程")).run()
+        self.assertEqual(ctx["summarize"], "提示词工程")
+
+    def test_explicit_output_key(self):
+        ctx = Workflow(
+            SkillStep(self.skill(), text="abcdefg", output_key="short")
+        ).run()
+        self.assertEqual(ctx["short"], "abcde")
+
+    def test_inputs_accept_expressions(self):
+        ctx = Workflow(
+            SkillStep(self.skill(), text=Var("source"), output_key="short")
+        ).run(source="12345678")
+        self.assertEqual(ctx["short"], "12345")
+
+    def test_resolves_by_name_with_registry(self):
+        registry = SkillRegistry([self.skill()])
+        ctx = Workflow(
+            SkillStep("summarize", text="abcdefg", registry=registry, output_key="short")
+        ).run()
+        self.assertEqual(ctx["short"], "abcde")
+
+    def test_name_without_registry(self):
+        with self.assertRaises(SkillNotFound) as cm:
+            Workflow(SkillStep("summarize", text="x")).run()
+        self.assertIn("registry", str(cm.exception))
+
+    def test_unknown_name_in_registry(self):
+        with self.assertRaises(SkillNotFound):
+            Workflow(SkillStep("nope", registry=SkillRegistry())).run()
+
+    def test_plain_function_is_wrapped(self):
+        def shout(text: str) -> str:
+            '''吼一声。'''
+            return text.upper()
+
+        ctx = Workflow(SkillStep(shout, text="hi")).run()
+        self.assertEqual(ctx["shout"], "HI")
+
+    def test_passes_the_workflow_agent_into_the_skill_context(self):
+        agent = OrchAgent(["模型答复"])
+
+        @skill(name="needs_model", description="需要模型")
+        def needs_model(text: str, ctx: SkillContext = None) -> str:
+            return ctx.ask(f"处理：{text}")
+
+        ctx = Workflow(
+            SkillStep(needs_model, text="你好", output_key="reply")
+        ).run(agent=agent)
+        self.assertEqual(ctx["reply"], "模型答复")
+        self.assertIn("处理：你好", agent.prompts[0])
+
+    def test_custom_ctx_wins(self):
+        agent = OrchAgent(["自定义 ctx 的答复"])
+
+        @skill(name="needs_model", description="需要模型")
+        def needs_model(text: str, ctx: SkillContext = None) -> str:
+            return ctx.ask(text)
+
+        ctx = Workflow(
+            SkillStep(needs_model, text="hi", ctx=SkillContext(agent=agent))
+        ).run()
+        self.assertEqual(ctx["needs_model"], "自定义 ctx 的答复")
+
+    def test_missing_required_argument(self):
+        with self.assertRaises(SkillValidationError):
+            Workflow(SkillStep(self.skill())).run()
+
+    def test_inputs_dict_and_duplicate_arguments(self):
+        ctx = Workflow(
+            SkillStep(self.skill(), inputs={"text": "abcdefg"}, output_key="short")
+        ).run()
+        self.assertEqual(ctx["short"], "abcde")
+        with self.assertRaises(ValueError) as cm:
+            SkillStep(self.skill(), inputs={"text": "a"}, text="b")
+        self.assertIn("同时出现", str(cm.exception))
+
+    def test_requires_a_skill(self):
+        with self.assertRaises(ValueError):
+            SkillStep()
+
+    def test_describe_and_render(self):
+        step = SkillStep(self.skill(), text=Var("source"), output_key="short")
+        self.assertIn("summarize(text=source)", step.describe())
+        self.assertIn("-> short", step.describe())
+        self.assertIn("SkillStep", step.render())
+
+    def test_returns_structured_objects(self):
+        @skill(name="make", description="造一个")
+        def make(status: str) -> Order:
+            return Order(status=status)
+
+        ctx = Workflow(SkillStep(make, status="ok")).run()
+        self.assertIsInstance(ctx["make"], Order)
+
+
+class TestChatWorkflowSkills(PromptkitTestCase):
+    '''`ChatWorkflow(skills=[...])`：DSL 函数 / Skill 变成模型能调的工具。'''
+
+    def make_lab(self, **kwargs):
+        from promptkit.core import Function, LLMStep, Prompt
+
+        return Function(
+            args=("ref_path",),
+            name="make_lab",
+            description="根据学习主题生成实验任务清单",
+            **kwargs,
+        ).Do(
+            LLMStep(
+                Prompt(role="user", content="给出实验清单，参考：{{ref_path}}")
+            )
+        )
+
+    def test_function_tool_schema(self):
+        from promptkit.skill.chat import as_tools, function_parameters
+
+        tool = as_tools([self.make_lab()])[0]
+        self.assertEqual(tool.name, "make_lab")
+        self.assertEqual(tool.description, "根据学习主题生成实验任务清单")
+        self.assertEqual(tool.parameters["required"], ["ref_path"])
+        self.assertEqual(
+            function_parameters(self.make_lab())["properties"]["ref_path"]["type"],
+            "string",
+        )
+
+    def test_function_tool_executes_with_the_holder_agent(self):
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        agent = OrchAgent(["实验清单：1. 跑基线"])
+        tool = as_tools([self.make_lab()], holder=AgentHolder(agent))[0]
+        self.assertEqual(tool.call({"ref_path": "https://x"}), "实验清单：1. 跑基线")
+        self.assertIn("参考：https://x", agent.prompts[0])
+
+    def test_skill_tool_uses_the_holder_agent(self):
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        @skill(name="ask_model", description="问一下模型")
+        def ask_model(text: str, ctx: SkillContext = None) -> str:
+            return ctx.ask(text)
+
+        agent = OrchAgent(["答复"])
+        tool = as_tools([ask_model], holder=AgentHolder(agent))[0]
+        self.assertEqual(tool.call({"text": "你好"}), "答复")
+        self.assertEqual(agent.prompts, ["你好"])
+
+    def test_errors_become_text(self):
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        tool = as_tools([self.make_lab()], holder=AgentHolder(OrchAgent(["x"])))[0]
+        self.assertIn("错误：", tool.call({}))            # 缺参数
+
+        def boom(text: str) -> str:
+            '''炸'''
+            raise RuntimeError("坏了")
+
+        broken = as_tools([boom], holder=AgentHolder(OrchAgent(["x"])))[0]
+        self.assertIn("坏了", broken.call({"text": "x"}))
+
+    def test_holder_falls_back_to_the_default_agent(self):
+        from promptkit.skill.chat import as_tools
+
+        @skill(name="plain", description="纯函数")
+        def plain(text: str) -> str:
+            return text.upper()
+
+        self.assertEqual(as_tools([plain])[0].call({"text": "hi"}), "HI")
+
+    def test_tools_are_passed_through_and_lists_flattened(self):
+        from promptkit.skill.chat import as_tools
+
+        existing = Tool(name="echo", description="回声", parameters={"type": "object", "properties": {}}, func=lambda **_: "x")
+        tools = as_tools([[existing], [plain := skill(name="p", description="p")(lambda text: text)]])
+        self.assertEqual([tool.name for tool in tools], ["echo", "p"])
+        self.assertIs(tools[0], existing)
+
+    def test_rejects_unknown_skill_types(self):
+        from promptkit.skill.chat import as_tools
+
+        with self.assertRaises(TypeError) as cm:
+            as_tools([42])
+        self.assertIn("FunctionDef", str(cm.exception))
+
+    def test_chat_workflow_registers_skills_as_tools(self):
+        from unittest import mock
+
+        chat = ChatWorkflow(role="助手", skills=[self.make_lab()])
+        built = chat.build()
+        with mock.patch("builtins.input", return_value="exit"):
+            ctx = built.run(agent=OrchAgent(["x"]), verbose=False)
+        names = [getattr(tool, "name", "") for tool in ctx.get("chat_tools") or []]
+        self.assertIn("make_lab", names)
+
+    def test_agent_can_call_a_skill_tool_in_chat(self):
+        from unittest import mock
+
+        agent = fake_agent(
+            [
+                fake_message(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        tool_call("make_lab", '{"ref_path": "https://example.com"}')
+                    ],
+                ),
+                fake_message(role="assistant", content="实验清单：1. 跑基线"),
+                fake_message(role="assistant", content="已经生成实验清单"),
+            ]
+        )
+        chat = ChatWorkflow(role="学习助手", skills=[self.make_lab()])
+        with mock.patch("builtins.input", side_effect=["帮我做个实验", "exit"]):
+            ctx = chat.build().run(agent=agent, verbose=False)
+
+        self.assertEqual(ctx["model_reply"], "已经生成实验清单")
+        tool_messages = [
+            message["content"]
+            for message in agent.history
+            if message.get("role") == "tool"
+        ]
+        self.assertTrue(any("实验清单：1. 跑基线" in str(item) for item in tool_messages))
+
+    def test_chat_workflow_without_skills_is_unchanged(self):
+        from unittest import mock
+
+        chat = ChatWorkflow(role="助手")
+        built = chat.build()
+        with mock.patch("builtins.input", return_value="exit"):
+            ctx = built.run(agent=OrchAgent(["x"]), verbose=False)
+        self.assertIsNone(ctx.get("chat_tools"))
+
+
+class TestChatWorkflowSkillsMemory(MemoryTestCase):
+    '''记忆怎么进 Skill：ChatWorkflow(memory=...) -> AgentHolder -> SkillContext。'''
+
+    def make_memory(self):
+        return KVMemory(self.temp_path("memory.db"))
+
+    def test_skill_gets_the_chat_memory(self):
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        memory = self.make_memory()
+
+        @skill(name="remember", description="记一条")
+        def remember(topic: str, ctx: SkillContext) -> str:
+            done = ctx.read("topics", [])
+            done.append(topic)
+            ctx.remember("topics", done)
+            return f"记了 {len(done)} 个"
+
+        chat = ChatWorkflow(role="助手", skills=[remember], memory=memory)
+        tool = as_tools(chat.skills, holder=AgentHolder(memory=chat.memory))[0]
+        self.assertEqual(tool.call({"topic": "决策树"}), "记了 1 个")
+        self.assertEqual(memory.read("topics"), ["决策树"])
+
+    def test_holder_can_pick_memory_from_a_context(self):
+        from promptkit.skill.chat import AgentHolder
+
+        memory = self.make_memory()
+        holder = AgentHolder()
+        holder.update({"memory": memory})
+        self.assertIs(holder.memory, memory)
+
+    def test_memory_without_config_is_allowed_when_skills_exist(self):
+        memory = self.make_memory()
+
+        @skill(name="s", description="s")
+        def s(text: str) -> str:
+            return text
+
+        chat = ChatWorkflow(role="助手", skills=[s], memory=memory)
+        self.assertIsNone(chat.memory_config)
+        self.assertIs(chat.memory, memory)
+
+    def test_memory_without_config_is_still_rejected_without_skills(self):
+        with self.assertRaises(ValueError) as cm:
+            ChatWorkflow(role="助手", memory=self.make_memory())
+        self.assertIn("memory_config", str(cm.exception))
+
+    def test_skill_without_memory_reports_clearly(self):
+        ctx = SkillContext()
+        with self.assertRaises(SkillError) as cm:
+            ctx.remember("a", 1)
+        self.assertIn("没有 memory", str(cm.exception))
+        with self.assertRaises(SkillError):
+            ctx.read("a")
+
+    def test_recall_needs_a_vector_memory(self):
+        ctx = SkillContext(memory=self.make_memory())
+        with self.assertRaises(SkillError) as cm:
+            ctx.recall("决策树")
+        self.assertIn("VectorMemory", str(cm.exception))
+
+    def test_dsl_function_body_can_use_memory(self):
+        from promptkit.core import Function, FunctionStep
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        memory = self.make_memory()
+        counter = Function(args=("topic",), name="count_topic", description="记一下")
+
+        def body(ctx):
+            done = ctx["memory"].read("topics", [])
+            done.append(ctx["topic"])
+            ctx["memory"].write("topics", done)
+            return len(done)
+
+        counter.Do(FunctionStep(body, output_key="count"))
+
+        tool = as_tools([counter], holder=AgentHolder(agent=OrchAgent(["x"]), memory=memory))[0]
+        self.assertEqual(tool.call({"topic": "集成学习"}), "1")
+        self.assertEqual(memory.read("topics"), ["集成学习"])
+
+
+class TestStateInheritance(MemoryTestCase):
+    '''技能「继承状态」：Function(inherit=...) + AgentHolder.state 快照。'''
+
+    def holder(self, state=None):
+        from promptkit.skill.chat import AgentHolder
+
+        return AgentHolder(agent=OrchAgent(["看到了"]), state=state or {})
+
+    def build(self, prompt_text, **kwargs):
+        from promptkit.core import Function, LLMStep, Prompt
+
+        return Function(
+            args=("q",), name="probe", description="探针", output_key="out", **kwargs
+        ).Do(LLMStep(Prompt(role="user", content=prompt_text), output_key="out"))
+
+    def test_inherit_all(self):
+        from promptkit.skill.chat import as_tools
+
+        function = self.build("档案={{profile}} 主题={{topics}}", inherit=True)
+        holder = self.holder({"profile": "研一", "topics": ["决策树"]})
+        tool = as_tools([function], holder=holder)[0]
+        tool.call({"q": "x"})
+        prompt = holder.agent.prompts[0]
+        self.assertIn("研一", prompt)
+        self.assertIn("决策树", prompt)
+
+    def test_inherit_selected_keys(self):
+        from promptkit.skill.chat import as_tools
+
+        function = self.build("主题={{topics}}", inherit=("topics",))
+        holder = self.holder({"profile": "研一", "topics": ["决策树"]})
+        as_tools([function], holder=holder)[0].call({"q": "x"})
+        self.assertIn("决策树", holder.agent.prompts[0])
+        self.assertNotIn("研一", holder.agent.prompts[0])
+
+    def test_no_inherit_by_default(self):
+        from promptkit.skill.chat import as_tools
+
+        function = self.build("{{profile}}")
+        holder = self.holder({"profile": "研一"})
+        result = as_tools([function], holder=holder)[0].call({"q": "x"})
+        self.assertIn("错误：", result)
+        self.assertIn("profile", result)
+
+    def test_inherit_validation(self):
+        from promptkit.core import Function
+
+        with self.assertRaises(Exception):
+            Function(args=(), name="x", inherit=42)
+
+    def test_bound_function_becomes_a_zero_arg_tool(self):
+        from promptkit.skill.chat import as_tools
+
+        function = self.build("参考={{q}}", inherit=True)
+        holder = self.holder({"profile": "研一"})
+        tool = as_tools([function(q="https://ref")], holder=holder)[0]
+        self.assertEqual(tool.name, "probe")
+        self.assertEqual(tool.parameters, {"type": "object", "properties": {}})
+        self.assertEqual(tool.call({}), "看到了")
+        self.assertIn("参考=https://ref", holder.agent.prompts[0])
+
+    def test_state_snapshot_skips_framework_keys(self):
+        from promptkit.skill.chat import AgentHolder
+
+        holder = AgentHolder()
+        holder.snapshot(
+            {"profile": "研一", "agent": object(), "memory": object(), "chat_tools": []}
+        )
+        self.assertEqual(holder.state, {"profile": "研一"})
+
+    def test_skill_context_can_read_state(self):
+        from promptkit.skill.chat import AgentHolder, as_tools
+
+        @skill(name="whoami", description="看看档案")
+        def whoami(ctx: SkillContext) -> str:
+            return f"档案：{ctx.get('profile', '空')}"
+
+        holder = AgentHolder(agent=OrchAgent(["x"]), state={"profile": "研一"})
+        self.assertEqual(as_tools([whoami], holder=holder)[0].call({}), "档案：研一")
+
+    def test_chat_workflow_snapshots_state_each_turn(self):
+        from unittest import mock
+
+        from promptkit.core import Function, FunctionStep
+
+        EchoInput = Function(
+            args=(), name="echo_input", description="回显本轮输入", inherit=True
+        ).Do(FunctionStep(lambda ctx: ctx["usr_input"], output_key="out"))
+
+        agent = fake_agent(
+            [
+                fake_message(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[tool_call("echo_input", "{}")],
+                ),
+                fake_message(role="assistant", content="收到"),
+            ]
+        )
+        chat = ChatWorkflow(role="助手", skills=[EchoInput])
+        with mock.patch("builtins.input", side_effect=["今天学了决策树", "exit"]):
+            chat.build().run(agent=agent, verbose=False)
+
+        tool_messages = [
+            str(message.get("content"))
+            for message in agent.history
+            if message.get("role") == "tool"
+        ]
+        self.assertTrue(any("今天学了决策树" in item for item in tool_messages))
+        self.assertIn("skills_state", str(chat.build().render()))
+
+
+class TestSkillExecute(PromptkitTestCase):
+    def test_executes_with_ctx_and_records_trace(self):
+        @skill(name="echo", description="回声")
+        def echo(text: str, ctx: SkillContext) -> str:
+            return f"{text}!"
+
+        registry = SkillRegistry([echo])
+        ctx = SkillContext()
+        self.assertEqual(registry.execute("echo", {"text": "hi"}, ctx=ctx), "hi!")
+        self.assertEqual(ctx.trace[0]["event"], "echo")
+        self.assertEqual(ctx.trace[0]["status"], "ok")
+
+    def test_creates_a_default_context(self):
+        @skill(name="echo", description="回声")
+        def echo(text: str) -> str:
+            return text
+
+        registry = SkillRegistry([echo])
+        self.assertEqual(registry.execute("echo", {"text": "hi"}), "hi")
+
+    def test_validation_can_be_skipped(self):
+        @skill(name="echo", description="回声")
+        def echo(text: str) -> str:
+            return text
+
+        registry = SkillRegistry([echo])
+        with self.assertRaises(SkillValidationError):
+            registry.execute("echo", {})
+        # validate=False 会直接进 handler，缺参数就让 Python 自己报错（包成执行错误）
+        with self.assertRaises(SkillExecutionError):
+            registry.execute("echo", {}, validate=False)
+
+    def test_handler_exception_is_wrapped(self):
+        @skill(name="boom", description="炸")
+        def boom(text: str) -> str:
+            raise ValueError("坏了")
+
+        registry = SkillRegistry([boom])
+        ctx = SkillContext()
+        with self.assertRaises(SkillExecutionError) as cm:
+            registry.execute("boom", {"text": "x"}, ctx=ctx)
+        self.assertIn("坏了", str(cm.exception))
+        self.assertIsInstance(cm.exception.__cause__, ValueError)
+        self.assertEqual(ctx.trace[0]["status"], "error")
+
+    def test_unknown_skill(self):
+        with self.assertRaises(SkillNotFound):
+            SkillRegistry().execute("nope", {})
+
+
+class TestSkillContext(PromptkitTestCase):
+    def test_ask_and_structured(self):
+        agent = OrchAgent(['{"status": "ok"}'])
+        ctx = SkillContext(agent=agent)
+        self.assertEqual(ctx.model, agent.model if hasattr(agent, "model") else None)
+        self.assertEqual(ctx.structured("给我个结构", Order).status, "ok")
+        self.assertIn("给我个结构", agent.prompts[0])
+
+    def test_structured_does_not_render_braces(self):
+        agent = OrchAgent(['{"status": "ok"}'])
+        SkillContext(agent=agent).structured("数据：{{x}}", Order)
+        self.assertIn("{{x}}", agent.prompts[0])
+
+    def test_ask(self):
+        agent = OrchAgent(["答复"])
+        self.assertEqual(SkillContext(agent=agent).ask("问题"), "答复")
+
+    def test_run_workflow(self):
+        agent = OrchAgent(["不该被调用"])
+        ctx = SkillContext(agent=agent)
+        result = ctx.run(Workflow(Set("x", "值"), Echo("x={{x}}")), )
+        self.assertEqual(result["x"], "值")
+        self.assertEqual(ctx.trace[-1]["event"], "workflow")
+
+    def test_call_skill_needs_registry(self):
+        with self.assertRaises(SkillError) as cm:
+            SkillContext().call_skill("x")
+        self.assertIn("注册表", str(cm.exception))
+
+    def test_tool_lookup(self):
+        ctx = SkillContext(tools={"echo": lambda text: text})
+        self.assertTrue(callable(ctx.tool("echo")))
+        with self.assertRaises(SkillError):
+            ctx.tool("nope")
+
+    def test_require_agent_uses_default(self):
+        agent = Agent(api_key="sk-test", register_as_default=False)
+        Agent.set_default(agent)
+        try:
+            self.assertIs(SkillContext().require_agent(), agent)
+        finally:
+            Agent.set_default(None)
+
+    def test_require_agent_without_anything(self):
+        Agent.set_default(None)
+        with self.assertRaises(SkillError):
+            SkillContext().require_agent()
+
+    def test_from_agent_and_repr(self):
+        agent = Agent(api_key="sk-test", register_as_default=False)
+        ctx = SkillContext.from_agent(agent)
+        self.assertIs(ctx.agent, agent)
+        self.assertIs(ctx.client, agent.client)
+        self.assertIn("SkillContext", repr(ctx))
+
+    def test_trace_records(self):
+        ctx = SkillContext()
+        entry = ctx.record("custom", value=1)
+        self.assertEqual(entry, {"event": "custom", "value": 1})
+        self.assertEqual(ctx.trace, [entry])
+
+
+class TestSkillCallingSkill(PromptkitTestCase):
+    def test_composite_skill(self):
+        @skill(name="summarize", description="压缩")
+        def summarize(text: str, limit: int = 3) -> str:
+            return text[:limit]
+
+        @skill(name="report", description="先摘要再下结论")
+        def report(text: str, ctx: SkillContext) -> str:
+            brief = ctx.call_skill("summarize", text=text, limit=2)
+            return f"{brief}…很好"
+
+        registry = SkillRegistry([summarize, report])
+        self.assertEqual(
+            registry.execute("report", {"text": "abcdef"}), "ab…很好"
+        )
+
+    def test_ctx_registry_is_wired(self):
+        seen = {}
+
+        @skill(name="inner", description="内层")
+        def inner(ctx: SkillContext) -> str:
+            seen["registry"] = ctx.skills
+            return "ok"
+
+        registry = SkillRegistry([inner])
+        registry.execute("inner", {})
+        self.assertIs(seen["registry"], registry)
+
+
+class TestSkillEntryPoints(PromptkitTestCase):
+    def test_loads_register_function_and_skill(self):
+        from unittest import mock
+
+        def register(registry):
+            @skill(name="plugged", description="插件")
+            def plugged(text: str) -> str:
+                return text
+
+            registry.register(plugged)
+
+        class Entry:
+            def __init__(self, name, target):
+                self.name = name
+                self.target = target
+
+            def load(self):
+                return self.target
+
+        entries = [
+            Entry("plugged", register),
+            Entry("direct", SkillSpec("direct", "直接", lambda: None)),
+            Entry("broken", None),
+        ]
+        with mock.patch("importlib.metadata.entry_points", return_value=entries):
+            registry = SkillRegistry()
+            loaded = registry.load_entry_points()
+        self.assertEqual(loaded, 2)
+        self.assertIn("plugged", registry)
+        self.assertIn("direct", registry)
+        self.assertEqual(len(registry.errors), 1)
+        self.assertEqual(registry.errors[0]["name"], "broken")
+
+    def test_broken_register_function_is_recorded(self):
+        from unittest import mock
+
+        class Entry:
+            name = "bad"
+
+            def load(self):
+                def register(registry):
+                    raise RuntimeError("注册失败")
+
+                return register
+
+        with mock.patch("importlib.metadata.entry_points", return_value=[Entry()]):
+            registry = SkillRegistry()
+            self.assertEqual(registry.load_entry_points(), 0)
+        self.assertIn("注册失败", registry.errors[0]["error"])
+
+    def test_no_plugins(self):
+        from unittest import mock
+
+        with mock.patch("importlib.metadata.entry_points", return_value=[]):
+            self.assertEqual(SkillRegistry().load_entry_points(), 0)
+
+
+class TestSkillLayering(PromptkitTestCase):
+    def test_core_does_not_import_skill(self):
+        '''Skill 是上层：core 不能反过来依赖它。'''
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        pattern = re.compile(
+            r"^(?:from\s+(promptkit[\w.]*)\s+import|import\s+(promptkit[\w.]*))",
+            re.MULTILINE,
+        )
+        offenders = []
+        for path in sorted((root / "core").rglob("*.py")):
+            for match in pattern.finditer(path.read_text(encoding="utf-8")):
+                dependency = match.group(1) or match.group(2)
+                if "promptkit.skill" in dependency:
+                    offenders.append(f"{path.name}: {dependency}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

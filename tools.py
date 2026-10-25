@@ -98,9 +98,9 @@ class Tool:
             },
         }
 
-    def call(self, arguments: Dict[str, Any]) -> str:
-        '''执行工具，返回值统一转成字符串。'''
-        return self.to_text(self.func(**arguments))
+    def call(self, arguments: Optional[Dict[str, Any]] = None) -> str:
+        '''执行工具，返回值统一转成字符串。无参工具可以 `tool.call()`。'''
+        return self.to_text(self.func(**(arguments or {})))
 
     @staticmethod
     def to_text(result: Any) -> str:

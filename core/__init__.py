@@ -150,6 +150,7 @@ from promptkit.core.steps import (
     ForEach,
     ForEachStep,
     ForStep,
+    ForgetMemory,
     Function,
     FunctionDef,
     FunctionStep,
@@ -161,6 +162,7 @@ from promptkit.core.steps import (
     Label,
     LabelStep,
     LLMStep,
+    MemoryStep,
     MessageStep,
     NewVar,
     Number,
@@ -168,6 +170,8 @@ from promptkit.core.steps import (
     ReadExpr,
     ReadFile,
     ReadFileExpr,
+    ReadMemory,
+    RecallMemory,
     Return,
     ReturnStep,
     Save,
@@ -188,7 +192,9 @@ from promptkit.core.steps import (
     VarType,
     While,
     WhileStep,
+    WriteMemory,
     coerce_steps,
+    format_recalled,
 )
 # VarType 由 core.steps 从 expr_sys.vartypes 再导出，这里不重复 import
 from promptkit.core.steps.workflow import Workflow
@@ -257,6 +263,13 @@ __all__ = [
     "LLMStep",
     "MessageStep",
     "FunctionStep",
+    # 长期记忆（读 / 写 / 忘 / 召回 / 组合）
+    "ReadMemory",
+    "WriteMemory",
+    "ForgetMemory",
+    "RecallMemory",
+    "MemoryStep",
+    "format_recalled",
     # 输入 / 输出 / 文件
     "Read",
     "ReadExpr",

@@ -2,6 +2,10 @@
 
 和 Agent 分开：这里只管「配置从哪来」，Agent 只管「怎么干活」。
 这样换模型 / 换密钥来源不用碰 Agent，也方便单独测试 .env 读取逻辑。
+
+这里的 `DEFAULT_MODEL` / `DEFAULT_BASE_URL` / 思考参数都是 **DeepSeek 的默认值**：
+想换厂商不用改这个文件，用 `Agent(vendor="openai")` / `Agent(vendor="anthropic")`，
+厂商表在 `client_sys/registry.py`（见 README 第 22 节）。
 '''
 import os
 from typing import Dict, List, Optional

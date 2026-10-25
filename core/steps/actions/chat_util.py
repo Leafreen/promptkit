@@ -441,6 +441,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     after_turn: Optional[Sequence[Any]] = None,
     cautions: Optional[Sequence[Any]] = None,
     max_turns: Optional[int] = None,
+    turn_template: Optional[str] = None,
 ) -> Step:
     '''组装多轮对话循环，返回一个 `Workflow`（本身就是 Step）。
 
@@ -449,6 +450,10 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
 
     `ExitWords` 写进 Context 的值会被自动读出来，所以 `exit_words`
     一般不用显式传；显式传的优先。
+
+    `turn_template` 换掉「这一轮发给模型的内容」（默认就是 `{{usr_input}}`）。
+    召回记忆之类的每轮上下文就靠它拼进去 —— 别塞进 system prompt：
+    那是**一轮**的临时信息，塞进 system 既浪费 token 又容易让模型当成长期设定。
     '''
     from promptkit.core.steps.actions.interactive import Echo, Read
     from promptkit.core.steps.logics.if_step import If
@@ -489,7 +494,11 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         ),
         *coerce_steps(*behavior),
         ChatTurn(
-            prompt_content="{{%s}}" % input_key,
+            prompt_content=(
+                turn_template
+                if turn_template is not None
+                else "{{%s}}" % input_key
+            ),
             output_key=output_key,
             cautions=cautions,
         ),

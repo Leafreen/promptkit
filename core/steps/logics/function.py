@@ -39,9 +39,13 @@ class FunctionStep(Step):
         context.trace.append(self.name)
 
     def describe(self) -> str:
-        func_name = getattr(self.func, "__name__", type(self.func).__name__)
+        # 起了名字就用名字（`FunctionStep(..., name="skills")`），否则退回函数名
+        if self.name and self.name != "function":
+            label = self.name
+        else:
+            label = getattr(self.func, "__name__", type(self.func).__name__)
         suffix = f" -> {self.output_key}" if self.output_key else ""
-        return f"FunctionStep({func_name}){suffix}"
+        return f"FunctionStep({label}){suffix}"
 
 
 class FunctionDef:
@@ -58,9 +62,11 @@ class FunctionDef:
         args: tuple = (),
         *,
         name: str = "function",
+        description: str = "",
         output_key: Optional[str] = None,
         output_model: Optional[type] = None,
         tools: Optional[List[Any]] = None,
+        inherit: Any = False,
     ):
         self.args = tuple(args)
         if any(not isinstance(a, str) or not a for a in self.args):
@@ -69,7 +75,10 @@ class FunctionDef:
             raise ArgumentError(f"args 有重复：{self.args!r}")
 
         self.name = name
+        self.description = description
         self.output_key = output_key or name
+        #: 要不要继承调用方的状态：True=全部，序列=只继承这些 key
+        self.inherit = _normalise_inherit(inherit, name)
         self.output_model = output_model
         self.tools = list(tools) if tools else None
         self.body: List[Step] = []
@@ -215,18 +224,42 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
     args: tuple = (),
     *,
     name: str = "function",
+    description: str = "",
     output_key: Optional[str] = None,
     output_model: Optional[type] = None,
     tools: Optional[List[Any]] = None,
+    inherit: Any = False,
 ) -> FunctionDef:
     '''定义一个带参数的步骤：Function(args=("job",)).Do(Prompt(...))。
 
     传了 tools 时，这个函数里的模型调用可以自己调用工具（function calling）。
+    `description` 是给**模型**看的说明 —— 挂到 `ChatWorkflow(skills=[...])` 时
+    它就是工具描述；不写的话用「名字（参数：...）」凑一句。
+
+    `inherit`：被当成工具调用时，要不要把调用方的状态（Context 里的变量）
+    带进来。`True` = 全部，`("profile", "topics")` = 只带这几个。
     '''
     return FunctionDef(
         args=args,
         name=name,
+        description=description,
         output_key=output_key,
         output_model=output_model,
         tools=tools,
+        inherit=inherit,
+    )
+
+
+def _normalise_inherit(value: Any, name: str) -> Any:
+    if isinstance(value, bool) or value is None:
+        return bool(value)
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple, set)):
+        keys = tuple(str(item) for item in value if str(item).strip())
+        if not keys:
+            raise ArgumentError(f"{name}: inherit 里的 key 不能是空的")
+        return keys
+    raise ArgumentError(
+        f"{name}: inherit 只能是 True / False / 字符串 / 字符串序列，得到 {value!r}"
     )
