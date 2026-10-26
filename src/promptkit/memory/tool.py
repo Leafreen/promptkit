@@ -19,13 +19,20 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 from promptkit.memory.base import Memory, item_text
 from promptkit.memory.budget import TokenBudget
 from promptkit.tools import Tool
 
-__all__ = ["RecallMemoryTool", "MEMORY_REFERENCE", "MEMORY_LOGGER"]
+__all__ = [
+    "RecallMemoryTool",
+    "WriteMemoryTool",
+    "MEMORY_REFERENCE",
+    "WRITE_MEMORY",
+    "MEMORY_LOGGER",
+]
 
 #: 记忆层的 logger（`promptkit.memory`），和 `promptkit` 主 logger 是父子关系
 MEMORY_LOGGER = "promptkit.memory"
@@ -186,6 +193,151 @@ class RecallMemoryTool(Tool):
         )
 
 
+class WriteMemoryTool(Tool):
+    '''把 `memory.write()` 包成一个 function-calling 工具，让模型**能写**长期记忆。
+
+    和 `RecallMemoryTool`（只读）对称，但**写是显式授权**的：只有把这个工具
+    加进 `Tools(...)`，模型才有写权限。默认不随 `MEMORY_REFERENCE` 赠送。
+
+    模型传参：
+
+        write_memory(content="我喜欢用生活例子理解数学符号")     # 自由笔记，自动建键
+        write_memory(content="中级", key="level")                # 结构化键值
+
+    省略 `key` 时自动用 `note:{uuid}` 建键 —— 这种笔记会被 `LayeredMemory`
+    同时写进向量索引（`mirror=True`），之后能用 `recall_memory` 按意思找到。
+
+    两道闸门（对照 `RecallMemoryTool` 的四道，写更危险所以更严）：
+
+    1. **调用次数**：一轮最多 `max_calls` 次，超了让模型直接回答
+    2. **单条截断**：每条不超过 `max_chars` 字，防止一次灌一篇论文
+
+    同样有审计日志，出问题能回查「它当时往记忆里塞了什么」。
+    '''
+
+    DEFAULT_DESCRIPTION = (
+        "把一条信息写入长期记忆，之后可以被 recall_memory 召回。"
+        "只在用户明确要求记住，或出现值得长期保留的偏好、进度、结论时调用；"
+        "不要记录密码、密钥等敏感信息，也不要记录普通闲聊。"
+    )
+
+    DEFAULT_PARAMETERS: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "要记住的内容（一句话或一段笔记）",
+            },
+            "key": {
+                "type": "string",
+                "description": (
+                    "可选：指定记忆的键名（如 'level'、'preferred_style'）。"
+                    "不填则自动生成一个笔记键，之后靠语义召回而不是按键读取。"
+                ),
+            },
+        },
+        "required": ["content"],
+    }
+
+    def __init__(
+        self,
+        memory: Memory,
+        *,
+        name: str = "write_memory",
+        description: Optional[str] = None,
+        parameters: Optional[Dict[str, Any]] = None,
+        max_calls: int = 5,
+        max_chars: int = 2000,
+        key_prefix: str = "note",
+        logger: Optional[logging.Logger] = None,
+    ):
+        if memory is None:
+            raise ValueError("WriteMemoryTool 需要 memory（一个 Memory 实例）")
+        if not callable(getattr(memory, "write", None)):
+            raise TypeError(
+                "WriteMemoryTool 的 memory 必须实现 write()，"
+                f"得到 {type(memory).__name__}"
+            )
+        if int(max_calls) < 1:
+            raise ValueError(f"max_calls 必须是正整数，得到 {max_calls!r}")
+        if int(max_chars) < 1:
+            raise ValueError(f"max_chars 必须是正整数，得到 {max_chars!r}")
+
+        self.memory = memory
+        self.max_calls = int(max_calls)
+        self.max_chars = int(max_chars)
+        self.key_prefix = str(key_prefix)
+        self.logger = logger or logging.getLogger(MEMORY_LOGGER)
+        self._calls = 0
+
+        super().__init__(
+            name=name,
+            description=self.DEFAULT_DESCRIPTION if description is None else description,
+            parameters=dict(self.DEFAULT_PARAMETERS if parameters is None else parameters),
+            func=self.run,
+        )
+
+    # ---------------- 状态 ----------------
+    @property
+    def calls(self) -> int:
+        '''本次「一轮」里已经被调用了几次。'''
+        return self._calls
+
+    def reset(self) -> "WriteMemoryTool":
+        '''清零调用计数（换一轮对话时调）。'''
+        self._calls = 0
+        return self
+
+    # ---------------- 工具本体 ----------------
+    def run(self, content: str, key: Optional[str] = None) -> Dict[str, Any]:
+        '''工具的实际实现；返回值由 `Tool.call()` 转成 JSON 文本交给模型。'''
+        if self._calls >= self.max_calls:
+            return {
+                "ok": False,
+                "error": (
+                    f"本次对话已经写入过 {self.max_calls} 次记忆，"
+                    "请直接用对话回答，不要继续写记忆"
+                ),
+            }
+
+        text = "" if content is None else str(content).strip()
+        if not text:
+            return {"ok": False, "error": "content 不能为空"}
+
+        if len(text) > self.max_chars:
+            text = text[: max(1, self.max_chars - 1)] + "…"
+
+        store_key = ""
+        if key is not None:
+            store_key = str(key).strip()
+        if not store_key:
+            store_key = f"{self.key_prefix}:{uuid.uuid4().hex}"
+
+        self._calls += 1
+        try:
+            self.memory.write(store_key, text)
+        except Exception as exc:  # noqa: BLE001 - 记忆后端出错不该把整轮对话炸掉
+            self._calls -= 1
+            self.logger.exception("write_memory 失败 key=%s", store_key)
+            return {"ok": False, "error": f"写入失败：{exc}"}
+
+        self.logger.info(
+            "write_memory key=%s chars=%d calls=%d",
+            store_key,
+            len(text),
+            self._calls,
+        )
+        return {"ok": True, "key": store_key, "chars": len(text)}
+
+    def __repr__(self) -> str:
+        return (
+            f"<WriteMemoryTool name={self.name!r} "
+            f"memory={type(self.memory).__name__} "
+            f"calls={self._calls}/{self.max_calls} "
+            f"max_chars={self.max_chars}>"
+        )
+
+
 def _int_or(value: Any, fallback: int) -> int:
     '''模型传的 `top_k` 可能是字符串甚至胡说，别让它炸掉工具。'''
     try:
@@ -247,36 +399,125 @@ def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
 
     # 3) 命名空间 或 路径 → 先建一份长期记忆，再包一层
     if isinstance(source, (str, os.PathLike)):
-        from promptkit.memory.layered import long_term_memory
-
-        if embed_client is None:
-            from promptkit.memory.adapters import HashEmbedding
-
-            embed_client = HashEmbedding(dimension=512)
-
-        text = os.fspath(source)
-        if os.sep in text or text.endswith((".db", ".sqlite", ".db3", ".jsonl")):
-            # 路径：KV 一个文件，向量并排一个文件夹
-            identity = namespace or (
-                os.path.splitext(os.path.basename(text))[0] or "default"
-            )
-            memory = long_term_memory(
-                identity,
-                path=text,
-                vector_path=text + ".vectors",
-                embed_client=embed_client,
-                **kwargs,
-            )
-        else:
-            # 命名空间：默认数据目录
-            memory = long_term_memory(
-                namespace or text,
-                embed_client=embed_client,
-                **kwargs,
-            )
+        memory = _memory_from_source(
+            source, namespace=namespace, embed_client=embed_client, **kwargs
+        )
         return RecallMemoryTool(memory, **tool_kwargs)
 
     raise TypeError(
         "MEMORY_REFERENCE 需要命名空间字符串、路径、Memory 或 Tool，"
+        f"得到 {type(source).__name__}"
+    )
+
+
+def _memory_from_source(
+    source: Any,
+    *,
+    namespace: Optional[str] = None,
+    embed_client: Optional[Any] = None,
+    **kwargs: Any,
+) -> Memory:
+    '''把「命名空间 / 路径」编译成一个 `LayeredMemory`（KV + 向量）。
+
+    `MEMORY_REFERENCE` 和 `WRITE_MEMORY` 共用这段，保证两个工具拿到的
+    记忆对象**配置一致**（同一个路径 → 同一种 KV/向量布局）。
+    '''
+    from promptkit.memory.layered import long_term_memory
+
+    if embed_client is None:
+        from promptkit.memory.adapters import HashEmbedding
+
+        embed_client = HashEmbedding(dimension=512)
+
+    text = os.fspath(source)
+    if os.sep in text or text.endswith((".db", ".sqlite", ".db3", ".jsonl")):
+        identity = namespace or (
+            os.path.splitext(os.path.basename(text))[0] or "default"
+        )
+        return long_term_memory(
+            identity,
+            path=text,
+            vector_path=text + ".vectors",
+            embed_client=embed_client,
+            **kwargs,
+        )
+    # 命名空间：默认数据目录
+    return long_term_memory(
+        namespace or text,
+        embed_client=embed_client,
+        **kwargs,
+    )
+
+
+def WRITE_MEMORY(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
+    source: Any,
+    *,
+    name: str = "write_memory",
+    description: Optional[str] = None,
+    max_calls: int = 5,
+    max_chars: int = 2000,
+    key_prefix: str = "note",
+    namespace: Optional[str] = None,
+    embed_client: Optional[Any] = None,
+    **kwargs: Any,
+) -> Tool:
+    '''把「命名空间 / 路径 / Memory / 现成 Tool」统一成一个**可写**的记忆工具。
+
+    一行把「写记忆」接进聊天，跟 `MEMORY_REFERENCE`（只读）对称：
+
+        from promptkit.memory import MEMORY_REFERENCE, WRITE_MEMORY
+        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+
+        Tools(
+            WEB_SEARCH,
+            MEMORY_REFERENCE("learner_001"),   # 读：按意思召回
+            WRITE_MEMORY("learner_001"),       # 写：模型自己决定记什么
+            WRITE_FILE,
+        )
+
+    - 传命名空间 / 路径 → 用默认数据目录建 KV + 向量记忆（`mirror=True`，
+      写入会同时进向量索引，之后能被 `recall_memory` 召回）
+    - 传 `Memory`（有 `write`）→ 直接 `WriteMemoryTool` 包一层
+    - 传 `Tool` → 原样返回
+
+    **读和写要共用同一个 memory 对象**：如果传路径，`MEMORY_REFERENCE("x")`
+    和 `WRITE_MEMORY("x")` 会各自建一份记忆实例；KV（SQLite）在磁盘上能互通，
+    但向量索引是进程内的，写进去的笔记要等 `memory.close()` 落盘后另一个实例
+    才能召回。要「写了立刻能召回」，请显式建一份记忆再传给两个工厂：
+
+        memory = long_term_memory("learner_001")
+        recall_tool = MEMORY_REFERENCE(memory)
+        write_tool = WRITE_MEMORY(memory)
+
+    模型调用：
+
+        write_memory(content="我喜欢用生活例子理解数学符号")   # 自由笔记
+        write_memory(content="中级", key="level")              # 结构化键值
+    '''
+    # 1) 已经是工具，原样返回
+    if isinstance(source, Tool):
+        return source
+
+    tool_kwargs: Dict[str, Any] = dict(
+        name=name,
+        description=description,
+        max_calls=max_calls,
+        max_chars=max_chars,
+        key_prefix=key_prefix,
+    )
+
+    # 2) 现成的记忆对象（有 write 就行）
+    if isinstance(source, Memory) or callable(getattr(source, "write", None)):
+        return WriteMemoryTool(source, **tool_kwargs)
+
+    # 3) 命名空间 或 路径 → 先建一份长期记忆，再包一层
+    if isinstance(source, (str, os.PathLike)):
+        memory = _memory_from_source(
+            source, namespace=namespace, embed_client=embed_client, **kwargs
+        )
+        return WriteMemoryTool(memory, **tool_kwargs)
+
+    raise TypeError(
+        "WRITE_MEMORY 需要命名空间字符串、路径、Memory 或 Tool，"
         f"得到 {type(source).__name__}"
     )

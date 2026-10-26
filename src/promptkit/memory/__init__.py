@@ -81,7 +81,13 @@ from promptkit.memory.storage import (
     create_memory,
     register_memory_backend,
 )
-from promptkit.memory.tool import MEMORY_LOGGER, MEMORY_REFERENCE, RecallMemoryTool
+from promptkit.memory.tool import (
+    MEMORY_LOGGER,
+    MEMORY_REFERENCE,
+    RecallMemoryTool,
+    WRITE_MEMORY,
+    WriteMemoryTool,
+)
 from promptkit.memory.vector import (
     EmbeddingClient,
     InMemoryVectorStore,
@@ -138,5 +144,7 @@ __all__ = [
     # 工具
     "RecallMemoryTool",
     "MEMORY_REFERENCE",
+    "WriteMemoryTool",
+    "WRITE_MEMORY",
     "MEMORY_LOGGER",
 ]
