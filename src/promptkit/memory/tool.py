@@ -18,13 +18,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Iterable, Optional, Sequence
 
 from promptkit.memory.base import Memory, item_text
 from promptkit.memory.budget import TokenBudget
 from promptkit.tools import Tool
 
-__all__ = ["RecallMemoryTool", "MEMORY_LOGGER"]
+__all__ = ["RecallMemoryTool", "MEMORY_REFERENCE", "MEMORY_LOGGER"]
 
 #: 记忆层的 logger（`promptkit.memory`），和 `promptkit` 主 logger 是父子关系
 MEMORY_LOGGER = "promptkit.memory"
@@ -191,3 +192,91 @@ def _int_or(value: Any, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
+    source: Any,
+    *,
+    name: str = "recall_memory",
+    description: Optional[str] = None,
+    top_k: int = 3,
+    max_top_k: int = 5,
+    max_calls: int = 3,
+    max_item_chars: int = 500,
+    budget: Optional[TokenBudget] = None,
+    namespace: Optional[str] = None,
+    embed_client: Optional[Any] = None,
+    **kwargs: Any,
+) -> Tool:
+    '''把「命名空间 / 路径 / Memory / 现成 Tool」统一成一个**只读**的回忆工具。
+
+    一行把长期记忆接进聊天，跟 `KNOWLEDGE_REFERENCE` 对称：
+
+        from promptkit.memory import MEMORY_REFERENCE
+        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+
+        Tools(WEB_SEARCH, MEMORY_REFERENCE("learner_001"), WRITE_FILE)
+
+    - 传命名空间（`"learner_001"`）→ 用默认数据目录建 KV + 向量记忆
+    - 传路径（含分隔符、或以 `.db`/`.sqlite`/`.jsonl` 结尾）→ KV 落在这个文件，
+      向量落在 `<路径>.vectors/`
+    - 传 `Memory`（有 `recall`）→ 直接 `RecallMemoryTool` 包一层
+    - 传 `Tool` → 原样返回
+
+    默认用 `HashEmbedding`（本地词法向量，免密钥、不联网）；要真语义就传
+    `embed_client=OpenAIEmbedding(...)`。刻意**只读**：写记忆仍走显式的
+    `WriteMemory` / `MemoryStep`，不能让模型随手往长期记忆里灌。
+    '''
+    # 1) 已经是工具，原样返回
+    if isinstance(source, Tool):
+        return source
+
+    tool_kwargs: Dict[str, Any] = dict(
+        name=name,
+        description=description,
+        top_k=top_k,
+        max_top_k=max_top_k,
+        max_calls=max_calls,
+        max_item_chars=max_item_chars,
+        budget=budget,
+    )
+
+    # 2) 现成的记忆对象（有 recall 就行）
+    if isinstance(source, Memory) or callable(getattr(source, "recall", None)):
+        return RecallMemoryTool(source, **tool_kwargs)
+
+    # 3) 命名空间 或 路径 → 先建一份长期记忆，再包一层
+    if isinstance(source, (str, os.PathLike)):
+        from promptkit.memory.layered import long_term_memory
+
+        if embed_client is None:
+            from promptkit.memory.adapters import HashEmbedding
+
+            embed_client = HashEmbedding(dimension=512)
+
+        text = os.fspath(source)
+        if os.sep in text or text.endswith((".db", ".sqlite", ".db3", ".jsonl")):
+            # 路径：KV 一个文件，向量并排一个文件夹
+            identity = namespace or (
+                os.path.splitext(os.path.basename(text))[0] or "default"
+            )
+            memory = long_term_memory(
+                identity,
+                path=text,
+                vector_path=text + ".vectors",
+                embed_client=embed_client,
+                **kwargs,
+            )
+        else:
+            # 命名空间：默认数据目录
+            memory = long_term_memory(
+                namespace or text,
+                embed_client=embed_client,
+                **kwargs,
+            )
+        return RecallMemoryTool(memory, **tool_kwargs)
+
+    raise TypeError(
+        "MEMORY_REFERENCE 需要命名空间字符串、路径、Memory 或 Tool，"
+        f"得到 {type(source).__name__}"
+    )
