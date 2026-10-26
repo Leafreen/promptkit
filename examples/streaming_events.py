@@ -8,7 +8,7 @@ import os
 import sys
 
 # 让 promptkit 这个包可以被导入：把它的**父目录**放进 sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from promptkit.agent import Agent  # noqa: E402
 from promptkit.core import EventBus, EventType, Workflow  # noqa: E402

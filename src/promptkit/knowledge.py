@@ -491,11 +491,54 @@ class KnowledgeBase:
         return f"<KnowledgeBase chunks={len(self.chunks)} sources={unique}>"
 
 
+def KNOWLEDGE_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
+    source: Any,
+    *,
+    name: str = "search_knowledge_base",
+    description: Optional[str] = None,
+    k: int = 3,
+    **kwargs: Any,
+) -> Tool:
+    '''把「目录路径 / 单文件路径 / KnowledgeBase / 现成 Tool」统一成一个检索工具。
+
+    一行把知识库接进聊天：
+
+        from promptkit.knowledge import KNOWLEDGE_REFERENCE
+        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+
+        Tools(WEB_SEARCH, KNOWLEDGE_REFERENCE("path/to/knowledge"), WRITE_FILE)
+
+    - 传目录 → `KnowledgeBase.from_dir(path)`（默认只收 md / txt）
+    - 传文件 → 整个文件作为一段文本灌进去
+    - 传 `KnowledgeBase` → 直接 `.as_tool()`
+    - 传 `Tool` → 原样返回
+
+    `kwargs` 透传给 `KnowledgeBase` 构造（如 `max_chars` / `overlap`）。
+    '''
+    if isinstance(source, Tool):
+        return source
+    if isinstance(source, KnowledgeBase):
+        return source.as_tool(name=name, description=description, k=k)
+    if isinstance(source, (str, os.PathLike)):
+        path = os.fspath(source)
+        if os.path.isdir(path):
+            kb = KnowledgeBase.from_dir(path, **kwargs)
+        else:
+            kb = KnowledgeBase(**kwargs)
+            kb.add_file(path)
+        return kb.as_tool(name=name, description=description, k=k)
+    raise TypeError(
+        "KNOWLEDGE_REFERENCE 需要目录/文件路径、KnowledgeBase 或 Tool，"
+        f"得到 {type(source).__name__}"
+    )
+
+
 __all__ = [
     "KnowledgeBase",
     "Hit",
     "chunk_text",
     "tokenize",
     "token_weight",
+    "KNOWLEDGE_REFERENCE",
     "FORMAT_VERSION",
 ]

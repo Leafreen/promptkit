@@ -27,7 +27,7 @@ import time
 # （包目录 == 项目根目录，所以父目录是 D:\projects）
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(HERE)
-sys.path.insert(0, os.path.dirname(PROJECT_DIR))
+sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
 from pydantic import BaseModel  # noqa: E402
 

@@ -34,6 +34,7 @@
 '''
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
 
@@ -133,6 +134,11 @@ class ChatWorkflow:
     memory: Any = None
     #: 记忆配置：读什么、召回什么、写什么（`MemoryConfig` 或等价的 dict）
     memory_config: Any = None
+    #: 知识库：目录/文件路径、`KnowledgeBase`、现成检索 `Tool`，或它们的列表。
+    #: 编译成检索工具合并进 `tools`，让模型自己决定什么时候查资料。
+    knowledge: Any = None
+    #: 命名空间：仅当 `memory` 是路径字符串、需要现建 `KVMemory` 时生效。
+    namespace: Optional[str] = None
 
     def __post_init__(self) -> None:
         '''`memory` 和 `memory_config` 必须成对出现，而且不能是空配置。
@@ -143,10 +149,35 @@ class ChatWorkflow:
         例外：只配 `memory` + `skills`（聊天层不自动读写，记忆只进出 Skill）。
         那时候记忆**确实在用**，不算是「配了没生效」。
         '''
+        # 薄入口：memory 直接给路径字符串 → 现建一个持久化记忆。
+        # 默认语义：KV 存结构化值 + HashEmbedding 向量做召回（免密钥、免额外依赖）。
+        memory_was_path = isinstance(self.memory, (str, os.PathLike))
+        if memory_was_path:
+            from promptkit.memory import long_term_memory
+            from promptkit.memory.adapters import HashEmbedding
+
+            path = os.fspath(self.memory)
+            self.memory = long_term_memory(
+                self.namespace or "default",
+                path=path,
+                vector_path=path + ".vectors",
+                embed_client=HashEmbedding(),
+            )
+        # 知识库：路径 / KnowledgeBase / 检索 Tool / 列表 → 合并进 tools
+        self._coerce_knowledge()
+
         if self.memory is None and self.memory_config is None:
             return
         if self.memory is not None and self.memory_config is None and self.skills:
             return
+        # 薄入口兜底：memory 是路径、没给 memory_config 时，自动配一个
+        # 「每轮按用户输入召回相关记忆」的默认（写哪些键是业务相关的，不猜）。
+        if self.memory_config is None and memory_was_path:
+            from promptkit.memory import MemoryConfig, RecallConfig
+
+            self.memory_config = MemoryConfig(
+                recall=RecallConfig(output_key="related")
+            )
         if self.memory is None or self.memory_config is None:
             raise ValueError(
                 "ChatWorkflow 的 memory 和 memory_config 要么都给、要么都不给；"
@@ -170,6 +201,29 @@ class ChatWorkflow:
                 "memory_config 里 read / recall / write 一个都没配，"
                 "记忆不会有任何读写；要么配一个，要么把 memory 去掉"
             )
+
+    def _coerce_knowledge(self) -> None:
+        '''把 `self.knowledge` 统一解析成检索工具，合并进 `self.tools`。
+
+        支持：目录/文件路径、`KnowledgeBase`、现成检索 `Tool`，或这几样的列表。
+        列表里多个知识库会自动给工具名编号，避免 function-calling 重名。
+        '''
+        if self.knowledge is None:
+            return
+        from promptkit.knowledge import KNOWLEDGE_REFERENCE
+
+        items = (
+            list(self.knowledge)
+            if isinstance(self.knowledge, (list, tuple))
+            else [self.knowledge]
+        )
+        single = len(items) == 1
+        for index, item in enumerate(items, start=1):
+            if single:
+                tool = KNOWLEDGE_REFERENCE(item)
+            else:
+                tool = KNOWLEDGE_REFERENCE(item, name=f"search_knowledge_base_{index}")
+            self.tools.append(tool)
 
     # ---------------- 编译 ----------------
     def build_system_prompt(self) -> str:

@@ -27,7 +27,7 @@ import sys
 # 让 promptkit 这个包可以被导入：把它的**父目录**放进 sys.path
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(HERE)
-sys.path.insert(0, os.path.dirname(PROJECT_DIR))
+sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
 from promptkit.agent import Agent  # noqa: E402
 from promptkit.coding import RunTests, default_coding_tools  # noqa: E402

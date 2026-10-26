@@ -42,32 +42,10 @@ render = ["rich>=13", "sympy>=1.12"]
 yaml = ["pyyaml>=6"]
 dev = ["pytest>=8"]
 
-# 这个项目是「包目录 == 项目根目录」的平铺结构（promptkit/ 下面直接就是 core/、
-# cautions/……），所以要把根目录映射成 promptkit 这个包名。
-# 代价是不能用 packages.find 自动发现 —— 它会把这几个子目录当成顶层包
-# （扫出 cautions / core / default_tools）。这里显式列出来，防止打漏。
-[tool.setuptools]
-package-dir = { "promptkit" = "." }
-packages = [
-    "promptkit",
-    "promptkit.cautions",
-    "promptkit.client_sys",
-    "promptkit.coding",
-    "promptkit.core",
-    "promptkit.core.display_sys",
-    "promptkit.core.event_sys",
-    "promptkit.core.model_action",
-    "promptkit.core.model_action.caution_related",
-    "promptkit.core.steps",
-    "promptkit.core.steps.actions",
-    "promptkit.core.steps.logics",
-    "promptkit.core.steps.logics.expr_sys",
-    "promptkit.default_tools",
-    "promptkit.memory",
-    "promptkit.memory.adapters",
-    "promptkit.orchestrate",
-    "promptkit.skill",
-]
+# src 布局：包位于 src/promptkit/，用 packages.find 自动发现全部子包
+#（含 core.steps.logics.expr_sys 这类深层子包）。
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-promptkit = ["README.md", "requirements.txt", ".env.example"]
+promptkit = [".env.example"]

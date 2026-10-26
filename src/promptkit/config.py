@@ -10,9 +10,23 @@
 import os
 from typing import Dict, List, Optional
 
-# promptkit/ 这个目录（也就是包根目录，.env 放这里）
+# 包安装目录：源码开发时是 src/promptkit，装到 site-packages 后是 site-packages/promptkit
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-ENV_FILE = os.path.join(PROJECT_ROOT, ".env")
+
+
+def _default_env_file() -> str:
+    '''默认 .env 查找位置：优先当前工作目录，其次包目录。
+
+    src 布局下 `.env` 通常放在项目根目录（脚本的 CWD），
+    不再和包代码放在一起；安装后兜底退回包目录。
+    '''
+    cwd_env = os.path.join(os.getcwd(), ".env")
+    if os.path.isfile(cwd_env):
+        return cwd_env
+    return os.path.join(PROJECT_ROOT, ".env")
+
+
+ENV_FILE = _default_env_file()
 
 ENV_VAR = "DEEPSEEK_API_KEY"
 

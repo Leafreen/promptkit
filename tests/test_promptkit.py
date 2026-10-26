@@ -15,7 +15,7 @@ import tempfile
 from unittest import mock
 
 # 让 promptkit 这个包可以被导入：把它的**父目录**放进 sys.path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from openai.types.chat import ChatCompletionMessage  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -2249,7 +2249,7 @@ class TestPackaging(PromptkitTestCase):
         import re
 
         root = pathlib.Path(__file__).resolve().parent.parent
-        package_parent = root.parent
+        package_parent = root / "src"
         pattern = re.compile(
             r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))", re.MULTILINE
         )
@@ -2417,44 +2417,37 @@ class TestPackaging(PromptkitTestCase):
         self.assertEqual(offenders, [])
 
     def test_pyproject_package_list_covers_every_subpackage(self):
-        '''打包配置最容易出的错：加了新子包但忘了写进 pyproject.toml，
-        结果打出来的 wheel 缺模块 —— 而且本地跑测试完全发现不了。
+        '''打包配置最容易出的错：加了新子包但没进轮子。
 
-        这条测试把 pyproject 里的 packages 和磁盘上的实际目录结构对一遍。
+        src 布局改用 packages.find 自动发现，这里验证 where 指向 src，
+        且 setuptools 实际能发现磁盘上的全部子包（不靠手写清单）。
         '''
         import pathlib
 
         try:
             import tomllib
-        except ModuleNotFoundError:  # pragma: no cover - 3.10 没有 tomllib
-            self.skipTest("需要 Python 3.11+ 的 tomllib")
+            from setuptools import find_packages
+        except ModuleNotFoundError:  # pragma: no cover
+            self.skipTest("需要 Python 3.11+ 的 tomllib / setuptools")
 
         root = pathlib.Path(__file__).resolve().parent.parent
         config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        declared = set(config["tool"]["setuptools"]["packages"])
+        where = config["tool"]["setuptools"]["packages"]["find"]["where"]
+        self.assertEqual(where, ["src"], "packages.find 的 where 必须指向 src")
 
-        # 磁盘上真实的子包：含 __init__.py 的目录。
-        # examples/tests 是脚本目录；.tmp / build / dist 是构建产物，都不算。
-        skip = {"examples", "tests", ".tmp", "build", "dist", "__pycache__"}
-        actual = {"promptkit"}
-        for path in sorted(root.rglob("__init__.py")):
-            if any(part in skip or part.endswith(".egg-info") for part in path.parts):
-                continue
-            package = path.parent
-            if package == root:
-                continue
-            actual.add("promptkit." + str(package.relative_to(root)).replace(os.sep, "."))
+        src = root / "src"
+        actual = set()
+        for path in sorted((src / "promptkit").rglob("__init__.py")):
+            actual.add(".".join(path.parent.relative_to(src).parts))
 
+        discovered = set(find_packages(where=str(src)))
         self.assertEqual(
-            declared - actual, set(), "pyproject 里列了不存在的包"
-        )
-        self.assertEqual(
-            actual - declared, set(), "这些子包没写进 pyproject.toml，打 wheel 会丢"
+            actual, discovered, "磁盘上的子包与 find_packages 发现的不一致"
         )
 
-    def test_pyproject_maps_the_root_to_the_package_name(self):
-        '''这个项目是「包目录 == 项目根目录」的平铺结构，必须显式映射，
-        否则 setuptools 会把 core / cautions / default_tools 当成顶层包。'''
+    def test_pyproject_uses_src_layout(self):
+        '''src 布局：包位于 src/promptkit，用 packages.find 自动发现，
+        不再需要平铺结构的 package-dir 映射。'''
         import pathlib
 
         try:
@@ -2464,24 +2457,23 @@ class TestPackaging(PromptkitTestCase):
 
         root = pathlib.Path(__file__).resolve().parent.parent
         config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
-        self.assertEqual(
-            config["tool"]["setuptools"]["package-dir"], {"promptkit": "."}
-        )
+        tool = config["tool"]["setuptools"]
+        self.assertNotIn("package-dir", tool, "src 布局不应再映射 package-dir")
+        self.assertEqual(tool["packages"]["find"]["where"], ["src"])
         project = config["project"]
         self.assertEqual(project["name"], "promptkit")
         self.assertIn("openai", " ".join(project["dependencies"]))
         self.assertIn("pydantic", " ".join(project["dependencies"]))
 
     def test_no_stray_top_level_package_dirs(self):
-        '''core / cautions / default_tools 只能是 promptkit 的子包，
-        不能自己带 __init__.py 变成顶层包（否则 wheel 里多出三个垃圾顶层包）。'''
+        '''src/ 下只能有 promptkit 一个顶层包；core / cautions / default_tools
+        只能是 promptkit 的子包，不能自己带 __init__.py 变成平级顶层包。'''
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parent.parent
-        for name in ("core", "cautions", "default_tools", "promptkit"):
-            candidate = root.parent / name / "__init__.py"
-            if name == "promptkit":
-                continue
+        src = root / "src"
+        for name in ("core", "cautions", "default_tools"):
+            candidate = src / name / "__init__.py"
             self.assertFalse(
                 candidate.exists(),
                 f"{candidate} 会让 {name} 变成顶层包，应该不存在",
