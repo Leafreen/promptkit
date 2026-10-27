@@ -10,7 +10,15 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from promptkit.orchestrate.errors import PlanError
+from promptkit.orchestrate.errors import ErrorCode, PlanError
+
+__all__ = [
+    "ON_FAILURE",
+    "Task",
+    "TaskResult",
+    "Plan",
+    "plan_from",
+]
 
 #: 任务失败之后怎么办
 ON_FAILURE = ("retry", "skip", "abort", "fallback")
@@ -51,24 +59,34 @@ class Task:
     def __post_init__(self) -> None:
         self.name = str(self.name or "").strip()
         if not self.name:
-            raise PlanError("任务必须有名字")
+            raise PlanError("任务必须有名字", code=ErrorCode.TASK_INVALID)
         self.description = str(self.description or "").strip() or self.name
         self.role = str(self.role or "").strip()
         self.depends_on = _unique(self.depends_on)
         self.input_keys = _unique(self.input_keys)
         self.max_retries = int(self.max_retries)
         if self.max_retries < 0:
-            raise PlanError(f"任务 {self.name!r} 的 max_retries 不能是负数")
+            raise PlanError(
+                f"任务 {self.name!r} 的 max_retries 不能是负数",
+                code=ErrorCode.TASK_INVALID,
+            )
         self.on_failure = str(self.on_failure or "retry").lower()
         if self.on_failure not in ON_FAILURE:
             raise PlanError(
                 f"任务 {self.name!r} 的 on_failure={self.on_failure!r} 不合法；"
-                f"可选：{', '.join(ON_FAILURE)}"
+                f"可选：{', '.join(ON_FAILURE)}",
+                code=ErrorCode.TASK_INVALID,
             )
         if self.on_failure == "fallback" and self.fallback_agent is None:
-            raise PlanError(f"任务 {self.name!r} 选了 fallback，但没给 fallback_agent")
+            raise PlanError(
+                f"任务 {self.name!r} 选了 fallback，但没给 fallback_agent",
+                code=ErrorCode.TASK_INVALID,
+            )
         if self.timeout is not None and float(self.timeout) <= 0:
-            raise PlanError(f"任务 {self.name!r} 的 timeout 必须大于 0")
+            raise PlanError(
+                f"任务 {self.name!r} 的 timeout 必须大于 0",
+                code=ErrorCode.TASK_INVALID,
+            )
 
     @property
     def key(self) -> str:
@@ -105,6 +123,8 @@ class TaskResult:
     latency: float = 0.0
     attempts: int = 0
     output_key: str = ""
+    #: 原始异常对象（只在 orchestrator 内部用，to_dict 不暴露）
+    _exception: Optional[BaseException] = None
 
     @property
     def ok(self) -> bool:
@@ -138,21 +158,31 @@ class Plan:
     def __post_init__(self) -> None:
         self.tasks = tuple(self.tasks)
         if not self.tasks:
-            raise PlanError("计划里没有任何任务")
+            raise PlanError("计划里没有任何任务", code=ErrorCode.PLAN_EMPTY)
         seen: Dict[str, Task] = {}
         for task in self.tasks:
             if not isinstance(task, Task):
-                raise PlanError(f"计划里混进了不是 Task 的东西：{task!r}")
+                raise PlanError(
+                    f"计划里混进了不是 Task 的东西：{task!r}",
+                    code=ErrorCode.PLAN_INVALID,
+                )
             if task.name in seen:
-                raise PlanError(f"任务名重复：{task.name!r}（名字要唯一）")
+                raise PlanError(
+                    f"任务名重复：{task.name!r}（名字要唯一）",
+                    code=ErrorCode.PLAN_DUPLICATE_TASK,
+                )
             seen[task.name] = task
         for task in self.tasks:
             for dependency in task.depends_on:
                 if dependency == task.name:
-                    raise PlanError(f"任务 {task.name!r} 不能依赖自己")
+                    raise PlanError(
+                        f"任务 {task.name!r} 不能依赖自己",
+                        code=ErrorCode.PLAN_UNKNOWN_DEPENDENCY,
+                    )
                 if dependency not in seen:
                     raise PlanError(
-                        f"任务 {task.name!r} 依赖的 {dependency!r} 不在计划里"
+                        f"任务 {task.name!r} 依赖的 {dependency!r} 不在计划里",
+                        code=ErrorCode.PLAN_UNKNOWN_DEPENDENCY,
                     )
         self.topological()      # 顺带查环
 
@@ -184,7 +214,9 @@ class Plan:
             ]
             if not ready:
                 left = ", ".join(task.name for task in pending)
-                raise PlanError(f"任务依赖有环，转不动了：{left}")
+                raise PlanError(
+                    f"任务依赖有环，转不动了：{left}", code=ErrorCode.PLAN_CYCLE
+                )
             for task in ready:
                 order.append(task)
                 done.add(task.name)
@@ -201,7 +233,7 @@ class Plan:
                 task for task in pending if all(dep in done for dep in task.depends_on)
             ]
             if not ready:
-                raise PlanError("任务依赖有环，分不出层")
+                raise PlanError("任务依赖有环，分不出层", code=ErrorCode.PLAN_CYCLE)
             layers.append(ready)
             done.update(task.name for task in ready)
             pending = [task for task in pending if task.name not in done]
@@ -225,7 +257,8 @@ class Plan:
         if max_tasks is not None and len(built) > int(max_tasks):
             raise PlanError(
                 f"计划有 {len(built)} 个任务，超过上限 {int(max_tasks)}；"
-                "要么改模板，要么调大 max_tasks"
+                "要么改模板，要么调大 max_tasks",
+                code=ErrorCode.PLAN_TOO_MANY_TASKS,
             )
         return cls(tuple(built), task=task)
 
@@ -255,6 +288,30 @@ def _plain(value: Any) -> Any:
         except Exception:       # noqa: BLE001 - 转换失败就原样给回去
             return value
     return value
+
+
+def plan_from(value: Any) -> Plan:
+    '''把 `Plan` / `Task` 列表 / `{"tasks": [...]}` / `PlanSpec` 统一成 `Plan`。
+
+    这是全项目**唯一**的计划解析入口：`ExecutePlan` / `Orchestrator.run` /
+    `orchestrate.api` 都走它，所以 DSL 写法在各处表现一致。
+    '''
+    if isinstance(value, Plan):
+        return value
+    if isinstance(value, (list, tuple)):
+        return Plan.from_template(value)
+    if isinstance(value, dict) and "tasks" in value:
+        return Plan.from_template(
+            value["tasks"], task=str(value.get("task") or "")
+        )
+    to_plan = getattr(value, "to_plan", None)      # PlanSpec 等鸭子类型
+    if callable(to_plan):
+        return to_plan()
+    raise PlanError(
+        f"看不懂的计划：{type(value).__name__}；"
+        "要 Plan、Task 列表、{'tasks': [...]} 或 PlanSpec",
+        code=ErrorCode.PLAN_INVALID,
+    )
 
 
 def elapsed(started: float) -> float:

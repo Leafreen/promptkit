@@ -32,6 +32,14 @@ from promptkit.skill.errors import (
     SkillNotFound,
     SkillValidationError,
 )
+from promptkit.skill.markdown import MarkdownSkillTool, as_skill, as_skills
+from promptkit.skill.orchestrate_skill import (
+    OrchestrateSkillSet,
+    orchestrate_plan,
+    orchestrate_run,
+    orchestrate_validate,
+    register_orchestrate_skills,
+)
 from promptkit.skill.registry import SkillRegistry
 from promptkit.skill.schema import build_parameters, type_schema, validate_args
 from promptkit.skill.spec import Skill, SkillSpec, build_spec, skill
@@ -44,6 +52,10 @@ __all__ = [
     "build_spec",
     "SkillSpec",
     "Skill",
+    # 外部 Markdown 技能
+    "as_skill",
+    "as_skills",
+    "MarkdownSkillTool",
     # 注册 / 执行
     "SkillRegistry",
     "SkillContext",
@@ -60,4 +72,10 @@ __all__ = [
     "SkillAlreadyExists",
     "SkillNotFound",
     "SkillExecutionError",
+    # 编排 Skill（自包含）
+    "orchestrate_run",
+    "orchestrate_plan",
+    "orchestrate_validate",
+    "OrchestrateSkillSet",
+    "register_orchestrate_skills",
 ]

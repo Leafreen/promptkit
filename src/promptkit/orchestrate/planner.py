@@ -12,10 +12,47 @@ from typing import Any, List, Mapping, Optional, Sequence
 from pydantic import BaseModel, Field
 
 from promptkit.orchestrate.agents import as_text, structured_answer
-from promptkit.orchestrate.errors import PlanError
+from promptkit.orchestrate.errors import ErrorCode, PlanError
 from promptkit.orchestrate.task import Plan, Task
 
-__all__ = ["Planner", "TemplatePlanner", "LLMPlanner", "TaskSpec", "TaskPlanModel"]
+__all__ = [
+    "Planner",
+    "TemplatePlanner",
+    "LLMPlanner",
+    "TaskSpec",
+    "TaskPlanModel",
+    "coerce_planner",
+]
+
+
+def coerce_planner(
+    value: Any,
+    *,
+    max_tasks: int = 5,
+    tools: Optional[Sequence[Any]] = None,
+    allow_none: bool = False,
+) -> Optional["Planner"]:
+    '''把「Planner / 带 plan() 的对象 / Agent / None」统一成规划器。
+
+    全项目**唯一**的规划器归一化入口：`PlanStep`、`orchestrate.api`、
+    `PlanTool` 都走它，所以三种写法的行为一致。
+    '''
+    if value is None:
+        if allow_none:
+            return None
+        raise PlanError(
+            "需要一个规划器：Planner 实例、带 plan() 的对象，或 Agent",
+            code=ErrorCode.INVALID_REQUEST,
+        )
+    if isinstance(value, Planner) or callable(getattr(value, "plan", None)):
+        return value
+    if callable(getattr(value, "ask", None)):
+        return LLMPlanner(value, max_tasks=max_tasks, tools=tools)
+    raise PlanError(
+        f"看不懂的 planner：{type(value).__name__}；"
+        "要 Planner 实例、带 plan() 的对象，或 Agent",
+        code=ErrorCode.INVALID_REQUEST,
+    )
 
 
 class Planner(ABC):

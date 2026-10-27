@@ -76,6 +76,19 @@ from promptkit.default_tools.web_search import (  # noqa: E402
     resolve_baidu_target,
     unwrap_url,
 )
+from promptkit.api import (  # noqa: E402
+    Assert,
+    AssertionAdapter,
+    AssertionFailed,
+    AssertionResult,
+    Assertions,
+    CallableAssertionAdapter,
+    HookAbort,
+    HookType,
+    Hooks,
+    assertion_adapters,
+    use_hooks,
+)
 from promptkit.cautions import (  # noqa: E402
     ANALYST,
     CODE_ONLY,
@@ -7393,6 +7406,57 @@ class TestChatLoop(PromptkitTestCase):
                     agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
                 )
 
+    # ---------------- after_end：用户退出后的收尾 ----------------
+    def test_after_end_runs_on_exit_word(self):
+        ctx, agent, _ = self.run_loop(["你好", "exit"], after_end=[Set("bye", 1)])
+        self.assertEqual(ctx.get("bye"), 1)
+        self.assertEqual(len(agent.prompts), 1)      # 退出那轮不调模型
+
+    def test_after_end_runs_once_after_loop(self):
+        calls = []
+
+        class Recorder(Step):
+            name = "recorder"
+
+            def execute(self, context):
+                calls.append(context.get("chat_signal"))
+
+        self.run_loop(["a", "b", "exit"], after_end=[Recorder()])
+        self.assertEqual(calls, ["end"])              # 只跑一次，且看得到退出信号
+
+    def test_after_end_runs_on_eof(self):
+        ctx, _, _ = self.run_loop(
+            [EOFError], after_end=[Set("bye", 1)]      # Ctrl+D 也算用户退出
+        )
+        self.assertEqual(ctx.get("bye"), 1)
+
+    def test_after_end_skipped_when_max_turns(self):
+        ran = []
+        with mock.patch("builtins.input", side_effect=["a"] * 20):
+            with self.assertRaises(LoopLimitExceeded):
+                Workflow(
+                    ChatLoop(
+                        max_turns=2,
+                        after_end=[FunctionStep(lambda ctx: ran.append(1), name="end")],
+                    )
+                ).run(agent=FakeChatAgent(), verbose=Verbosity.SILENT, out=io.StringIO())
+        self.assertEqual(ran, [])
+
+    def test_after_end_sees_context_variables(self):
+        ctx, _, _ = self.run_loop(
+            ["你好", "exit"],
+            after_end=[Set("last_reply", Var("model_reply"))],
+        )
+        self.assertEqual(ctx.get("last_reply"), "嗯1：你好")
+
+    def test_after_end_defaults_to_empty(self):
+        ctx, _, _ = self.run_loop(["exit"])
+        self.assertEqual(ctx.get("chat_signal"), "end")
+
+    def test_after_end_rejects_unknown_step(self):
+        with self.assertRaises(TypeError):
+            ChatLoop(after_end=["不是步骤"])
+
 
 class TestChatWorkflow(PromptkitTestCase):
     '''`ChatWorkflow` —— 把声明编译成普通 Workflow。'''
@@ -7439,6 +7503,18 @@ class TestChatWorkflow(PromptkitTestCase):
         )
         self.assertEqual([d.name for d in chat.end_deliverables()], ["a"])
         self.assertEqual([d.name for d in chat.each_turn_deliverables()], ["b"])
+
+    # ---------------- after_end ----------------
+    def test_after_end_steps_compiled_into_workflow(self):
+        chat = ChatWorkflow(role="导师", after_end=[Set("bye", 1)])
+        with mock.patch("builtins.input", return_value="exit"):
+            ctx = chat.build().run(
+                agent=FakeChatAgent(), verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        self.assertEqual(ctx.get("bye"), 1)
+
+    def test_after_end_absent_by_default(self):
+        self.assertEqual(ChatWorkflow(role="导师").after_end, [])
 
     def test_deliverable_rejects_bad_when(self):
         with self.assertRaises(ValueError):
@@ -9799,8 +9875,13 @@ from promptkit.coding.tools import (  # noqa: E402
 )
 
 from promptkit.orchestrate import (  # noqa: E402
+    API_VERSION,
     AggregateStep,
+    BudgetExceeded,
+    DelegateError,
     DelegateTool,
+    DepthExceeded,
+    ErrorCode,
     ExecutePlan,
     LLMPlanner,
     Orchestrator,
@@ -9808,14 +9889,21 @@ from promptkit.orchestrate import (  # noqa: E402
     Plan,
     PlanError,
     PlanResult,
+    PlanSpec,
     PlanStep,
+    PlanTool,
+    PlanWithTool,
     Planner,
+    Request,
+    Response,
     RoleFactory,
     Task,
     TaskError,
     TaskResult,
     TemplatePlanner,
+    coerce_planner,
     format_task_results,
+    handle,
     plan_from,
     structured_answer,
     sub_agent,
@@ -13499,6 +13587,148 @@ class TestDelegateTool(PromptkitTestCase):
             DelegateTool({"a": OrchAgent(["x"])}, max_delegations=0)
 
 
+class TestPlanTool(PromptkitTestCase):
+    '''模型自主规划：`PlanTool`（工具）+ `PlanWithTool`（步骤）。'''
+
+    class ToolCallingAgent(OrchAgent):
+        '''会在被给到工具时，调用最后一个工具的假 agent。'''
+
+        def __init__(self, reply="已规划", arguments=None):
+            super().__init__([reply])
+            self.arguments = arguments or {"task": "写报告"}
+            self.tool_results = []
+
+        def ask(self, prompt, tools=None, bus=None, **kwargs):
+            reply = super().ask(prompt, tools, bus, **kwargs)
+            if tools:
+                self.tool_results.append(tools[-1].call(self.arguments))
+            return reply
+
+    def _template(self):
+        return TemplatePlanner([
+            Task("research", "调研"),
+            Task("write", "根据 {{research}} 写", depends_on=("research",)),
+        ])
+
+    # ---------------- 工具本体 ----------------
+    def test_plan_written_into_context(self):
+        ctx = {}
+        tool = PlanTool(planner=self._template(), context=ctx)
+        tool.call({"task": "写报告"})
+        self.assertIsInstance(ctx["plan"], Plan)
+        self.assertEqual(ctx["plan"].names, ["research", "write"])
+        self.assertEqual(tool.used, 1)
+
+    def test_returns_summary_text(self):
+        text = PlanTool(planner=self._template()).call({"task": "写报告"})
+        self.assertIn("已生成计划：2 个任务", text)
+        self.assertIn("write", text)
+        self.assertIn("执行顺序：第 1 波 research；第 2 波 write", text)
+
+    def test_max_calls_guard(self):
+        tool = PlanTool(planner=self._template(), max_calls=1)
+        tool.call({"task": "x"})
+        self.assertTrue(tool.call({"task": "x"}).startswith("错误"))
+        tool.reset()
+        self.assertEqual(tool.used, 0)
+        self.assertFalse(tool.call({"task": "x"}).startswith("错误"))
+
+    def test_empty_task_rejected(self):
+        tool = PlanTool(planner=self._template())
+        self.assertIn("不能为空", tool.call({"task": "  "}))
+
+    def test_agent_wrapped_as_llm_planner(self):
+        reply = ('{"tasks": [{"name": "a", "description": "一"},'
+                 ' {"name": "b", "description": "二", "depends_on": ["a"]}]}')
+        tool = PlanTool(OrchAgent([reply]))
+        tool.call({"task": "做点事"})
+        self.assertEqual(tool.plan.names, ["a", "b"])
+
+    def test_context_keys_limit_materials(self):
+        seen = {}
+
+        class Recorder(Planner):
+            def plan(self, task, context):
+                seen.update(context)
+                return Plan((Task("a"),))
+
+        ctx = {"topic": "AI", "secret": "别传"}
+        tool = PlanTool(planner=Recorder(), context=ctx, context_keys=("topic",))
+        tool.call({"task": "调研 topic 为 AI"})
+        self.assertEqual(seen, {"topic": "AI"})
+        # 材料不给整个 Context，只给点名的键
+        self.assertNotIn("secret", seen)
+
+    def test_plan_error_becomes_text(self):
+        class Broken(Planner):
+            def plan(self, task, context):
+                raise PlanError("拆不出来")
+
+        self.assertIn("拆不出来", PlanTool(planner=Broken()).call({"task": "x"}))
+
+    def test_needs_agent_or_planner(self):
+        with self.assertRaises(ValueError):
+            PlanTool()
+        with self.assertRaises(ValueError):
+            PlanTool(planner=self._template(), max_tasks=0)
+
+    # ---------------- 步骤 ----------------
+    def test_step_writes_plan_and_reply(self):
+        planner_agent = self.ToolCallingAgent()
+        ctx = Workflow(
+            PlanWithTool(prompt="先规划：{{usr_input}}", planner=self._template())
+        ).run(agent=planner_agent, usr_input="写报告")
+        self.assertEqual(ctx["plan"].names, ["research", "write"])
+        self.assertEqual(ctx["plan_reply"], "已规划")
+        self.assertIn("先规划：写报告", planner_agent.prompts[0])
+
+    def test_step_requires_tool_call_when_required(self):
+        with self.assertRaises(PlanError):
+            Workflow(
+                PlanWithTool(prompt="规划", planner=self._template())
+            ).run(agent=OrchAgent(["我就不调工具"]))
+
+    def test_step_allows_no_call_when_optional(self):
+        ctx = Workflow(
+            PlanWithTool(prompt="规划", planner=self._template(), required=False)
+        ).run(agent=OrchAgent(["直接答"]))
+        self.assertNotIn("plan", ctx)
+        self.assertEqual(ctx["plan_reply"], "直接答")
+
+    def test_step_without_agent_raises(self):
+        with self.assertRaises(ValueError):
+            Workflow(PlanWithTool(prompt="x", planner=self._template())).run()
+
+    def test_step_then_execute_plan(self):
+        planner_agent = self.ToolCallingAgent()
+        ctx = Workflow(
+            PlanWithTool(prompt="规划", planner=self._template()),
+            ExecutePlan(
+                plan=Var("plan"),
+                agent_factory=lambda task: OrchAgent([f"{task.name} 的结果"]),
+            ),
+        ).run(agent=planner_agent)
+        self.assertEqual(
+            [r["name"] for r in ctx["task_results"]], ["research", "write"]
+        )
+        self.assertTrue(ctx["plan_result"].ok)
+
+    # ---------------- 统一入口 ----------------
+    def test_coerce_planner_variants(self):
+        template = self._template()
+        self.assertIs(coerce_planner(template), template)
+        self.assertIsNone(coerce_planner(None, allow_none=True))
+        self.assertIsInstance(coerce_planner(OrchAgent(["x"])), LLMPlanner)
+        with self.assertRaises(PlanError):
+            coerce_planner(None)
+        with self.assertRaises(PlanError):
+            coerce_planner(123)
+
+    def test_plan_step_still_works(self):
+        ctx = Workflow(PlanStep(task="写报告", planner=self._template())).run()
+        self.assertEqual(ctx["plan"].names, ["research", "write"])
+
+
 class TestSubAgents(PromptkitTestCase):
     def test_sub_agent_has_its_own_history(self):
         before = Agent.default()
@@ -13564,6 +13794,620 @@ class TestOrchestrateLayering(PromptkitTestCase):
                 if "promptkit.orchestrate" in dependency:
                     offenders.append(f"{path.name}: {dependency}")
         self.assertEqual(offenders, [])
+
+
+# ==================== 编排：DSL 声明式配置 ====================
+class FakePlanner:
+    '''测试用规划器：返回固定任务列表，并记录收到的需求。'''
+
+    def __init__(self, tasks=None):
+        self.tasks = list(tasks or [Task("research", "调研")])
+        self.calls = []
+
+    def plan(self, task, context):
+        self.calls.append((task, dict(context)))
+        return Plan(tuple(self.tasks), task=task)
+
+
+class TestPlanSpecDSL(PromptkitTestCase):
+    '''`PlanSpec`：一份 dict 映射成任务 + 调度规则 + 协同策略。'''
+
+    SPEC = {
+        "task": "写报告",
+        "agents": {"researcher": "你是调研员", "writer": "你是作者"},
+        "policy": {"max_concurrency": 2, "max_tasks": 5},
+        "tasks": [
+            {"name": "research", "description": "调研 {{topic}}",
+             "role": "researcher", "output_key": "research"},
+            {"name": "write", "description": "根据 {{research}} 写",
+             "role": "writer", "depends_on": ["research"]},
+        ],
+    }
+
+    def test_from_dsl_maps_all_three_parts(self):
+        spec = PlanSpec.from_dsl(self.SPEC)
+        self.assertEqual(spec.names, ["research", "write"])
+        self.assertEqual(spec.policy["max_concurrency"], 2)
+
+        plan = spec.to_plan()
+        self.assertEqual(plan.names, ["research", "write"])
+        self.assertEqual(plan["write"].depends_on, ("research",))
+
+        config = spec.to_config()
+        self.assertEqual(config.max_concurrency, 2)
+        self.assertEqual(config.max_tasks, 5)
+
+        factory = spec.to_factory()
+        self.assertIsInstance(factory, RoleFactory)
+        self.assertEqual(
+            factory(task_for("write", role="writer")).__class__.__name__, "Agent"
+        )
+
+    def test_roles_alias_and_default_role(self):
+        spec = PlanSpec.from_dsl(
+            {"roles": {"a": "A 角色"}, "default_role": "兜底", "tasks": [{"name": "t"}]}
+        )
+        self.assertEqual(spec.roles, {"a": "A 角色"})
+        factory = spec.to_factory()
+        agent = factory(task_for("t", role="没有的角色"))
+        self.assertIsNotNone(agent)
+        self.assertIn("兜底", agent.start_prompts[0]["content"])
+
+    def test_unknown_role_raises_keyerror(self):
+        factory = PlanSpec.from_dsl(self.SPEC).to_factory()
+        with self.assertRaises(KeyError):
+            factory(task_for("x", role="missing"))
+
+    def test_to_dsl_round_trip(self):
+        spec = PlanSpec.from_dsl(self.SPEC)
+        again = PlanSpec.from_dsl(spec.to_dsl())
+        self.assertEqual(again.names, spec.names)
+        self.assertEqual(again.policy, spec.policy)
+        self.assertEqual(again.roles, spec.roles)
+
+    def test_rejects_unknown_top_level_key(self):
+        with self.assertRaises(PlanError) as cm:
+            PlanSpec.from_dsl({"tasks": [], "bogus": 1})
+        self.assertIs(cm.exception.code, ErrorCode.INVALID_REQUEST)
+
+    def test_rejects_unknown_task_field(self):
+        with self.assertRaises(PlanError) as cm:
+            PlanSpec.from_dsl({"tasks": [{"name": "a", "unknown_field": 1}]}).to_plan()
+        self.assertIs(cm.exception.code, ErrorCode.TASK_INVALID)
+
+    def test_rejects_unknown_policy_key(self):
+        with self.assertRaises(PlanError) as cm:
+            PlanSpec.from_dsl(
+                {"tasks": [{"name": "a"}], "policy": {"max_concurency": 2}}
+            ).to_config()
+        self.assertIs(cm.exception.code, ErrorCode.INVALID_REQUEST)
+
+    def test_policy_still_validated_by_config(self):
+        spec = PlanSpec.from_dsl(
+            {"tasks": [{"name": "a"}], "policy": {"max_concurrency": 0}}
+        )
+        with self.assertRaises(ValueError):
+            spec.to_config()
+
+    def test_to_config_without_policy_returns_none(self):
+        self.assertIsNone(PlanSpec.from_dsl({"tasks": [{"name": "a"}]}).to_config())
+
+    def test_to_config_with_base_merges(self):
+        base = OrchestratorConfig(max_tasks=3)
+        spec = PlanSpec.from_dsl({"tasks": [{"name": "a"}], "policy": {"max_concurrency": 4}})
+        config = spec.to_config(base)
+        self.assertEqual(config.max_tasks, 3)
+        self.assertEqual(config.max_concurrency, 4)
+
+    def test_task_only_spec_allows_planning(self):
+        spec = PlanSpec.from_dsl({"task": "帮我调研"})
+        self.assertEqual(spec.tasks, ())
+        with self.assertRaises(PlanError) as cm:
+            spec.to_plan()
+        self.assertIs(cm.exception.code, ErrorCode.PLAN_EMPTY)
+
+    def test_empty_dsl_rejected(self):
+        with self.assertRaises(PlanError) as cm:
+            PlanSpec.from_dsl({})
+        self.assertIs(cm.exception.code, ErrorCode.PLAN_EMPTY)
+
+    def test_non_mapping_rejected(self):
+        with self.assertRaises(PlanError) as cm:
+            PlanSpec.from_dsl(42)
+        self.assertIs(cm.exception.code, ErrorCode.INVALID_REQUEST)
+
+    def test_from_plan_and_list(self):
+        plan = Plan((Task("a"), Task("b")))
+        self.assertEqual(PlanSpec.from_dsl(plan).names, ["a", "b"])
+        self.assertEqual(PlanSpec.from_dsl([Task("x")]).names, ["x"])
+
+    def test_step_wraps_execute_plan(self):
+        step = PlanSpec.from_dsl(self.SPEC).step()
+        self.assertIsInstance(step, ExecutePlan)
+        self.assertIsInstance(step.plan, PlanSpec)
+
+    def test_run_directly(self):
+        # 不带 agents：走显式 agent，避免真的去造/调用模型
+        spec = PlanSpec.from_dsl(
+            {
+                "tasks": [
+                    {"name": "research", "description": "调研 {{topic}}",
+                     "output_key": "research"},
+                ]
+            }
+        )
+        result = spec.run(context={"topic": "运筹学"}, agent=OrchAgent(["调研结果"]))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.to_context()["research"], "调研结果")
+
+    def test_repr(self):
+        text = repr(PlanSpec.from_dsl(self.SPEC))
+        self.assertIn("2 个任务", text)
+
+
+class TestOrchestrateAPI(PromptkitTestCase):
+    '''`handle()`：统一请求 / 响应 + 错误码。'''
+
+    def spec(self, **overrides):
+        data = {
+            "tasks": [
+                {"name": "research", "description": "调研 {{topic}}",
+                 "output_key": "research"},
+                {"name": "write", "description": "写 {{research}}",
+                 "depends_on": ["research"]},
+            ]
+        }
+        data.update(overrides)
+        return data
+
+    def test_run_returns_unified_response(self):
+        response = handle(
+            Request(spec=self.spec(), context={"topic": "运筹学"}, agent=OrchAgent(["A", "B"]))
+        )
+        self.assertIsInstance(response, Response)
+        self.assertTrue(response.ok)
+        self.assertIs(response.code, ErrorCode.OK)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.data["ok"])
+        self.assertEqual([item["name"] for item in response.data["results"]],
+                         ["research", "write"])
+        self.assertEqual(response.version, API_VERSION)
+
+    def test_run_accepts_raw_dsl(self):
+        response = handle(
+            Request(spec=self.spec(), context={"topic": "运筹学"},
+                    agent=OrchAgent(["A", "B"]))
+        )
+        self.assertTrue(response.ok)
+
+    def test_response_to_dict_and_bool(self):
+        response = handle(Request(spec=self.spec(), agent=OrchAgent(["A", "B"])))
+        payload = response.to_dict()
+        self.assertEqual(set(payload), {"ok", "code", "message", "data", "version"})
+        self.assertEqual(bool(response), response.ok)
+        self.assertIn("Response", repr(response))
+
+    def test_plan_action_with_template(self):
+        response = handle(Request(action="plan", spec=self.spec(), planner=FakePlanner()))
+        self.assertTrue(response.ok)
+        self.assertEqual([item["name"] for item in response.data["tasks"]],
+                         ["research", "write"])
+        self.assertEqual(response.data["waves"], [["research"], ["write"]])
+
+    def test_plan_action_uses_planner_when_spec_只有_task(self):
+        planner = FakePlanner([Task("a", "一"), Task("b", "二")])
+        response = handle(
+            Request(action="plan", spec={"task": "做个东西"}, planner=planner,
+                    context={"k": "v"})
+        )
+        self.assertTrue(response.ok)
+        self.assertEqual(response.data["task"], "做个东西")
+        self.assertEqual([item["name"] for item in response.data["tasks"]], ["a", "b"])
+        self.assertEqual(planner.calls[0][1], {"k": "v"})
+
+    def test_plan_action_requires_planner_only_when_no_tasks(self):
+        # DSL 已经写了 tasks → 不需要 planner，直接解析返回
+        response = handle(Request(action="plan", spec=self.spec()))
+        self.assertTrue(response.ok)
+        self.assertEqual([t["name"] for t in response.data["tasks"]],
+                         ["research", "write"])
+        self.assertEqual(response.data["waves"], [["research"], ["write"]])
+        # 只有 task 描述 → 必须传 planner
+        response = handle(Request(action="plan", spec={"task": "x"}))
+        self.assertIs(response.code, ErrorCode.INVALID_REQUEST)
+
+    def test_plan_action_rejects_unknown_planner(self):
+        response = handle(
+            Request(action="plan", spec={"task": "x"}, planner=object())
+        )
+        self.assertIs(response.code, ErrorCode.INVALID_REQUEST)
+
+    def test_untrusted_version(self):
+        response = handle(Request(spec=self.spec(), version="9.9"))
+        self.assertFalse(response.ok)
+        self.assertIs(response.code, ErrorCode.UNSUPPORTED_VERSION)
+        self.assertEqual(response.status, 400)
+
+    def test_invalid_action(self):
+        response = handle(Request(action="delete", spec=self.spec()))
+        self.assertIs(response.code, ErrorCode.INVALID_REQUEST)
+
+    def test_missing_spec(self):
+        self.assertIs(handle(Request()).code, ErrorCode.INVALID_REQUEST)
+
+    def test_bad_context_type(self):
+        response = handle(Request(spec=self.spec(), context=["not", "dict"]))
+        self.assertIs(response.code, ErrorCode.INVALID_REQUEST)
+
+    def test_bad_config_and_factory(self):
+        self.assertIs(
+            handle(Request(spec=self.spec(), config="nope")).code,
+            ErrorCode.INVALID_REQUEST,
+        )
+        self.assertIs(
+            handle(Request(spec=self.spec(), factory=123)).code,
+            ErrorCode.INVALID_REQUEST,
+        )
+
+    def test_plan_error_codes(self):
+        cyclic = {"tasks": [{"name": "a", "depends_on": ["b"]},
+                            {"name": "b", "depends_on": ["a"]}]}
+        self.assertIs(handle(cyclic).code, ErrorCode.PLAN_CYCLE)
+        self.assertIs(
+            handle({"tasks": [{"name": "a"}, {"name": "a"}]}).code,
+            ErrorCode.PLAN_DUPLICATE_TASK,
+        )
+        self.assertIs(
+            handle({"tasks": [{"name": "a", "depends_on": ["ghost"]}]}).code,
+            ErrorCode.PLAN_UNKNOWN_DEPENDENCY,
+        )
+
+    def test_task_failure_reports_partial_data(self):
+        spec = {
+            "tasks": [{"name": "a", "description": "x", "on_failure": "abort"},
+                      {"name": "b", "description": "y"}]
+        }
+        response = handle(Request(spec=spec, agent=OrchAgent(fail_times=99)))
+        self.assertFalse(response.ok)
+        self.assertIs(response.code, ErrorCode.TASK_FAILED)
+        self.assertEqual(response.data["failed_task"], "a")
+        self.assertEqual(len(response.data["results"]), 2)
+
+    def test_failed_task_without_abort_still_reports_not_ok(self):
+        spec = {"tasks": [{"name": "a", "description": "x", "max_retries": 0}]}
+        response = handle(Request(spec=spec, agent=OrchAgent(fail_times=99)))
+        self.assertFalse(response.ok)
+        self.assertIs(response.code, ErrorCode.TASK_FAILED)
+        self.assertIn("失败", response.message)
+
+    def test_timeout_maps_to_task_timeout(self):
+        spec = {"tasks": [{"name": "slow", "description": "x",
+                           "timeout": 0.01, "max_retries": 0,
+                           "on_failure": "abort"}]}
+        response = handle(
+            Request(spec=spec, agent=OrchAgent(delay=0.2))
+        )
+        self.assertFalse(response.ok)
+        self.assertIs(response.code, ErrorCode.TASK_TIMEOUT)
+
+    def test_undefined_role_maps_to_error_code(self):
+        spec = {
+            "agents": {"writer": "写手"},
+            "tasks": [{"name": "a", "description": "x", "role": "researcher"}],
+        }
+        response = handle(spec)
+        self.assertIs(response.code, ErrorCode.ROLE_UNDEFINED)
+
+    def test_config_and_factory_overrides(self):
+        spec = dict(self.spec(), agents={"writer": "写手"},
+                    policy={"max_concurrency": 3})
+        override = OrchestratorConfig(max_concurrency=1)
+        response = handle(
+            Request(
+                spec=spec,
+                context={"topic": "运筹学"},
+                config=override,
+                factory=lambda task: OrchAgent(["ok", "ok"]),
+            )
+        )
+        self.assertTrue(response.ok)
+
+    def test_v1_raises_like_before(self):
+        cyclic = {"tasks": [{"name": "a", "depends_on": ["b"]},
+                            {"name": "b", "depends_on": ["a"]}]}
+        with self.assertRaises(PlanError):
+            handle(Request(spec=cyclic, version="1.0"))
+
+        spec = {"tasks": [{"name": "a", "description": "x", "on_failure": "abort"}]}
+        with self.assertRaises(TaskError):
+            handle(Request(spec=spec, agent=OrchAgent(fail_times=99), version="1.0"))
+
+    def test_execute_plan_accepts_dsl_dict(self):
+        ctx = Workflow(
+            Set("topic", "运筹学"),
+            ExecutePlan(
+                plan=dict(self.spec(), policy={"max_concurrency": 2}),
+                agent=OrchAgent(["A", "B"]),
+            ),
+        ).run()
+        self.assertTrue(ctx["plan_result"].ok)
+        self.assertEqual(ctx["research"], "A")
+
+    def test_execute_plan_rejects_unknown_plan_type(self):
+        with self.assertRaises(PlanError):
+            Workflow(ExecutePlan(plan=123)).run()
+
+
+def task_for(name, role=""):
+    '''造一个只用来查角色的 Task。'''
+    return Task(name, "x", role=role)
+
+
+# ==================== 编排：向后兼容 ====================
+class TestOrchestrateCompat(PromptkitTestCase):
+    '''旧接口保持原样，新接口只做增量。'''
+
+    def test_planner_abc_still_works(self):
+        self.assertTrue(issubclass(TemplatePlanner, Planner))
+        plan = TemplatePlanner([Task("a")]).plan("x", {})
+        self.assertEqual(plan.names, ["a"])
+
+    def test_orchestrator_run_accepts_old_inputs(self):
+        agent = OrchAgent(["ok"])
+        for value in ([Task("a", "x")], Plan((Task("a", "x"),)),
+                      {"tasks": [{"name": "a", "description": "x"}]}):
+            result = Orchestrator(agent=agent).run(value)
+            self.assertTrue(result.ok)
+
+    def test_plan_from_exported_from_steps(self):
+        from promptkit.orchestrate.steps import plan_from as legacy
+
+        self.assertIs(legacy, plan_from)
+
+    def test_legacy_errors_unchanged(self):
+        with self.assertRaises(PlanError):
+            Plan(())
+        with self.assertRaises(TaskError) as cm:
+            raise TaskError("boom", task="a")
+        self.assertEqual(cm.exception.task, "a")
+        self.assertIs(cm.exception.code, ErrorCode.TASK_FAILED)
+
+    def test_error_detail_and_to_dict(self):
+        error = PlanError("坏了", code=ErrorCode.PLAN_CYCLE)
+        self.assertEqual(error.detail, "PLAN_CYCLE: 坏了")
+        self.assertEqual(error.to_dict(), {"code": "PLAN_CYCLE", "message": "坏了"})
+
+    def test_default_error_codes(self):
+        self.assertIs(PlanError("x").code, ErrorCode.PLAN_INVALID)
+        self.assertIs(DelegateError("x").code, ErrorCode.DELEGATE_INVALID)
+        self.assertIs(BudgetExceeded("x").code, ErrorCode.BUDGET_EXCEEDED)
+        self.assertIs(DepthExceeded("x").code, ErrorCode.DEPTH_EXCEEDED)
+        self.assertIs(PlanError("x").code.value, "PLAN_INVALID")
+
+    def test_task_invalid_code(self):
+        with self.assertRaises(PlanError) as cm:
+            Task("", "x")
+        self.assertIs(cm.exception.code, ErrorCode.TASK_INVALID)
+
+    def test_public_exports_cover_new_api(self):
+        import promptkit.orchestrate as module
+
+        for name in ("PlanSpec", "Request", "Response", "handle", "run", "plan",
+                     "ErrorCode", "API_VERSION"):
+            self.assertIn(name, module.__all__)
+
+
+# ==================== orchestrate Skill（自包含 skill 组件） ====================
+from promptkit.skill.orchestrate_skill import (  # noqa: E402
+    OrchestrateSkillSet,
+    orchestrate_plan,
+    orchestrate_run,
+    orchestrate_validate,
+    register_orchestrate_skills,
+)
+
+
+class TestOrchestrateSkill(PromptkitTestCase):
+    '''把 orchestrate 库封装成独立 Skill 组件之后的全量覆盖。'''
+
+    @property
+    def agent(self):
+        return OrchAgent(["ok"])
+
+    @property
+    def ctx(self):
+        return SkillContext(agent=self.agent)
+
+    @property
+    def spec(self):
+        return {
+            "agents": {"writer": "资深写手"},
+            "tasks": [
+                {"name": "research", "description": "调研 {{topic}}",
+                 "role": "writer", "output_key": "research"},
+                {"name": "write", "description": "根据 {{research}} 写报告",
+                 "role": "writer", "depends_on": ["research"]},
+            ],
+        }
+
+    # --- validate：永远不需要 agent ---
+    def test_validate_legal_dsl(self):
+        v = orchestrate_validate(spec=self.spec)
+        self.assertTrue(v["ok"])
+        self.assertEqual(v["task_count"], 2)
+        self.assertEqual(v["waves"], [["research"], ["write"]])
+
+    def test_validate_cycle(self):
+        v = orchestrate_validate(
+            spec={"tasks": [
+                {"name": "a", "depends_on": ["b"]},
+                {"name": "b", "depends_on": ["a"]},
+            ]}
+        )
+        self.assertFalse(v["ok"])
+        codes = [e["code"] for e in v["errors"]]
+        self.assertIn("PLAN_CYCLE", codes)
+
+    def test_validate_duplicate_names(self):
+        v = orchestrate_validate(
+            spec={"tasks": [{"name": "a"}, {"name": "a"}]}
+        )
+        self.assertFalse(v["ok"])
+        codes = [e["code"] for e in v["errors"]]
+        self.assertIn("PLAN_DUPLICATE_TASK", codes)
+
+    def test_validate_unknown_dependency(self):
+        v = orchestrate_validate(
+            spec={"tasks": [{"name": "a", "depends_on": ["ghost"]}]}
+        )
+        self.assertFalse(v["ok"])
+        codes = [e["code"] for e in v["errors"]]
+        self.assertIn("PLAN_UNKNOWN_DEPENDENCY", codes)
+
+    def test_validate_unknown_top_level_key(self):
+        v = orchestrate_validate(spec={"bad_key": 1, "tasks": []})
+        self.assertFalse(v["ok"])
+        self.assertEqual(v["errors"][0]["stage"], "dsl")
+
+    def test_validate_empty_spec(self):
+        v = orchestrate_validate(spec={})
+        self.assertFalse(v["ok"])
+
+    # --- plan：DSL 写了 tasks 就不需要 agent ---
+    def test_plan_without_agent(self):
+        p = orchestrate_plan(spec=self.spec)
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["data"]["waves"], [["research"], ["write"]])
+
+    def test_plan_no_tasks_no_agent_fails(self):
+        p = orchestrate_plan(spec={"task": "写个东西"})
+        self.assertFalse(p["ok"])
+        self.assertEqual(p["code"], "INVALID_REQUEST")
+
+    def test_plan_with_explicit_planner(self):
+        from promptkit.orchestrate import PlanSpec
+
+        class Planner:
+            def plan(self, task, context=None):
+                return PlanSpec.from_dsl({
+                    "task": task,
+                    "tasks": [
+                        {"name": "research", "description": "调研"},
+                        {"name": "write", "description": "写",
+                         "depends_on": ["research"]},
+                    ],
+                })
+
+        ctx = SkillContext(tools={"planner": Planner()})
+        p = orchestrate_plan(spec={"task": "写东西"}, ctx=ctx)
+        self.assertTrue(p["ok"])
+        self.assertEqual(p["data"]["waves"], [["research"], ["write"]])
+
+    # --- run：必须有 agent ---
+    def test_run_requires_agent(self):
+        r = orchestrate_run(spec=self.spec)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["code"], "NO_AGENT")
+
+    def test_run_success(self):
+        r = orchestrate_run(
+            spec=self.spec, context={"topic": "AI"}, ctx=self.ctx
+        )
+        self.assertTrue(r["ok"])
+        results = r["data"]["results"]
+        self.assertEqual(len(results), 2)
+        self.assertEqual([item["name"] for item in results],
+                         ["research", "write"])
+
+    def test_run_failure_propagates(self):
+        fail_ctx = SkillContext(agent=OrchAgent(fail_times=99))
+        r = orchestrate_run(
+            spec={"tasks": [
+                {"name": "a", "description": "x", "on_failure": "abort",
+                 "max_retries": 0},
+                {"name": "b", "description": "y"},
+            ]},
+            ctx=fail_ctx,
+        )
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["code"], "TASK_FAILED")
+
+    # --- 注册表 ---
+    def test_register_all(self):
+        reg = register_orchestrate_skills()
+        self.assertEqual(
+            sorted(reg.names),
+            ["orchestrate_plan", "orchestrate_run", "orchestrate_validate"],
+        )
+
+    def test_register_tools_schema(self):
+        reg = register_orchestrate_skills()
+        tools = reg.to_openai_tools()
+        self.assertEqual(len(tools), 3)
+        for t in tools:
+            self.assertEqual(t["type"], "function")
+            params = t["function"]["parameters"]
+            self.assertIn("spec", params["properties"])
+            self.assertIn("spec", params.get("required", []))
+
+    def test_execute_via_registry(self):
+        reg = register_orchestrate_skills()
+        ctx = SkillContext(agent=self.agent, skills=reg)
+        r = reg.execute(
+            "orchestrate_run",
+            {"spec": self.spec, "context": {"topic": "X"}},
+            ctx=ctx,
+        )
+        self.assertTrue(r["ok"])
+
+    def test_execute_validate_always_works(self):
+        reg = register_orchestrate_skills()
+        v = reg.execute(
+            "orchestrate_validate",
+            {"spec": {"tasks": [{"name": "a", "description": "x"}]}},
+            ctx=SkillContext(),
+        )
+        self.assertTrue(v["ok"])
+
+    # --- Skill 对象本身 ---
+    def test_skill_metadata(self):
+        for s in (orchestrate_run, orchestrate_plan, orchestrate_validate):
+            self.assertEqual(s.spec.version, "2.0")
+            self.assertIn("orchestrate", s.tags)
+            self.assertTrue(s.spec.examples)
+
+    def test_skill_tags(self):
+        self.assertIn("execution", orchestrate_run.tags)
+        self.assertIn("planning", orchestrate_plan.tags)
+        self.assertIn("validate", orchestrate_validate.tags)
+
+    # --- OrchestrateSkillSet bundle ---
+    def test_bundle_auto_injects_ctx(self):
+        bundle = OrchestrateSkillSet(ctx=SkillContext(agent=self.agent))
+        r = bundle.run(spec=self.spec, context={"topic": "Y"})
+        self.assertTrue(r["ok"])
+
+    def test_bundle_plan_and_validate_without_agent(self):
+        bundle = OrchestrateSkillSet()  # ctx 没 agent
+        self.assertTrue(bundle.validate({"tasks": [{"name": "a"}]}))
+        self.assertTrue(bundle.plan({"tasks": [{"name": "a"}]}))
+
+    def test_bundle_register_to(self):
+        reg = SkillRegistry()
+        OrchestrateSkillSet().register_to(reg)
+        self.assertEqual(
+            sorted(reg.names),
+            ["orchestrate_plan", "orchestrate_run", "orchestrate_validate"],
+        )
+
+    # --- 模块级导出 ---
+    def test_public_exports(self):
+        import promptkit.skill as mod
+        for name in (
+            "orchestrate_run", "orchestrate_plan", "orchestrate_validate",
+            "OrchestrateSkillSet", "register_orchestrate_skills",
+        ):
+            self.assertIn(name, mod.__all__)
 
 
 # ==================== Skill（可注册的能力单元） ====================
@@ -14776,6 +15620,319 @@ class TestSkillLayering(PromptkitTestCase):
                 if "promptkit.skill" in dependency:
                     offenders.append(f"{path.name}: {dependency}")
         self.assertEqual(offenders, [])
+
+
+class BoomStep(Step):
+    '''测试用：执行时一定抛异常。'''
+
+    name = "boom"
+
+    def __init__(self, message: str = "炸了"):
+        self.message = message
+
+    def execute(self, context):
+        raise RuntimeError(self.message)
+
+    def describe(self):
+        return "Boom"
+
+
+class TestHooks(PromptkitTestCase):
+    '''Hook 扩展 API：前置拦截 / 后置处理 / 异常捕获。'''
+
+    def test_before_after_and_duration(self):
+        seen = []
+        hooks = Hooks()
+        hooks.on_before(lambda e: seen.append(("before", e.name)))
+        hooks.on_after(
+            lambda e: seen.append(("after", e.name, e.duration_ms, e.kind))
+        )
+        ctx = Workflow(Set("x", 1)).run(hooks=hooks)
+        self.assertEqual(ctx["x"], 1)
+        self.assertEqual(
+            [item[0] for item in seen], ["before", "after"]
+        )
+        self.assertEqual(seen[0][1], "set")
+        self.assertIs(seen[1][3], HookType.AFTER)
+        self.assertGreaterEqual(seen[1][2], 0.0)
+
+    def test_before_returning_false_skips_step(self):
+        hooks = Hooks(before=[lambda e: False if e.name == "set" else None])
+        ctx = Workflow(Number("n"), Set("n", 3)).run(hooks=hooks)
+        self.assertEqual(ctx["n"], 0)  # Set 被拦截，保持默认值
+
+    def test_before_abort_signal_skips_step(self):
+        def abort(event):
+            raise HookAbort("跳过")
+
+        ctx = Workflow(Set("x", 1)).run(hooks=Hooks(before=[abort]))
+        self.assertNotIn("x", ctx)
+
+    def test_before_can_mutate_context(self):
+        hooks = Hooks(before=[lambda e: e.context.update(injected=True)])
+        ctx = Workflow(Set("x", 1)).run(hooks=hooks)
+        self.assertTrue(ctx["injected"])
+
+    def test_error_hook_recovers(self):
+        errors = []
+
+        def recover(event):
+            errors.append((type(event.error).__name__, event.name))
+            return True
+
+        hooks = Hooks(error=[recover])
+        ctx = Workflow(BoomStep(), Set("after", 1)).run(hooks=hooks)
+        self.assertEqual(errors, [("RuntimeError", "boom")])
+        self.assertEqual(ctx["after"], 1)  # 后面的步骤照常执行
+
+    def test_error_hook_without_recovery_reraises(self):
+        hooks = Hooks(error=[lambda e: None])
+        with self.assertRaises(RuntimeError):
+            Workflow(BoomStep()).run(hooks=hooks)
+
+    def test_error_hook_can_replace_error(self):
+        from promptkit.core import WorkflowError
+
+        def convert(event):
+            raise WorkflowError(f"包装：{event.error}")
+
+        with self.assertRaises(WorkflowError) as cm:
+            Workflow(BoomStep()).run(hooks=Hooks(error=[convert]))
+        self.assertIn("包装：炸了", str(cm.exception))
+
+    def test_control_flow_is_not_an_error(self):
+        '''Break / Continue 不是错误，error 钩子不该看到它们。'''
+        seen = []
+        hooks = Hooks(error=[lambda e: seen.append(e.name) or True])
+        ctx = Workflow(
+            Number("i"), While(Var("i") < 5).Do(Inc("i"), If(Var("i") == 2).Then(Break()))
+        ).run(hooks=hooks)
+        self.assertEqual(ctx["i"], 2)
+        self.assertEqual(seen, [])
+
+    def test_register_handle_unregister(self):
+        hooks = Hooks()
+        calls = []
+
+        def hook(event):
+            calls.append(event.name)
+
+        handle = hooks.register(HookType.AFTER, hook)
+        self.assertIsInstance(handle, type(hooks.register(HookType.AFTER, lambda e: None)))
+        self.assertEqual(hooks.counts(), {"before": 0, "after": 2, "error": 0})
+        self.assertTrue(handle.off())
+        self.assertFalse(handle.off())
+        self.assertEqual(hooks.counts()["after"], 1)
+
+        self.assertTrue(hooks.unregister(hooks._after[0]))
+        self.assertEqual(len(hooks), 0)
+
+    def test_duplicate_registration_kept_once(self):
+        hooks = Hooks()
+
+        def hook(event):
+            return None
+
+        hooks.register(HookType.BEFORE, hook)
+        hooks.register(HookType.BEFORE, hook)
+        self.assertEqual(len(hooks), 1)
+
+    def test_unregister_by_function_and_kind(self):
+        hooks = Hooks()
+
+        def hook(event):
+            return None
+
+        hooks.register(HookType.BEFORE, hook)
+        hooks.register(HookType.ERROR, hook)
+        self.assertTrue(hooks.unregister(hook, HookType.BEFORE))
+        self.assertEqual(hooks.counts(), {"before": 0, "after": 0, "error": 1})
+        self.assertTrue(hooks.unregister(hook))  # 不指定 kind：全删
+        self.assertEqual(len(hooks), 0)
+
+    def test_clear(self):
+        hooks = Hooks(
+            before=[lambda e: None], after=[lambda e: None], error=[lambda e: None]
+        )
+        hooks.clear(HookType.AFTER)
+        self.assertEqual(hooks.counts(), {"before": 1, "after": 0, "error": 1})
+        hooks.clear()
+        self.assertFalse(hooks)
+
+    def test_invalid_registration(self):
+        hooks = Hooks()
+        with self.assertRaises(TypeError):
+            hooks.register(HookType.BEFORE, "不是函数")
+        with self.assertRaises(ValueError):
+            hooks.register("whenever", lambda e: None)
+        with self.assertRaises(TypeError):
+            hooks.unregister(123)
+
+    def test_use_hooks_inside_a_step(self):
+        seen = []
+
+        def install(context):
+            use_hooks(context).on_after(lambda e: seen.append(e.name))
+
+        Workflow(FunctionStep(install, name="install"), Set("a", 1)).run()
+        self.assertEqual(seen, ["set"])
+
+    def test_use_hooks_reuses_existing(self):
+        hooks = Hooks()
+        ctx = Workflow().run(hooks=hooks)
+        self.assertIs(use_hooks(ctx), hooks)
+
+    def test_nested_workflow_steps_are_hooked(self):
+        names = []
+        hooks = Hooks(after=[lambda e: names.append(e.name)])
+        Workflow(Workflow(Set("z", 1)), name="outer").run(hooks=hooks)
+        self.assertEqual(names, ["set", "workflow"])
+
+    def test_no_hooks_keeps_old_behavior(self):
+        events = []
+        ctx = Workflow(Set("q", 5)).run(on_event=events.append)
+        self.assertEqual(ctx["q"], 5)
+        self.assertTrue(events)  # 事件照常发
+
+
+class TestAssertions(PromptkitTestCase):
+    '''DSL 断言与适配器。'''
+
+    def test_pass(self):
+        ctx = Workflow(Number("n"), Set("n", 3), Assert(Var("n") > 1)).run()
+        self.assertIn("assert:ok", ctx.trace)
+
+    def test_fail_raises_with_message(self):
+        with self.assertRaises(AssertionFailed) as cm:
+            Workflow(Assert(False, message="必须成立")).run()
+        self.assertIn("必须成立", str(cm.exception))
+        self.assertFalse(cm.exception.result.ok)
+
+    def test_default_message_mentions_rule(self):
+        with self.assertRaises(AssertionFailed) as cm:
+            Workflow(Number("n"), Set("n", 1), Assert(Var("n") > 5)).run()
+        self.assertIn("Var('n') > 5", str(cm.exception))
+
+    def test_expression_rule(self):
+        with self.assertRaises(AssertionFailed):
+            Workflow(Number("n"), Set("n", 1), Assert(Var("n") > 5)).run()
+
+    def test_callable_rule_reads_context(self):
+        ctx = Workflow(Set("answer", "42"), Assert(lambda c: c["answer"] == "42")).run()
+        self.assertEqual(ctx["answer"], "42")
+        with self.assertRaises(AssertionFailed):
+            Workflow(Assert(lambda c: c.get("missing"))).run()
+
+    def test_record_only_mode(self):
+        ctx = Workflow(
+            Assert(False, variable="verdict", raise_error=False)
+        ).run()
+        self.assertIsInstance(ctx["verdict"], AssertionResult)
+        self.assertFalse(ctx["verdict"].ok)
+
+    def test_check_does_not_raise(self):
+        from promptkit.core import Context
+
+        result = Assert(Var("n") > 1).check(Context(data={"n": 0}))
+        self.assertFalse(result.ok)
+
+    def test_custom_adapter(self):
+        class DictRule(AssertionAdapter):
+            name = "dict-rule"
+
+            def supports(self, rule):
+                return isinstance(rule, dict) and "key" in rule
+
+            def check(self, rule, context):
+                ok = context.get(rule["key"]) == rule.get("value")
+                return AssertionResult(ok, "" if ok else f"{rule['key']} 不符合")
+
+        registry = Assertions()
+        registry.register(DictRule())
+        ctx = Workflow(Set("x", 2), Assert({"key": "x", "value": 2}, adapters=registry)).run()
+        self.assertIn("assert:ok", ctx.trace)
+
+        with self.assertRaises(AssertionFailed):
+            Workflow(
+                Set("x", 1), Assert({"key": "x", "value": 2}, adapters=registry)
+            ).run()
+
+        self.assertTrue(registry.unregister(DictRule))
+
+    def test_custom_adapter_runs_before_builtin(self):
+        class AlwaysFail(AssertionAdapter):
+            name = "always-fail"
+
+            def supports(self, rule):
+                return True
+
+            def check(self, rule, context):
+                return AssertionResult(False, "恒失败")
+
+        registry = Assertions(CallableAssertionAdapter())
+        registry.register(AlwaysFail())
+        with self.assertRaises(AssertionFailed) as cm:
+            Workflow(Assert(True, adapters=registry)).run()
+        self.assertIn("恒失败", str(cm.exception))
+
+    def test_unsupported_rule_type(self):
+        with self.assertRaises(TypeError) as cm:
+            Workflow(Assert(("tuple", "rule"))).run()
+        self.assertIn("适配器", str(cm.exception))
+
+    def test_failure_reaches_error_hook(self):
+        seen = []
+
+        def on_error(event):
+            seen.append(type(event.error).__name__)
+            return True
+
+        ctx = Workflow(Assert(False, message="挂了"), Set("ok", 1)).run(
+            hooks=Hooks(error=[on_error])
+        )
+        self.assertEqual(seen, ["AssertionFailed"])
+        self.assertEqual(ctx["ok"], 1)
+
+    def test_assert_inside_if(self):
+        ctx = Workflow(
+            Number("n"),
+            Set("n", 0),
+            If(Var("n") > 0).Then(Assert(Var("n") > 10)),
+        ).run()
+        self.assertEqual(ctx["n"], 0)  # 分支没进，断言没执行
+
+    def test_assert_in_loop(self):
+        with self.assertRaises(AssertionFailed):
+            Workflow(
+                Number("i"),
+                While(Var("i") < 5, max_iterations=10).Do(
+                    Inc("i"), Assert(Var("i") < 3)
+                ),
+            ).run()
+
+    def test_default_registry_is_global(self):
+        class Never(AssertionAdapter):
+            name = "never"
+
+            def supports(self, rule):
+                return rule == "never-matches"
+
+            def check(self, rule, context):
+                return AssertionResult(False, "不会发生")
+
+        adapter = Never()
+        assertion_adapters.register(adapter)
+        try:
+            self.assertEqual(len(assertion_adapters), 2)
+        finally:
+            self.assertTrue(assertion_adapters.unregister(adapter))
+        self.assertEqual(len(assertion_adapters), 1)
+
+    def test_repr_and_describe(self):
+        step = Assert(True, variable="v")
+        self.assertEqual(step.describe(), "Assert(True)")
+        self.assertIn("AssertStep", repr(step))
+        self.assertIn("condition", repr(assertion_adapters))
 
 
 if __name__ == "__main__":

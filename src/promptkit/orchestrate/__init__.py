@@ -30,11 +30,22 @@
 `on_failure`、可选的 `max_total_tokens`。委派还有 `max_delegations` / `max_depth`。
 '''
 from promptkit.orchestrate.agents import RoleFactory, as_text, structured_answer, sub_agent
+from promptkit.orchestrate.api import (
+    API_VERSION,
+    SUPPORTED_VERSIONS,
+    Request,
+    Response,
+    handle,
+    plan,
+    run,
+)
 from promptkit.orchestrate.delegate import DelegateTool
+from promptkit.orchestrate.dsl import PlanSpec
 from promptkit.orchestrate.errors import (
     BudgetExceeded,
     DelegateError,
     DepthExceeded,
+    ErrorCode,
     OrchestrationError,
     PlanError,
     TaskError,
@@ -44,17 +55,20 @@ from promptkit.orchestrate.orchestrator import (
     OrchestratorConfig,
     PlanResult,
 )
+from promptkit.orchestrate.plan_tool import PlanTool
 from promptkit.orchestrate.planner import (
     LLMPlanner,
     Planner,
     TaskPlanModel,
     TaskSpec,
     TemplatePlanner,
+    coerce_planner,
 )
 from promptkit.orchestrate.steps import (
     AggregateStep,
     ExecutePlan,
     PlanStep,
+    PlanWithTool,
     format_task_results,
     plan_from,
 )
@@ -70,6 +84,7 @@ __all__ = [
     "Planner",
     "TemplatePlanner",
     "LLMPlanner",
+    "coerce_planner",
     "TaskSpec",
     "TaskPlanModel",
     # 调度
@@ -82,12 +97,24 @@ __all__ = [
     "as_text",
     # 步骤
     "PlanStep",
+    "PlanWithTool",
     "ExecutePlan",
     "AggregateStep",
     "format_task_results",
     "plan_from",
-    # 委派
+    # 委派 / 工具
     "DelegateTool",
+    "PlanTool",
+    # 统一接口（v2）
+    "API_VERSION",
+    "SUPPORTED_VERSIONS",
+    "Request",
+    "Response",
+    "handle",
+    "run",
+    "plan",
+    "PlanSpec",
+    "ErrorCode",
     # 异常
     "OrchestrationError",
     "PlanError",

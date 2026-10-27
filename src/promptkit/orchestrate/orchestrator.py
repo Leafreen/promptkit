@@ -14,8 +14,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from promptkit.core.event_sys import EventBus, EventType
 from promptkit.orchestrate.agents import as_text, structured_answer
-from promptkit.orchestrate.errors import PlanError, TaskError
-from promptkit.orchestrate.task import Plan, Task, TaskResult
+from promptkit.orchestrate.errors import ErrorCode, PlanError, TaskError
+from promptkit.orchestrate.task import Task, TaskResult, plan_from
 from promptkit.prompt import render_text
 
 __all__ = ["OrchestratorConfig", "Orchestrator", "PlanResult"]
@@ -157,12 +157,13 @@ class Orchestrator:
 
     # ---------------- 入口 ----------------
     def run(self, plan: Any, context: Optional[Mapping[str, Any]] = None) -> PlanResult:
-        plan = self._coerce(plan)
+        plan = plan_from(plan)
         config = self.config
         if len(plan) > config.max_tasks:
             raise PlanError(
                 f"计划有 {len(plan)} 个任务，超过 max_tasks={config.max_tasks}；"
-                "要么拆小一点，要么调大上限"
+                "要么拆小一点，要么调大上限",
+                code=ErrorCode.PLAN_TOO_MANY_TASKS,
             )
 
         available: Dict[str, Any] = dict(context or {})
@@ -230,10 +231,13 @@ class Orchestrator:
         )
         if aborted is not None:
             failed = by_name[aborted.name]
+            original_error = getattr(failed, "_exception", None)
+            propagated_code = getattr(original_error, "code", ErrorCode.TASK_FAILED)
             raise TaskError(
                 f"任务 {aborted.name!r} 失败，计划已中止：{failed.error}",
                 task=aborted.name,
                 result=result,
+                code=propagated_code,
             )
         return result
 
@@ -252,14 +256,14 @@ class Orchestrator:
                 try:
                     results.append(future.result())
                 except Exception as exc:      # noqa: BLE001 - 一个任务崩了不该带走别人
-                    results.append(
-                        TaskResult(
-                            name=task.name,
-                            status="failed",
-                            error=f"{type(exc).__name__}: {exc}",
-                            output_key=task.key,
-                        )
+                    item = TaskResult(
+                        name=task.name,
+                        status="failed",
+                        error=f"{type(exc).__name__}: {exc}",
+                        output_key=task.key,
                     )
+                    item._exception = exc
+                    results.append(item)
             return results
 
     # ---------------- 单个任务 ----------------
@@ -270,7 +274,6 @@ class Orchestrator:
 
         # 同一层并发时，大家可能都是「预算还够」才开跑的 —— 这里再挡一次，
         # 免得一层里的第 N 个任务明明超预算还照跑
-        limit = self.config.max_total_tokens
         limit = self.config.max_total_tokens
         if limit is not None and getattr(self, "_spent", 0) >= int(limit):
             return self._finish(
@@ -314,6 +317,7 @@ class Orchestrator:
             except Exception as exc:      # noqa: BLE001 - 失败要按策略处理
                 last_error = exc
                 result.error = f"{type(exc).__name__}: {exc}"
+                result._exception = exc
 
         if not result.ok and task.on_failure == "skip":
             result.status = "skipped"
@@ -384,20 +388,15 @@ class Orchestrator:
             except FuturesTimeout:
                 future.cancel()
                 raise TaskError(
-                    f"任务 {task.name!r} 超时（{timeout}s）", task=task.name
+                    f"任务 {task.name!r} 超时（{timeout}s）",
+                    task=task.name,
+                    code=ErrorCode.TASK_TIMEOUT,
                 ) from None
         finally:
             # wait=False：同步 Agent 没有取消机制，这里只是不再等它
             pool.shutdown(wait=False)
 
     # ---------------- 杂项 ----------------
-    def _coerce(self, plan: Any) -> Plan:
-        if isinstance(plan, Plan):
-            return plan
-        if isinstance(plan, (list, tuple)):
-            return Plan.from_template(plan)
-        raise PlanError(f"看不懂的计划：{type(plan).__name__}")
-
     def _agent_for(self, task: Task) -> Any:
         if task.agent is not None:
             return task.agent

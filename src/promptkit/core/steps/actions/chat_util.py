@@ -439,6 +439,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     exit_words: Optional[Sequence[str]] = None,
     behavior: Sequence[Any] = (),
     after_turn: Optional[Sequence[Any]] = None,
+    after_end: Sequence[Any] = (),
     cautions: Optional[Sequence[Any]] = None,
     max_turns: Optional[int] = None,
     turn_template: Optional[str] = None,
@@ -447,6 +448,10 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
 
     每一轮：读一行 -> 是退出词就结束 -> 跑 `behavior` -> 调模型
     -> 显示回答 -> 跑 `after_turn`（`Deliverable(when="each_turn")` 就挂这儿）。
+
+    用户决定退出后（退出词 / Ctrl+D），跑 `after_end` —— 说句再见、把
+    session 存掉、总结这轮对话都放这儿。它跑在循环之后、`ChatWorkflow`
+    的写记忆与落盘之前，所以 `after_end` 里仍能读到完整的 Context。
 
     `ExitWords` 写进 Context 的值会被自动读出来，所以 `exit_words`
     一般不用显式传；显式传的优先。
@@ -512,6 +517,9 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         NewVar(output_key, default=""),
         NewVar(CHAT_EXIT_KEY, default=list(DEFAULT_EXIT_WORDS)),
         loop,
+        # 用户退出后的收尾：退出词和 Ctrl+D 两条路都会走到这儿
+        # （`max_turns` 用尽会抛 LoopLimitExceeded，不会走到）。
+        *coerce_steps(*after_end),
         name="chat_loop",
     )
 

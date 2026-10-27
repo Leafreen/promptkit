@@ -117,6 +117,9 @@ class ChatWorkflow:
     rules: List[str] = field(default_factory=list)
     deliverables: List[Deliverable] = field(default_factory=list)
     behavior: List[Any] = field(default_factory=list)
+    #: 用户决定退出对话后要跑的步骤（说再见、存 session、总结等）。
+    #: 在 `ChatLoop` 之后、写记忆与落盘之前执行。
+    after_end: List[Any] = field(default_factory=list)
     tools: List[Any] = field(default_factory=list)
     #: 让模型自己调用的能力：`FunctionDef`（DSL `Function`）/ `Skill` / 函数。
     #: 编译时会包成 Tool，并自动带上「这次运行用的 agent」。
@@ -278,7 +281,7 @@ class ChatWorkflow:
             Role / Want / Rules / Tools / Deliverables / ExitWords  ← 写进 Context
             MemoryStep(read)                                        ← 有记忆时
             SystemPrompt()                                          ← 编译成 system prompt
-            ChatLoop(...)                                           ← 多轮对话
+            ChatLoop(...)                                           ← 多轮对话（含 after_end）
             MemoryStep(write)                                       ← write_on="end"
             SaveDeliverables()                                      ← 结束时落盘
         '''
@@ -344,6 +347,7 @@ class ChatWorkflow:
                 cautions=self.cautions or None,
                 max_turns=self.max_turns,
                 after_turn=each_turn,
+                after_end=self.after_end,
                 turn_template=self.turn_template(),
             ),
             *end_writes,

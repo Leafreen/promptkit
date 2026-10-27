@@ -13,14 +13,18 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from promptkit.core.event_sys.events import bus_of
 from promptkit.core.steps.interface import Step
 from promptkit.orchestrate.agents import as_text, structured_answer
+from promptkit.orchestrate.dsl import PlanSpec
 from promptkit.orchestrate.errors import PlanError, TaskError
 from promptkit.orchestrate.orchestrator import Orchestrator, OrchestratorConfig
-from promptkit.orchestrate.planner import LLMPlanner, Planner
-from promptkit.orchestrate.task import Plan, Task, TaskResult
+from promptkit.orchestrate.plan_tool import PlanTool
+from promptkit.orchestrate.planner import coerce_planner
+from promptkit.orchestrate.task import Task, TaskResult, plan_from
 from promptkit.prompt import render_text
 
 __all__ = [
     "PlanStep",
+    "PlanWithTool",
+    "PlanTool",
     "ExecutePlan",
     "AggregateStep",
     "format_task_results",
@@ -49,7 +53,9 @@ class PlanStep(Step):
 
     def execute(self, context: "Any") -> None:
         task_text = _text_of(self.task, context)
-        planner = self._planner()
+        planner = coerce_planner(
+            self.planner, max_tasks=self.max_tasks, tools=self.tools
+        )
         materials = {
             key: context[key] for key in self.context_keys if key in context
         }
@@ -57,25 +63,74 @@ class PlanStep(Step):
         context[self.output_key] = plan
         context.trace.append(f"{self.name}:{len(plan)}")
 
-    def _planner(self) -> Any:
-        planner = self.planner
-        if planner is None:
-            raise ValueError(
-                "PlanStep 需要 planner=...：一个 Planner，或者一个 Agent（让它规划）"
-            )
-        if isinstance(planner, Planner):
-            return planner
-        if hasattr(planner, "plan"):
-            return planner
-        if hasattr(planner, "ask"):
-            return LLMPlanner(planner, max_tasks=self.max_tasks, tools=self.tools)
-        raise TypeError(
-            f"看不懂的 planner：{type(planner).__name__}；"
-            "要 Planner 实例、带 plan() 的对象，或 Agent"
-        )
-
     def describe(self) -> str:
         return f"PlanStep(-> {self.output_key}, 最多 {self.max_tasks} 个任务)"
+
+
+# ============================ 模型自主规划 ============================
+@dataclass
+class PlanWithTool(Step):
+    '''让模型自己规划：把 `PlanTool` 交给它，产出的 `Plan` 写进 Context。
+
+        Workflow(
+            PlanWithTool(prompt="先想清楚怎么做：{{usr_input}}"),
+            ExecutePlan(plan=Var("plan")),
+        )
+
+    和 `PlanStep` 的区别：`PlanStep` 是「到这一步必须规划」，
+    这里模型可以只聊不拆（`required=False`），也可以拆两次（`max_calls=2`）。
+    '''
+
+    prompt: Any = ""
+    agent: Any = None
+    #: `Tool` 产出的 `Plan` 放哪个 key（默认 "plan"）
+    output_key: str = "plan"
+    #: 模型这一步的自然语言回复放哪个 key
+    reply_key: str = "plan_reply"
+    planner: Any = None
+    max_tasks: int = 5
+    max_calls: int = 1
+    context_keys: Tuple[str, ...] = ()
+    tools: Optional[Sequence[Any]] = None
+    #: True = 模型没调规划工具就报错；False = 允许它只回话
+    required: bool = True
+
+    name: str = "plan_with_tool"
+
+    def execute(self, context: "Any") -> None:
+        if not str(self.prompt or "").strip():
+            raise ValueError("PlanWithTool 需要 prompt=...：告诉模型什么时候该规划")
+        agent = self.agent or context.get("agent")
+        if agent is None:
+            raise ValueError(
+                "PlanWithTool 需要一个 agent：传 agent=...，或 Workflow.run(agent=...)"
+            )
+
+        tool = PlanTool(
+            agent,
+            planner=self.planner,
+            context=context,
+            output_key=self.output_key,
+            max_tasks=self.max_tasks,
+            max_calls=self.max_calls,
+            context_keys=self.context_keys,
+        )
+        reply = agent.ask(
+            {"role": "user", "content": _text_of(self.prompt, context)},
+            tools=[*(self.tools or []), tool],
+        )
+        context[self.reply_key] = reply
+        context.trace.append(
+            f"{self.name}:{len(tool.plan) if tool.plan is not None else 0}"
+        )
+        if self.required and tool.plan is None:
+            raise PlanError(
+                "模型没有调用规划工具；把 required=False 允许它只回话，"
+                "或在 prompt 里明确要求先拆任务"
+            )
+
+    def describe(self) -> str:
+        return f"PlanWithTool(-> {self.output_key})"
 
 
 # ============================ 执行 ============================
@@ -102,9 +157,12 @@ class ExecutePlan(Step):
     name: str = "execute_plan"
 
     def execute(self, context: "Any") -> None:
-        plan = plan_from(_value_of(self.plan, context))
+        spec = PlanSpec.from_dsl(_value_of(self.plan, context))
+        plan = spec.to_plan()
+        config = self.config or spec.to_config()
+        factory = self.agent_factory or spec.to_factory()
         orchestrator = Orchestrator(
-            self.config, agent=self.agent, agent_factory=self.agent_factory
+            config, agent=self.agent, agent_factory=factory
         )
         result = orchestrator.run(plan, context=context.to_dict())
 
@@ -189,19 +247,8 @@ class AggregateStep(Step):
 
 
 # ============================ 工具函数 ============================
-def plan_from(value: Any) -> Plan:
-    '''把 Plan / Task 列表 / `{"tasks": [...]}` 统一成 `Plan`。'''
-    if isinstance(value, Plan):
-        return value
-    if isinstance(value, (list, tuple)):
-        return Plan.from_template(value)
-    if isinstance(value, dict) and "tasks" in value:
-        return Plan.from_template(
-            value["tasks"], task=str(value.get("task") or "")
-        )
-    raise PlanError(
-        f"看不懂的计划：{type(value).__name__}；要 Plan、Task 列表，或 {{'tasks': [...]}}"
-    )
+# `plan_from` 的唯一实现在 `orchestrate.task`（`Orchestrator` 与 `api` 共用），
+# 这里保留导出以维持旧的 `from promptkit.orchestrate.steps import plan_from`。
 
 
 def format_task_results(

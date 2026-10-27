@@ -19,7 +19,7 @@ from promptkit.core.display_sys.render import Verbosity, as_verbosity
 from promptkit.core.settings import settings
 from promptkit.core.steps.actions.interactive import OUTPUT_STREAM_KEY, VERBOSITY_KEY
 from promptkit.core.steps.logics.goto import collect_labels
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import HOOKS_KEY, Step, coerce_steps, execute_step
 
 
 class Workflow(Step):
@@ -136,6 +136,7 @@ class Workflow(Step):
         session: Any = None,
         reset: Any = None,
         variables: Any = None,
+        hooks: Any = None,
         **kwargs,
     ) -> Context:
         '''新建一个 Context 并执行，返回它。
@@ -169,6 +170,9 @@ class Workflow(Step):
 
         `reset=`：要不要清空历史。`None`（默认）= 有会话文件就保留、
         没有就清空；显式传就按你传的来。
+
+        `hooks=`：`promptkit.api.Hooks` 实例，给每一步挂上
+        前置拦截 / 后置处理 / 异常捕获钩子（详见 `promptkit.api`）。
         '''
         if session is not None:
             # 会话是「Agent 层」的东西，`core` 不该硬依赖它 —— 延迟导入
@@ -184,6 +188,7 @@ class Workflow(Step):
                 out=out,
                 reset=reset,
                 variables=variables,
+                hooks=hooks,
                 **kwargs,
             )
 
@@ -192,6 +197,8 @@ class Workflow(Step):
             context["agent"] = agent
         if out is not None:
             context[OUTPUT_STREAM_KEY] = out
+        if hooks is not None:
+            context[HOOKS_KEY] = hooks
         if self.cautions:
             context[WORKFLOW_CAUTIONS_KEY] = list(self.cautions)
 
