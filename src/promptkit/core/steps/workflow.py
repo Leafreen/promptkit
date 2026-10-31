@@ -1,6 +1,6 @@
 # core/workflow.py
 import sys
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, TextIO, Union
 
 from promptkit.core.model_action.caution_related.caution import WORKFLOW_CAUTIONS_KEY, flatten_cautions
 from promptkit.core.context import Context
@@ -14,12 +14,22 @@ from promptkit.core.errors import (
     UnknownLabel,
     WorkflowError,
 )
-from promptkit.core.event_sys import EVENT_BUS_KEY, EventBus
+from promptkit.core.event_sys import EVENT_BUS_KEY, EventBus, EventHandler
 from promptkit.core.display_sys.render import Verbosity, as_verbosity
 from promptkit.core.settings import settings
 from promptkit.core.steps.actions.interactive import OUTPUT_STREAM_KEY, VERBOSITY_KEY
 from promptkit.core.steps.logics.goto import collect_labels
-from promptkit.core.steps.interface import HOOKS_KEY, Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import (
+    HOOKS_KEY,
+    Step,
+    StepLike,
+    coerce_steps,
+    execute_step,
+)
+from promptkit.types import AgentLike, JSONValue
+
+if TYPE_CHECKING:
+    from promptkit.session import Session
 
 
 class Workflow(Step):
@@ -39,11 +49,11 @@ class Workflow(Step):
 
     def __init__(
         self,
-        *steps: Any,
+        *steps: StepLike,
         max_steps: Optional[int] = None,
         max_jumps: Optional[int] = None,
         name: str = "workflow",
-        cautions: Any = None,
+        cautions: object = None,
     ):
         self.steps: List[Step] = coerce_steps(*steps)
         # `None` = 用全局设置；存原值，用到的时候再解析，
@@ -72,7 +82,7 @@ class Workflow(Step):
             raise ValueError(f"max_jumps 必须是正整数，得到 {value!r}")
         return value
 
-    def add(self, *steps: Any) -> "Workflow":
+    def add(self, *steps: StepLike) -> "Workflow":
         '''追加步骤，返回自身以便链式调用。'''
         new_steps = coerce_steps(*steps)
         limit = self.step_limit()
@@ -128,15 +138,17 @@ class Workflow(Step):
 
     def run(
         self,
-        agent: Any = None,
+        agent: Optional[AgentLike] = None,
         bus: Optional[EventBus] = None,
-        verbose: Verbosity = Verbosity.NORMAL,
-        on_event: Any = None,
-        out: Any = None,
-        session: Any = None,
-        reset: Any = None,
-        variables: Any = None,
-        hooks: Any = None,
+        verbose: Union[Verbosity, int, bool] = Verbosity.NORMAL,
+        on_event: Optional[EventHandler] = None,
+        out: Optional[TextIO] = None,
+        session: Optional[Union[str, "Session"]] = None,
+        reset: Optional[bool] = None,
+        variables: Optional[Sequence[str]] = None,
+        hooks: object = None,
+        judge: object = None,
+        metadata: Optional[Dict[str, JSONValue]] = None,
         **kwargs,
     ) -> Context:
         '''新建一个 Context 并执行，返回它。
@@ -167,21 +179,28 @@ class Workflow(Step):
         手写 Workflow 想保留上下文就靠它：
 
             wf.run(agent=agent, session="sessions/tutor.json")
+            wf.run(agent=agent, session=Session(p).Variables("basic_info"))
 
         `reset=`：要不要清空历史。`None`（默认）= 有会话文件就保留、
         没有就清空；显式传就按你传的来。
 
+        `variables=`：要跟着会话一起存的 Context 变量名。给了就覆盖
+        `Session.variables`（`Session(path).Variables(...)` 的链式写法）。
+
+        `metadata=`：额外写进会话文件的元信息（`ChatWorkflow` 用它记 role），
+        读的时候不会用到。
+
         `hooks=`：`promptkit.api.Hooks` 实例，给每一步挂上
         前置拦截 / 后置处理 / 异常捕获钩子（详见 `promptkit.api`）。
+
+        `judge=`：语义判定器（如 `LLMJudge(agent)`）。注入一次，工作流里的
+        `Intent` / `Similar` / `Classify` 就不用再逐个 `.Using(judge)`；
+        单个条件上的 `.Using()` 优先于这里的注入。
         '''
         if session is not None:
-            # 会话是「Agent 层」的东西，`core` 不该硬依赖它 —— 延迟导入
-            from promptkit.session import run_with_session
-
-            return run_with_session(
-                self,
-                agent,
+            return self._run_with_session(
                 session,
+                agent=agent,
                 bus=bus,
                 verbose=verbose,
                 on_event=on_event,
@@ -189,12 +208,18 @@ class Workflow(Step):
                 reset=reset,
                 variables=variables,
                 hooks=hooks,
+                judge=judge,
+                metadata=metadata,
                 **kwargs,
             )
 
         context = Context(data=dict(kwargs))
         if agent is not None:
             context["agent"] = agent
+        if judge is not None:
+            from promptkit.core.steps.logics.semantic import SEMANTIC_JUDGE_KEY
+
+            context[SEMANTIC_JUDGE_KEY] = judge
         if out is not None:
             context[OUTPUT_STREAM_KEY] = out
         if hooks is not None:
@@ -259,3 +284,80 @@ class Workflow(Step):
                 bus.off(handler)
 
         return context
+
+    def _run_with_session(
+        self,
+        session: Union[str, "Session"],
+        *,
+        agent: Optional[AgentLike],
+        bus: Optional[EventBus],
+        verbose: Union[Verbosity, int, bool],
+        on_event: Optional[EventHandler],
+        out: Optional[TextIO],
+        reset: Optional[bool],
+        variables: Optional[Sequence[str]],
+        hooks: object,
+        judge: object,
+        metadata: Optional[Dict[str, JSONValue]],
+        **kwargs,
+    ) -> Context:
+        '''`run(session=...)` 的实现：load -> 跑 -> 存（异常也存）。
+
+        顺序很重要：**先决定要不要保留历史，再装历史**。反过来的话，
+        `SystemPrompt(reset=True)` 会把刚装回来的清掉。
+
+        `variables` 是要跟着会话一起存的 Context 变量名（比如
+        `["basic_info"]`）。存了之后，下次 `run()` 会把它们当关键字参数
+        塞回 Context —— 开头那段问卷就能读到上次填好的值。
+
+        会话是「Agent 层」的东西，`core` 不该硬依赖它，所以延迟导入。
+        '''
+        from promptkit.session import as_session, set_system_prompt_reset
+
+        active = as_session(session)
+        if active is None:
+            raise ValueError("run(session=...) 需要路径或 Session 实例，不能是 None")
+        if agent is None:
+            from promptkit.agent import Agent
+
+            agent = Agent.default()
+            if agent is None:
+                raise ValueError(
+                    "run(session=...) 需要 agent：要么先 `Agent()` 建一个"
+                    "（会自动注册为默认），要么显式传 `agent=...`。"
+                )
+
+        names = tuple(variables) if variables is not None else active.variables
+
+        # 要记的变量：把上次存的值当 kwargs 传给内层 run()。
+        # `NewVar(...)` 用的是 setdefault，所以传进来的值不会被默认值盖掉。
+        seeded: Dict[str, JSONValue] = {}
+        if names:
+            stored = active.load_variables()
+            seeded = {name: stored[name] for name in names if name in stored}
+
+        keep = active.exists() if reset is None else (not reset)
+        restored = active.load(agent)
+
+        set_system_prompt_reset(self, not keep)
+        context: Optional[Context] = None
+        try:
+            context = self.run(
+                agent=agent,
+                bus=bus,
+                verbose=verbose,
+                on_event=on_event,
+                out=out,
+                hooks=hooks,
+                judge=judge,
+                **{**seeded, **kwargs},
+            )
+            return context
+        finally:
+            # 异常退出也要存 —— 聊到一半 Ctrl+C 不该把整段对话丢掉
+            snapshot: Optional[Dict[str, object]] = None
+            if names and context is not None:
+                snapshot = {name: context.get(name) for name in names}
+            extra: Dict[str, JSONValue] = dict(metadata or {})
+            extra["restored"] = restored
+            active._save(agent, variables=snapshot, metadata=extra)

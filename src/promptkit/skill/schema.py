@@ -90,10 +90,10 @@ def type_schema(annotation: Any) -> Dict[str, Any]:
         return {"enum": values}
 
     if origin in (list, tuple, set):
-        schema: Dict[str, Any] = {"type": "array"}
+        array_schema: Dict[str, Any] = {"type": "array"}
         if args:
-            schema["items"] = type_schema(args[0])
-        return schema
+            array_schema["items"] = type_schema(args[0])
+        return array_schema
 
     if origin is dict:
         schema = {"type": "object"}

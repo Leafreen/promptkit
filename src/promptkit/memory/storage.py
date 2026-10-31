@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, Dict, Optional, Sequence, Union
+from typing import Callable, Dict, Mapping, Optional, Sequence, Union, cast
 
 from promptkit.memory.base import InMemoryMemory, Memory
 from promptkit.memory.kv import KVMemory
@@ -54,7 +54,8 @@ from promptkit.memory.paths import (
     safe_namespace_name,
 )
 from promptkit.memory.session import SessionMemory
-from promptkit.memory.vector import VectorMemory
+from promptkit.memory.vector import EmbeddingClient, VectorMemory, VectorStore
+from promptkit.types import JSONValue
 
 __all__ = [
     "StorageConfig",
@@ -99,7 +100,7 @@ class StorageConfig:
     url: Optional[str] = None
     #: 后端自己的选项：collection / api_key / vector_backend /
     #: vector_path / vector_url / mirror …（`layered` 用后三个决定向量那边怎么存）
-    options: Dict[str, Any] = field(default_factory=dict)
+    options: Dict[str, JSONValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, str) or not self.backend.strip():
@@ -179,18 +180,24 @@ def register_memory_backend(
 
 
 def create_memory(
-    config: Union[StorageConfig, Dict[str, Any]],
+    config: Union[StorageConfig, Mapping[str, object]],
     *,
-    embed_client: Any = None,
-    **kwargs: Any,
+    embed_client: Optional[EmbeddingClient] = None,
+    **kwargs,
 ) -> Memory:
     '''按 `StorageConfig` 造一个记忆对象。
 
     额外参数原样传给具体实现（`budget=` / `reranker=` / `chunk_size=` /
     `timeout=` …），所以工厂不是「只能给默认值」的阉割版。
     '''
-    if isinstance(config, dict):
-        config = StorageConfig(**config)
+    if isinstance(config, Mapping):
+        config = StorageConfig(
+            backend=cast(str, config["backend"]),
+            namespace=cast(str, config["namespace"]),
+            path=cast(Optional[str], config.get("path")),
+            url=cast(Optional[str], config.get("url")),
+            options=cast(Dict[str, JSONValue], config.get("options", {})),
+        )
     if not isinstance(config, StorageConfig):
         raise TypeError(
             f"create_memory 需要 StorageConfig（或等价的 dict），得到 {type(config).__name__}"
@@ -206,7 +213,9 @@ def create_memory(
 
 
 # ---------------- 内置后端 ----------------
-def _kv_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _kv_memory(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     path = config.kv_path()
     if os.path.isdir(path):
         raise ValueError(
@@ -217,24 +226,35 @@ def _kv_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any
     return KVMemory(path, namespace=config.namespace, **kwargs)
 
 
-def _in_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _in_memory(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     return InMemoryMemory(namespace=config.namespace, **kwargs)
 
 
-def _session_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _session_memory(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     return SessionMemory(**kwargs)
 
 
-def _require_embedder(config: StorageConfig, embed_client: Any) -> None:
+def _require_embedder(
+    config: StorageConfig, embed_client: Optional[EmbeddingClient]
+) -> EmbeddingClient:
     if embed_client is None:
         raise ValueError(
             f"backend={config.backend!r} 是向量记忆，需要 embed_client="
             "（OpenAIEmbedding / SentenceTransformerEmbedding / HashEmbedding …）"
         )
+    return embed_client
 
 
 def _vector_memory(
-    config: StorageConfig, *, store: Any, embed_client: Any, **kwargs: Any
+    config: StorageConfig,
+    *,
+    store: VectorStore,
+    embed_client: EmbeddingClient,
+    **kwargs,
 ) -> Memory:
     return VectorMemory(
         embed_client,
@@ -244,28 +264,34 @@ def _vector_memory(
     )
 
 
-def _folder_vectors(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _folder_vectors(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     from promptkit.memory.folder_store import FolderVectorStore
 
-    _require_embedder(config, embed_client)
+    embedder = _require_embedder(config, embed_client)
     store = FolderVectorStore(config.vector_path())
-    return _vector_memory(config, store=store, embed_client=embed_client, **kwargs)
+    return _vector_memory(config, store=store, embed_client=embedder, **kwargs)
 
 
-def _chroma_vectors(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _chroma_vectors(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     from promptkit.memory.adapters.store import ChromaVectorStore
 
-    _require_embedder(config, embed_client)
+    embedder = _require_embedder(config, embed_client)
     store = ChromaVectorStore.at(
         config.path, config.collection_name(), url=config.url
     )
-    return _vector_memory(config, store=store, embed_client=embed_client, **kwargs)
+    return _vector_memory(config, store=store, embed_client=embedder, **kwargs)
 
 
-def _qdrant_vectors(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _qdrant_vectors(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     from promptkit.memory.adapters.store import QdrantVectorStore
 
-    _require_embedder(config, embed_client)
+    embedder = _require_embedder(config, embed_client)
     try:
         from qdrant_client import QdrantClient
     except ImportError:
@@ -273,13 +299,16 @@ def _qdrant_vectors(config: StorageConfig, *, embed_client: Any = None, **kwargs
             "backend='qdrant' 需要 qdrant-client：pip install qdrant-client"
         ) from None
     client = QdrantClient(
-        url=config.url, api_key=config.options.get("api_key") or None
+        url=config.url,
+        api_key=cast(Optional[str], config.options.get("api_key")) or None,
     )
     store = QdrantVectorStore(client, config.collection_name())
-    return _vector_memory(config, store=store, embed_client=embed_client, **kwargs)
+    return _vector_memory(config, store=store, embed_client=embedder, **kwargs)
 
 
-def _layered_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs: Any) -> Memory:
+def _layered_memory(
+    config: StorageConfig, *, embed_client: Optional[EmbeddingClient] = None, **kwargs
+) -> Memory:
     '''KV + 向量：KV 存结构化值，向量存能被召回的内容。'''
     kv = KVMemory(config.kv_path(), namespace=config.namespace)
 
@@ -292,8 +321,8 @@ def _layered_memory(config: StorageConfig, *, embed_client: Any = None, **kwargs
     vector_config = replace(
         config,
         backend=str(vector_backend),
-        path=config.options.get("vector_path"),
-        url=config.options.get("vector_url"),
+        path=cast(Optional[str], config.options.get("vector_path")),
+        url=cast(Optional[str], config.options.get("vector_url")),
     )
     vector = create_memory(vector_config, embed_client=embed_client, **kwargs)
     return LayeredMemory(

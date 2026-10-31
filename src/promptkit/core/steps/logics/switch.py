@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, List, TYPE_CHECKING, Tuple
+from typing import Iterable, List, TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
 from promptkit.core.steps.logics.expr_sys.expr import Expr, as_expr
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import (
+    Step,
+    StepLike,
+    coerce_steps,
+    execute_step,
+)
 from promptkit.core.display_sys.tree import Node
 
 
 class Case:
     '''一个 case：一组待匹配的值 + 命中的步骤 + 是否往下穿透。'''
 
-    def __init__(self, values, body=(), fallthrough: bool = False):
+    def __init__(
+        self,
+        values: Iterable[Expr],
+        body: Iterable[Step] = (),
+        fallthrough: bool = False,
+    ):
         self.values: Tuple[Expr, ...] = tuple(values)
         self.body: Tuple[Step, ...] = tuple(body)
         self.fallthrough = fallthrough
@@ -55,7 +65,7 @@ class SwitchStep(Step):
 
     # ---------------- 链式构建 ----------------
     def Case(  # noqa: N802 - 跟随 DSL 命名
-        self, *values: Any, fallthrough: bool = False
+        self, *values: object, fallthrough: bool = False
     ) -> "SwitchStep":
         '''匹配一个（或多个）值。'''
         if not values:
@@ -63,7 +73,7 @@ class SwitchStep(Step):
         case = Case([as_expr(v) for v in values], (), fallthrough)
         return replace(self, cases=self.cases + (case,))
 
-    def Then(self, *steps: Any) -> "SwitchStep":  # noqa: N802 - 跟随 DSL 命名
+    def Then(self, *steps: StepLike) -> "SwitchStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置最后一个 case 要执行的步骤。'''
         if not self.cases:
             raise ValueError("请先写 Case(...) 再写 Then(...)")
@@ -73,7 +83,7 @@ class SwitchStep(Step):
         updated = Case(last.values, coerce_steps(*steps), last.fallthrough)
         return replace(self, cases=self.cases[:-1] + (updated,))
 
-    def Default(self, *steps: Any) -> "SwitchStep":  # noqa: N802 - 跟随 DSL 命名
+    def Default(self, *steps: StepLike) -> "SwitchStep":  # noqa: N802 - 跟随 DSL 命名
         '''所有 case 都不匹配时执行的步骤（可选）。'''
         return replace(self, default_body=tuple(coerce_steps(*steps)))
 
@@ -130,7 +140,7 @@ class SwitchStep(Step):
         return f"<SwitchStep cases={len(self.cases)} default={len(self.default_body)}>"
 
 
-def Switch(subject: Any) -> SwitchStep:  # noqa: N802 - 跟随 DSL 命名
+def Switch(subject: object) -> SwitchStep:  # noqa: N802 - 跟随 DSL 命名
     '''Switch(值).Case(1).Then(...).Case(2).Then(...).Default(...)。
 
     值可以是字面量，也可以是表达式（比如 Var("x")），运行时才求值。

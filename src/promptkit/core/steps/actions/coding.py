@@ -1,4 +1,4 @@
-# coding/step.py
+# core/steps/actions/coding.py
 '''`CodingStep`：让模型产出**可执行的代码变更**，而不是给人看的文本。
 
 它和 `LLMStep` 的分工：
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from promptkit.coding.errors import CodeFormatError, DiffError
 from promptkit.coding.formats import CodeOutput, get_output
@@ -61,17 +61,17 @@ class CodingStep(Step):
     - `max_retries`：校验不过时最多再试几次（省略时用 `settings.max_retries`）
     '''
 
-    task: Any
-    context: Any = None
-    error: Any = None
+    task: object
+    context: object = None
+    error: object = None
     output_format: str = "diff"
     #: 直接给一个现成的 `CodeOutput`（想自定义语法检查时用）
-    output: Optional[Any] = None
+    output: Optional[CodeOutput] = None
     output_key: str = "patch"
-    path: Optional[Any] = None
+    path: Optional[object] = None
     base_dir: str = "."
     language: str = "python"
-    cautions: Optional[Sequence[Any]] = None
+    cautions: Optional[Sequence[object]] = None
     max_retries: Optional[int] = None
     #: 给了 path 时是否干跑校验（关掉就只做结构校验）
     verify: bool = True
@@ -79,7 +79,7 @@ class CodingStep(Step):
     max_error_chars: int = 4000
     #: 相关文件总共最多塞多少字符（防止把整个仓库喂进去）
     max_context_chars: int = 40_000
-    agent: Any = None
+    agent: object = None
     name: str = "coding"
 
     def __post_init__(self) -> None:
@@ -100,7 +100,7 @@ class CodingStep(Step):
             raise ValueError("output_key 不能为空")
 
     # ---------------- 取值 ----------------
-    def _agent(self, context: "Context") -> Any:
+    def _agent(self, context: "Context") -> object:
         agent = self.agent if self.agent is not None else context.get("agent")
         if agent is None:
             try:
@@ -116,8 +116,14 @@ class CodingStep(Step):
             )
         return agent
 
+    def _code_output(self) -> CodeOutput:
+        '''归一化后的输出格式；`__post_init__` 已保证它不是 None。'''
+        output = self.output
+        assert output is not None, "output 已在 __post_init__ 中归一化"
+        return output
+
     @staticmethod
-    def _render(value: Any, context: "Context") -> Any:
+    def _render(value: object, context: "Context") -> object:
         return value.eval(context) if isinstance(value, Expr) else value
 
     def _task_text(self, context: "Context") -> str:
@@ -216,7 +222,7 @@ class CodingStep(Step):
         if text:
             parts.append(f"## 约束\n{text}")
 
-        parts.append(f"## 输出格式\n{self.output.instruction()}")
+        parts.append(f"## 输出格式\n{self._code_output().instruction()}")
         return "\n\n".join(parts)
 
     # ---------------- 执行 ----------------
@@ -225,7 +231,7 @@ class CodingStep(Step):
         target = self.target(context)
         sandbox = (
             Sandbox(self.base_dir, allow_write=False)
-            if (target is not None and self.verify) or self.output.name == "json"
+            if (target is not None and self.verify) or self._code_output().name == "json"
             else None
         )
 
@@ -236,9 +242,9 @@ class CodingStep(Step):
         bus = bus_of(context)
 
         for attempt in range(1, attempts + 1):
-            raw = agent.ask({"role": "user", "content": prompt}, bus=bus)
+            raw = getattr(agent, "ask")({"role": "user", "content": prompt}, bus=bus)
             try:
-                value = self.output.parse(
+                value = self._code_output().parse(
                     raw,
                     sandbox=sandbox,
                     path=target,
@@ -271,6 +277,6 @@ class CodingStep(Step):
 
         target = f" -> {self.path}" if self.path is not None else ""
         return (
-            f"Coding({self.output.name}, {short(self.task)}{target}"
+            f"Coding({self._code_output().name}, {short(self.task)}{target}"
             f" -> {self.output_key})"
         )

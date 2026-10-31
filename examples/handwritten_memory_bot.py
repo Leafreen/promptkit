@@ -40,7 +40,7 @@ from promptkit.core import (  # noqa: E402
     Want,
     Workflow,
 )
-from promptkit.default_tools import WEB_SEARCH, WriteFile  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH, WriteFile  # noqa: E402
 from promptkit.knowledge import KNOWLEDGE_REFERENCE  # noqa: E402
 from promptkit.memory import (  # noqa: E402
     MEMORY_REFERENCE,

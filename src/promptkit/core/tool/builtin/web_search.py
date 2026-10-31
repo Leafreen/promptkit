@@ -22,7 +22,7 @@
 
 当工具用：
 
-    from promptkit.default_tools.web_search import WEB_SEARCH
+    from promptkit.core.tool.builtin.web_search import WEB_SEARCH
     LLMStep(prompt=..., tools=[WEB_SEARCH], output_key="answer")
 
 自己用：
@@ -48,9 +48,21 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any, Dict, Iterable, List, Optional
+from typing import (
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+    cast,
+)
 
-from promptkit.tools import Tool
+from promptkit.core.tool.base import Tool
+from promptkit.types import JSONValue
 
 DEFAULT_K = 5
 MAX_K = 20
@@ -106,7 +118,7 @@ class SearchResult:
 
 
 # ============================ 文本 / 字段工具 ============================
-def clean_text(text: Any) -> str:
+def clean_text(text: object) -> str:
     '''去标签残留 / HTML 实体 / 多余空白。'''
     if text is None:
         return ""
@@ -115,10 +127,10 @@ def clean_text(text: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def clamp_k(value: Any, default: int = DEFAULT_K) -> int:
+def clamp_k(value: object, default: int = DEFAULT_K) -> int:
     '''把模型给的 top_k 收进合理范围，越界不报错、直接夹住。'''
     try:
-        number = int(value)
+        number = int(cast(Union[str, int, float], value))
     except (TypeError, ValueError):
         return default
     return max(1, min(number, MAX_K))
@@ -137,7 +149,7 @@ def dedupe(results: List[SearchResult]) -> List[SearchResult]:
     return unique
 
 
-def dig(data: Any, *paths: str, default: Any = None) -> Any:
+def dig(data: object, *paths: str, default: object = None) -> object:
     '''按候选路径取值，兼容不同厂商的响应结构。
 
         dig(data, "data.webPages.value", "webPages.value", "results")
@@ -159,7 +171,7 @@ def dig(data: Any, *paths: str, default: Any = None) -> Any:
     return default
 
 
-def pick_field(item: Dict[str, Any], *names: str) -> str:
+def pick_field(item: object, *names: str) -> str:
     '''按候选字段名取值（不同厂商叫法不一样）。'''
     if not isinstance(item, dict):
         return ""
@@ -232,11 +244,11 @@ def http_get(
 
 def http_post_json(
     url: str,
-    payload: Dict[str, Any],
+    payload: Mapping[str, JSONValue],
     *,
     timeout: float = DEFAULT_TIMEOUT,
     headers: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
+) -> Dict[str, JSONValue]:
     '''POST 一段 JSON，解析 JSON 响应。'''
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -299,7 +311,7 @@ class FallbackBackend(SearchBackend):
 
     name = "fallback"
 
-    def __init__(self, backends: Iterable[SearchBackend], **kwargs: Any):
+    def __init__(self, backends: Iterable[SearchBackend], **kwargs):
         super().__init__(**kwargs)
         self.backends = list(backends)
         if not self.backends:
@@ -363,7 +375,9 @@ class _OrderedParser(HTMLParser):
             self.items.append({"kind": "text", "text": text})
 
     # ---- HTMLParser ----
-    def handle_starttag(self, tag: str, attrs: List[Any]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
         attributes = {k.lower(): (v or "") for k, v in attrs}
 
         if tag in self.skip_tags:
@@ -535,7 +549,7 @@ class BaiduBackend(SearchBackend):
     name = "baidu"
     ENDPOINT = "https://www.baidu.com/s"
 
-    def __init__(self, *, resolve_urls: bool = False, **kwargs: Any):
+    def __init__(self, *, resolve_urls: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.resolve_urls = resolve_urls
 
@@ -594,7 +608,9 @@ class _BingParser(HTMLParser):
         self._in_title = False
         self._in_snippet = False
 
-    def handle_starttag(self, tag: str, attrs: List[Any]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
         if tag in ("script", "style", "noscript"):
             self._skip += 1
             return
@@ -696,6 +712,13 @@ class BingCnBackend(SearchBackend):
 
 
 # ---------- DuckDuckGo ----------
+class _PendingLink(TypedDict):
+    '''解析中攒着的一条结果链接（href 已拿到，标题文字还在收集中）。'''
+
+    href: str
+    text: List[str]
+
+
 class _DDGLiteParser(HTMLParser):
     '''从 `html.duckduckgo.com/lite` 的页面里抠出结果。
 
@@ -705,10 +728,12 @@ class _DDGLiteParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.items: List[Dict[str, str]] = []
-        self._link: Optional[Dict[str, Any]] = None
+        self._link: Optional[_PendingLink] = None
         self._snippet: Optional[List[str]] = None
 
-    def handle_starttag(self, tag: str, attrs: List[Any]) -> None:
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
         attributes = {k.lower(): (v or "") for k, v in attrs}
 
         if tag == "a":
@@ -800,14 +825,14 @@ class _ApiBackend(SearchBackend):
     URL_FIELDS: tuple = ("url",)
     SNIPPET_FIELDS: tuple = ("snippet",)
 
-    def __init__(self, api_key: Optional[str] = None, **kwargs: Any):
+    def __init__(self, api_key: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.api_key = api_key or os.environ.get(self.ENV, "")
         if not self.api_key:
             raise SearchError(f"{self.name} 需要 API Key：设置环境变量 {self.ENV}")
 
     @abstractmethod
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         '''发请求，返回原始响应。'''
 
     def search(self, query: str, k: int = DEFAULT_K) -> List[SearchResult]:
@@ -849,7 +874,7 @@ class BochaBackend(_ApiBackend):
     URL_FIELDS = ("url", "link")
     SNIPPET_FIELDS = ("summary", "snippet", "content")
 
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         return http_post_json(
             self.ENDPOINT,
             {"query": query, "count": k, "summary": True},
@@ -872,7 +897,7 @@ class ZhipuBackend(_ApiBackend):
     URL_FIELDS = ("link", "url")
     SNIPPET_FIELDS = ("content", "snippet", "summary")
 
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         return http_post_json(
             self.ENDPOINT,
             {"search_engine": "search_std", "search_query": query},
@@ -890,7 +915,7 @@ class TavilyBackend(_ApiBackend):
     RESULT_PATHS = ("results", "data.results")
     SNIPPET_FIELDS = ("content", "snippet")
 
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         return http_post_json(
             self.ENDPOINT,
             {"query": query, "max_results": k, "search_depth": "basic"},
@@ -908,7 +933,7 @@ class SerperBackend(_ApiBackend):
     RESULT_PATHS = ("organic", "data.organic")
     URL_FIELDS = ("link", "url")
 
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         return http_post_json(
             self.ENDPOINT,
             {"q": query, "num": k},
@@ -926,7 +951,7 @@ class BraveBackend(_ApiBackend):
     RESULT_PATHS = ("web.results", "results")
     SNIPPET_FIELDS = ("description", "snippet")
 
-    def _request(self, query: str, k: int) -> Dict[str, Any]:
+    def _request(self, query: str, k: int) -> Dict[str, JSONValue]:
         url = self.ENDPOINT + "?" + urllib.parse.urlencode({"q": query, "count": k})
         text = http_get(
             url,
@@ -943,7 +968,7 @@ class BraveBackend(_ApiBackend):
 
 
 #: 环境变量 -> 后端类，**顺序就是优先级**（国内的两个排在前面）
-API_BACKENDS: Dict[str, Any] = {
+API_BACKENDS: Dict[str, Callable[..., SearchBackend]] = {
     BochaBackend.ENV: BochaBackend,
     ZhipuBackend.ENV: ZhipuBackend,
     TavilyBackend.ENV: TavilyBackend,
@@ -952,14 +977,14 @@ API_BACKENDS: Dict[str, Any] = {
 }
 
 #: 免密钥的后端，按名字索引（给 PROMPTKIT_SEARCH_BACKENDS 用）
-KEYLESS_BACKENDS: Dict[str, Any] = {
+KEYLESS_BACKENDS: Dict[str, Callable[..., SearchBackend]] = {
     "baidu": BaiduBackend,
     "bing": BingCnBackend,
     "duckduckgo": DuckDuckGoBackend,
 }
 
 
-def pick_backend(**kwargs: Any) -> SearchBackend:
+def pick_backend(**kwargs) -> SearchBackend:
     '''有 API Key 就用付费后端，否则按降级链抓页面。
 
     降级链可以用 `PROMPTKIT_SEARCH_BACKENDS` 覆盖，逗号分隔：

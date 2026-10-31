@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
 from promptkit.core.errors import ArgumentError, ReturnSignal
 from promptkit.core.steps.logics.expr_sys.expr import AgentReplyExpr, Expr, as_expr
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import (
+    Step,
+    StepLike,
+    coerce_steps,
+    execute_step,
+)
 from promptkit.core.steps.actions.llm import LLMStep
+from promptkit.types import ToolLike
 
 if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
     from pydantic import BaseModel
@@ -28,7 +43,7 @@ class FunctionStep(Step):
         FunctionStep(lambda ctx: "可以退款。", output_key="reply")  # 写回变量
     '''
 
-    func: Callable[[Context], Any]
+    func: Callable[[Context], object]
     output_key: Optional[str] = None
     name: str = "function"
 
@@ -65,8 +80,8 @@ class FunctionDef:
         description: str = "",
         output_key: Optional[str] = None,
         output_model: Optional[type] = None,
-        tools: Optional[List[Any]] = None,
-        inherit: Any = False,
+        tools: Optional[List[ToolLike]] = None,
+        inherit: object = False,
     ):
         self.args = tuple(args)
         if any(not isinstance(a, str) or not a for a in self.args):
@@ -83,7 +98,7 @@ class FunctionDef:
         self.tools = list(tools) if tools else None
         self.body: List[Step] = []
 
-    def Do(self, *body: Any) -> "FunctionDef":  # noqa: N802 - 跟随 DSL 命名
+    def Do(self, *body: object) -> "FunctionDef":  # noqa: N802 - 跟随 DSL 命名
         '''设置步骤体：可以是一个 Prompt，也可以是若干步骤。'''
         steps: List[Step] = []
         for item in body:
@@ -98,13 +113,13 @@ class FunctionDef:
                     )
                 )
             else:
-                steps.extend(coerce_steps(item))
+                steps.extend(coerce_steps(cast(StepLike, item)))
         if not steps:
             raise ArgumentError(f"{self.name}: Do() 至少要有一个步骤或 Prompt")
         self.body = steps
         return self
 
-    def __call__(self, **kwargs: Any) -> "BoundStep":
+    def __call__(self, **kwargs: object) -> "BoundStep":
         '''绑定参数，得到一个可执行 / 可当表达式用的步骤。'''
         unknown = sorted(set(kwargs) - set(self.args))
         if unknown:
@@ -138,7 +153,7 @@ class ReturnStep(Step):
 
     name = "return"
 
-    def __init__(self, value: Any = None):
+    def __init__(self, value: object = None):
         self.value = as_expr(value)
 
     def execute(self, context: Context) -> None:
@@ -152,7 +167,7 @@ class ReturnStep(Step):
         return f"Return({self.value!r})"
 
 
-def Return(value: Any = None) -> ReturnStep:  # noqa: N802 - 跟随 DSL 命名
+def Return(value: object = None) -> ReturnStep:  # noqa: N802 - 跟随 DSL 命名
     '''Return(表达式)：结束函数体并返回这个值。'''
     return ReturnStep(value)
 
@@ -165,7 +180,7 @@ class BoundStep(Step):
       「运行它，然后取它的返回值」
     '''
 
-    def __init__(self, definition: FunctionDef, kwargs: Dict[str, Any]):
+    def __init__(self, definition: FunctionDef, kwargs: Dict[str, object]):
         self.definition = definition
         self.kwargs = kwargs
         self.name = definition.name
@@ -173,7 +188,7 @@ class BoundStep(Step):
 
     def execute(self, context: Context) -> None:
         # 参数只在函数体内部可见（词法作用域），执行完恢复原值
-        saved: Dict[str, Any] = {}
+        saved: Dict[str, object] = {}
         for key, raw in self.kwargs.items():
             # 参数可以是字面量，也可以是表达式：表达式在每次执行时重新求值，
             # 所以 While 循环里传 Var("x") 能拿到每一轮最新的值。
@@ -181,7 +196,7 @@ class BoundStep(Step):
             saved[key] = context.get(key, _MISSING)
             context[key] = value
 
-        returned: Any = _MISSING
+        returned: object = _MISSING
         try:
             for step in self.definition.body:
                 execute_step(step, context)
@@ -227,8 +242,8 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
     description: str = "",
     output_key: Optional[str] = None,
     output_model: Optional[type] = None,
-    tools: Optional[List[Any]] = None,
-    inherit: Any = False,
+    tools: Optional[List[ToolLike]] = None,
+    inherit: object = False,
 ) -> FunctionDef:
     '''定义一个带参数的步骤：Function(args=("job",)).Do(Prompt(...))。
 
@@ -250,7 +265,9 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
     )
 
 
-def _normalise_inherit(value: Any, name: str) -> Any:
+def _normalise_inherit(
+    value: object, name: str
+) -> Union[bool, Tuple[str, ...]]:
     if isinstance(value, bool) or value is None:
         return bool(value)
     if isinstance(value, str):

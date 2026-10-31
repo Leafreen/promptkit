@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Callable, List, Optional, TYPE_CHECKING, Tuple, Union
+from typing import (
+    Callable,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    TYPE_CHECKING,
+    Tuple,
+    Union,
+    cast,
+)
 
 from promptkit.core.steps.logics.conditions import ConditionLike, as_condition
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
@@ -17,12 +27,13 @@ from promptkit.core.errors import (
     ReturnSignal,
 )
 from promptkit.core.settings import settings
-from promptkit.core.steps.interface import Step, coerce_steps
+from promptkit.core.steps.interface import Step, StepLike, coerce_steps
 from promptkit.core.steps.logics.loop import _limit, run_loop_body
 from promptkit.core.steps.logics.loop_hooks import (
     LOOP_HOOKS_KEY,
     HookPoint,
     LoopHookEvent,
+    LoopHookFn,
     LoopHookHandle,
     LoopHooks,
     as_hook_point,
@@ -116,7 +127,7 @@ class WhileStep(Step):
         if not isinstance(self.hooks, LoopHooks):
             self.hooks = LoopHooks(self.hooks)
 
-    def Do(self, *steps: Any) -> "WhileStep":  # noqa: N802 - 跟随 DSL 命名
+    def Do(self, *steps: StepLike) -> "WhileStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置循环体，返回**新的** `WhileStep`（dataclass `replace`，不修改原对象）。
 
         参数：
@@ -131,7 +142,7 @@ class WhileStep(Step):
         return replace(self, body=tuple(coerce_steps(*steps)))
 
     def Hook(  # noqa: N802 - 跟随 DSL 命名
-        self, point: Union[str, HookPoint], fn: Callable[[LoopHookEvent], Any]
+        self, point: Union[str, HookPoint], fn: Callable[[LoopHookEvent], object]
     ) -> "WhileStep":
         '''注册一个**步级**钩子（只对这个循环生效），返回自身以便链式调用。
 
@@ -152,11 +163,11 @@ class WhileStep(Step):
             TypeError: `fn` 不可调用。
             ValueError: `point` 不是已知扩展点。
         '''
-        self.hooks.register(point, fn)
+        self.hooks.register(point, cast(LoopHookFn, fn))
         return self
 
     def Unhook(  # noqa: N802
-        self, target: Any, point: Optional[Union[str, HookPoint]] = None
+        self, target: object, point: Optional[Union[str, HookPoint]] = None
     ) -> bool:
         '''注销一个步级钩子，等价于 `self.hooks.unregister(...)`。
 
@@ -173,7 +184,9 @@ class WhileStep(Step):
         返回：
             bool —— 真的删掉了为 `True`，本来就没有为 `False`。
         '''
-        return self.hooks.unregister(target, point)
+        return self.hooks.unregister(
+            cast(Union[str, HookPoint, LoopHookHandle, LoopHookFn], target), point
+        )
 
     # ---------------- 执行 ----------------
     def execute(self, context: Context) -> None:
@@ -283,9 +296,30 @@ class WhileStep(Step):
         merged = self.hooks.copy()
         return merged.extend(shared)
 
-    def _event(self, point: HookPoint, context: Context, iteration: int, **extra: Any):
-        '''构造事件：`extra` 里的字段（`signal` / `reason` / `error` / ...）按需补上。'''
-        return LoopHookEvent(point, self, context, iteration=iteration, **extra)
+    def _event(
+        self,
+        point: HookPoint,
+        context: Context,
+        iteration: int,
+        *,
+        condition: Optional[bool] = None,
+        signal: Optional[str] = None,
+        reason: Optional[str] = None,
+        error: Optional[BaseException] = None,
+        duration_ms: float = 0.0,
+    ) -> LoopHookEvent:
+        '''构造事件：`signal` / `reason` / `error` / ... 按需补上。'''
+        return LoopHookEvent(
+            point,
+            self,
+            context,
+            iteration=iteration,
+            condition=condition,
+            signal=signal,
+            reason=reason,
+            error=error,
+            duration_ms=duration_ms,
+        )
 
     # ---------------- 展示 ----------------
     def describe(self) -> str:
@@ -313,7 +347,13 @@ def While(  # noqa: N802
     condition: ConditionLike,
     *,
     max_iterations: Optional[int] = None,
-    hooks: Any = None,
+    hooks: Optional[
+        Union[
+            LoopHooks,
+            Mapping[Union[str, HookPoint], object],
+            Iterable[object],
+        ]
+    ] = None,
 ) -> WhileStep:
     '''构造 While 循环：`While(条件, ...).Do(步骤...)[.Hook(扩展点, 函数)]`。
 

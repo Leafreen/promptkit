@@ -27,8 +27,8 @@ from pydantic import BaseModel  # noqa: E402
 from promptkit.agent import Agent  # noqa: E402
 from promptkit.cautions import JSON_ONLY  # noqa: E402
 from promptkit.core import Echo, LLMStep, Prompt, Var, Workflow  # noqa: E402
-from promptkit.default_tools import WEB_SEARCH  # noqa: E402
-from promptkit.default_tools.web_search import SearchError, WebSearch  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH  # noqa: E402
+from promptkit.core.tool.builtin.web_search import SearchError, WebSearch  # noqa: E402
 
 DEFAULT_QUESTION = "Python 3.13 有哪些新特性？"
 

@@ -40,7 +40,7 @@ render = ["rich>=13", "sympy>=1.12"]
 
 # YamlFormatter 需要 pyyaml，其余地方零依赖
 yaml = ["pyyaml>=6"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "mypy>=1.10"]
 
 # src 布局：包位于 src/promptkit/，用 packages.find 自动发现全部子包
 #（含 core.steps.logics.expr_sys 这类深层子包）。
@@ -49,3 +49,17 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 promptkit = [".env.example"]
+
+# 类型检查基线：先「检查带注解的函数」，不强制所有函数都写注解。
+# 待 `docs/typing-any-audit.md` 的分批计划推进后再逐步收紧
+# （check_untyped_defs → disallow_untyped_defs → disallow_any_explicit）。
+[tool.mypy]
+python_version = "3.10"
+files = ["src/promptkit"]
+check_untyped_defs = false
+disallow_untyped_defs = false
+disallow_any_explicit = false
+ignore_missing_imports = true
+no_implicit_optional = true
+show_error_codes = true
+pretty = false

@@ -43,8 +43,27 @@ from promptkit.skill.orchestrate_skill import (
 from promptkit.skill.registry import SkillRegistry
 from promptkit.skill.schema import build_parameters, type_schema, validate_args
 from promptkit.skill.spec import Skill, SkillSpec, build_spec, skill
-from promptkit.skill.steps import SkillStep
-from promptkit.skill.tools import SkillTool, result_text
+
+# `SkillStep` 在 `core.steps.actions.skill`、工具视图在 `core.tool.skill`；
+# 延迟导入避免 `core` 与 `skill` 在包初始化时互相套圈。
+_LAZY = {
+    "SkillStep": ("promptkit.core.steps.actions.skill", "SkillStep"),
+    "SkillTool": ("promptkit.core.tool.skill", "SkillTool"),
+    "result_text": ("promptkit.core.tool.skill", "result_text"),
+}
+
+
+def __getattr__(name: str):
+    '''按需导入搬家到 core 的 Skill 步骤 / 工具。'''
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     # 定义

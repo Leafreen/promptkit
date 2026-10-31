@@ -29,7 +29,7 @@ import json
 import os
 import time
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from promptkit.memory.base import MemoryError, MemoryItem
 from promptkit.memory.vector import VectorStore, cosine
@@ -123,7 +123,7 @@ class FolderVectorStore(VectorStore):
                 except (KeyError, TypeError):
                     continue
 
-    def _append(self, payload: Dict[str, Any]) -> None:
+    def _append(self, payload: Dict[str, object]) -> None:
         line = json.dumps(payload, ensure_ascii=False) + "\n"
         try:
             with open(self.index_path, "a", encoding="utf-8", newline="\n") as handle:
@@ -238,7 +238,7 @@ class FolderVectorStore(VectorStore):
     def __enter__(self) -> "FolderVectorStore":
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.close()
 
     def __len__(self) -> int:

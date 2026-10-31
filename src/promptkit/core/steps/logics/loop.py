@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any, Callable, List, Optional, TYPE_CHECKING, Tuple
+from typing import (
+    Callable,
+    Iterable,
+    List,
+    Optional,
+    TYPE_CHECKING,
+    Tuple,
+    cast,
+)
 
 from promptkit.core.steps.logics.conditions import ConditionLike, as_condition
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
@@ -11,7 +19,7 @@ if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 m
 from promptkit.core.errors import BreakSignal, ContinueSignal, LoopLimitExceeded
 from promptkit.core.settings import settings
 from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr, as_expr
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import Step, StepLike, coerce_steps, execute_step
 
 
 # ====================== Break / Continue ======================
@@ -67,14 +75,14 @@ def run_loop_body(steps: Tuple[Step, ...], context: Context) -> Optional[str]:
     return None
 
 
-def _steps(value: Any) -> Tuple[Step, ...]:
+def _steps(value: object) -> Tuple[Step, ...]:
     '''允许传 None / 单个 Step / Step 列表。'''
     if value is None:
         return ()
-    return tuple(coerce_steps(value))
+    return tuple(coerce_steps(cast(StepLike, value)))
 
 
-def _check_limit(max_iterations: Any, name: str) -> None:
+def _check_limit(max_iterations: object, name: str) -> None:
     '''`None` 表示「用全局设置」，只有显式传值时才在这里检查。'''
     if max_iterations is None:
         return
@@ -126,7 +134,7 @@ class ForEachStep(Step):
         self.body = _steps(self.body)
         _check_limit(self.max_iterations, self.name)
 
-    def Do(self, *steps: Any) -> "ForEachStep":  # noqa: N802 - 跟随 DSL 命名
+    def Do(self, *steps: StepLike) -> "ForEachStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置循环体。'''
         return replace(self, body=tuple(coerce_steps(*steps)))
 
@@ -134,7 +142,7 @@ class ForEachStep(Step):
         limit = _limit(self.max_iterations, settings.max_for_iterations)
         values = self.iterable.eval(context)
         try:
-            iterator = iter(values)
+            iterator = iter(cast(Iterable[object], values))
         except TypeError:
             raise TypeError(
                 f"{self.name} 需要一个可迭代对象，得到 {type(values).__name__}"
@@ -160,7 +168,7 @@ class ForEachStep(Step):
 
 
 def ForEach(  # noqa: N802
-    var: str, iterable: Any, *, max_iterations: Optional[int] = None
+    var: str, iterable: object, *, max_iterations: Optional[int] = None
 ) -> ForEachStep:
     '''ForEach("i", range(1, 10)).Do(...)：遍历 range / 列表 / 表达式。
 
@@ -204,7 +212,7 @@ class ForStep(Step):
         )
         _check_limit(self.max_iterations, self.name)
 
-    def Do(self, *steps: Any) -> "ForStep":  # noqa: N802 - 跟随 DSL 命名
+    def Do(self, *steps: StepLike) -> "ForStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置循环体。'''
         return replace(self, body=tuple(coerce_steps(*steps)))
 
@@ -247,9 +255,9 @@ class ForStep(Step):
 
 
 def For(  # noqa: N802
-    init: Any = None,
+    init: Optional[StepLike] = None,
     condition: ConditionLike = True,
-    step: Any = None,
+    step: Optional[StepLike] = None,
     *,
     max_iterations: Optional[int] = None,
 ) -> ForStep:
@@ -258,9 +266,9 @@ def For(  # noqa: N802
     `max_iterations` 省略时用全局的 `settings.max_for_iterations`。
     '''
     return ForStep(
-        init=init,
+        init=cast(Tuple[Step, ...], init),
         condition=as_condition(condition),
-        step=step,
+        step=cast(Tuple[Step, ...], step),
         max_iterations=max_iterations,
     )
 
@@ -286,7 +294,7 @@ class DoWhileStep(Step):
         self.body = _steps(self.body)
         _check_limit(self.max_iterations, self.name)
 
-    def Do(self, *steps: Any) -> "DoWhileStep":  # noqa: N802 - 跟随 DSL 命名
+    def Do(self, *steps: StepLike) -> "DoWhileStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置循环体。'''
         return replace(self, body=tuple(coerce_steps(*steps)))
 

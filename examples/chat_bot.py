@@ -29,7 +29,7 @@ from promptkit.core import (  # noqa: E402
     Workflow,
     ExitWords,
 )
-from promptkit.default_tools import WEB_SEARCH  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "output")

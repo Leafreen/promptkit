@@ -22,7 +22,7 @@ from promptkit.core import (  # noqa: E402
     VarExpr,
     Workflow,
 )
-from promptkit.default_tools import RUN_COMMAND  # noqa: E402
+from promptkit.core.tool import RUN_COMMAND  # noqa: E402
 
 # RUN_COMMAND 的描述里带了当前系统和 shell 语法，
 # 所以模型不会跑去试 ls ~/Desktop

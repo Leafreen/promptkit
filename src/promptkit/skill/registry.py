@@ -17,7 +17,7 @@ from promptkit.skill.errors import (
 )
 from promptkit.skill.schema import validate_args
 from promptkit.skill.spec import Skill, SkillSpec, build_spec
-from promptkit.skill.tools import SkillTool
+from promptkit.core.tool.skill import SkillTool
 
 __all__ = ["SkillRegistry", "default_group"]
 

@@ -157,7 +157,7 @@ class PlanSpec:
 
     def step(self, **kwargs: Any) -> Any:
         '''包成 `ExecutePlan`，直接放进 `Workflow(...)`。'''
-        from promptkit.orchestrate.steps import ExecutePlan
+        from promptkit.core.steps.actions.orchestrate import ExecutePlan
 
         kwargs.setdefault("plan", self)
         return ExecutePlan(**kwargs)

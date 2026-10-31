@@ -1,4 +1,4 @@
-# coding/tools.py
+# core/tool/coding.py
 '''给 Agent 自主编码用的工具（`Tool` 包装）。
 
 和 `coding.io` 的步骤是同一批能力，区别在**谁决定调用**：
@@ -20,13 +20,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 from promptkit.coding.errors import CodingError
 from promptkit.coding.exec import run_command
 from promptkit.coding.io import apply_patch, format_hits
 from promptkit.coding.sandbox import CODING_LOGGER, Sandbox
-from promptkit.tools import Tool
+from promptkit.core.tool.base import Tool, ToolSchema
 
 __all__ = [
     "ReadFileTool",
@@ -48,8 +48,8 @@ class _CodingTool(Tool):
         *,
         name: str,
         description: str,
-        parameters: Dict[str, Any],
-        func: Any,
+        parameters: ToolSchema,
+        func: Callable[..., object],
         sandbox: Optional[Sandbox] = None,
         base_dir: str = ".",
         allow_write: bool = False,
@@ -67,7 +67,7 @@ class _CodingTool(Tool):
         )
 
     # 统一的错误出口：工具不抛异常，把错误文本交给模型自己处理
-    def _guard(self, action: str, actor: Any, **kwargs: Any) -> Any:
+    def _guard(self, action: str, actor: Callable[..., object], **kwargs: object) -> object:
         try:
             return actor(**kwargs)
         except CodingError as exc:
@@ -109,7 +109,7 @@ class ReadFileTool(_CodingTool):
             base_dir=base_dir,
         )
 
-    def run(self, path: str) -> Any:
+    def run(self, path: str) -> object:
         return self._guard("read", self._read, path=path)
 
     def _read(self, path: str) -> str:
@@ -143,7 +143,7 @@ class ListDirTool(_CodingTool):
             base_dir=base_dir,
         )
 
-    def run(self, path: str = ".", pattern: Optional[str] = None) -> Any:
+    def run(self, path: str = ".", pattern: Optional[str] = None) -> object:
         return self._guard("list", self._list, path=path, pattern=pattern)
 
     def _list(self, path: str = ".", pattern: Optional[str] = None) -> str:
@@ -187,7 +187,7 @@ class SearchCodeTool(_CodingTool):
             base_dir=base_dir,
         )
 
-    def run(self, query: str, glob: str = "*.py", context: int = 0) -> Any:
+    def run(self, query: str, glob: str = "*.py", context: int = 0) -> object:
         return self._guard(
             "search", self._search, query=query, glob=glob, context=context
         )
@@ -231,7 +231,7 @@ class WriteFileTool(_CodingTool):
             allow_write=allow_write,
         )
 
-    def run(self, path: str, content: str) -> Any:
+    def run(self, path: str, content: str) -> object:
         return self._guard("write", self._write, path=path, content=content)
 
     def _write(self, path: str, content: str) -> str:
@@ -276,10 +276,10 @@ class ApplyDiffTool(_CodingTool):
             allow_write=allow_write,
         )
 
-    def run(self, diff: str, path: Optional[str] = None) -> Any:
+    def run(self, diff: str, path: Optional[str] = None) -> object:
         return self._guard("apply", self._apply, diff=diff, path=path)
 
-    def _apply(self, diff: str, path: Optional[str] = None) -> Dict[str, Any]:
+    def _apply(self, diff: str, path: Optional[str] = None) -> Dict[str, object]:
         return apply_patch(self.sandbox, diff, path=path or None)
 
 
@@ -316,10 +316,10 @@ class RunCommandTool(_CodingTool):
             allow_commands=allow_commands,
         )
 
-    def run(self, command: str, cwd: Optional[str] = None) -> Any:
+    def run(self, command: str, cwd: Optional[str] = None) -> object:
         return self._guard("run", self._run, command=command, cwd=cwd)
 
-    def _run(self, command: str, cwd: Optional[str] = None) -> Dict[str, Any]:
+    def _run(self, command: str, cwd: Optional[str] = None) -> Dict[str, object]:
         return run_command(
             command,
             cwd=cwd,
@@ -355,7 +355,7 @@ class RunTestsTool(_CodingTool):
             allow_commands=allow_commands,
         )
 
-    def run(self) -> Any:
+    def run(self) -> object:
         result = self._guard("run_tests", self._run)
         if isinstance(result, dict):
             return (
@@ -365,7 +365,7 @@ class RunTestsTool(_CodingTool):
             )
         return result
 
-    def _run(self) -> Dict[str, Any]:
+    def _run(self) -> Dict[str, object]:
         return run_command(
             self.command, timeout=self.timeout, sandbox=self.sandbox
         )

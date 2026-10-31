@@ -1,13 +1,14 @@
-# skill/tools.py
-'''把 Skill 包成 `promptkit.tools.Tool`，这样 `Agent` 就能自己挑着调。'''
+# core/tool/skill.py
+'''把 Skill 包成 `Tool`，这样 `Agent` 就能自己挑着调。'''
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
-from promptkit.skill.errors import SkillError
-from promptkit.skill.schema import validate_args
-from promptkit.tools import Tool
+from promptkit.core.tool.base import Tool, ToolSchema
+
+if TYPE_CHECKING:  # 避免 core.tool -> skill -> core.tool 的运行时套圈
+    from promptkit.skill.spec import Skill
 
 __all__ = ["SkillTool", "result_text"]
 
@@ -19,22 +20,26 @@ class SkillTool(Tool):
         agent.ask("这句话是正面还是负面？", tools=[tool])
     '''
 
-    def __init__(self, skill: Any, *, ctx: Any, registry: Any = None):
+    def __init__(self, skill: "Skill", *, ctx: object, registry: object = None):
         self.skill = skill
         self.ctx = ctx
         self.registry = registry
         super().__init__(
             name=skill.name,
             description=skill.description,
-            parameters=skill.parameters,
+            parameters=cast(ToolSchema, skill.parameters),
             func=self.run,
         )
 
-    def run(self, **arguments: Any) -> str:
+    def run(self, **arguments) -> str:
         '''工具不抛异常：错误变成字符串交给模型自己处理。'''
+        # 延迟导入：`skill` 包本身会反过来引用本模块，模块级导入会套圈。
+        from promptkit.skill.errors import SkillError
+        from promptkit.skill.schema import validate_args
+
         try:
             if self.registry is not None:
-                result = self.registry.execute(
+                result = getattr(self.registry, "execute")(
                     self.skill.name, arguments, ctx=self.ctx
                 )
             else:
@@ -47,7 +52,8 @@ class SkillTool(Tool):
         return result_text(result)
 
 
-def result_text(result: Any) -> str:
+
+def result_text(result: object) -> str:
     '''工具结果统一成文本：Pydantic 转 JSON，别糊一层 `<Order object at ...>`。'''
     if isinstance(result, str):
         return result

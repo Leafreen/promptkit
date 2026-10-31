@@ -64,7 +64,7 @@ from promptkit.memory.budget import TokenBudget, estimate_tokens
 from promptkit.memory.config import WRITE_ON_VALUES, MemoryConfig, RecallConfig
 from promptkit.memory.kv import KVMemory
 from promptkit.memory.folder_store import FolderVectorStore
-from promptkit.memory.layered import LayeredMemory, long_term_memory
+from promptkit.memory.layered import LayeredMemory, as_memory, long_term_memory
 from promptkit.memory.paths import (
     DATA_DIR_ENV,
     default_data_dir,
@@ -81,13 +81,27 @@ from promptkit.memory.storage import (
     create_memory,
     register_memory_backend,
 )
-from promptkit.memory.tool import (
-    MEMORY_LOGGER,
-    MEMORY_REFERENCE,
-    RecallMemoryTool,
-    WRITE_MEMORY,
-    WriteMemoryTool,
-)
+# 记忆工具现在住 `core.tool.memory`；延迟导入避免 `core` 与 `memory`
+# 在包初始化时互相套圈。
+_LAZY = {
+    "RecallMemoryTool": ("promptkit.core.tool.memory", "RecallMemoryTool"),
+    "WriteMemoryTool": ("promptkit.core.tool.memory", "WriteMemoryTool"),
+    "MEMORY_REFERENCE": ("promptkit.core.tool.memory", "MEMORY_REFERENCE"),
+    "WRITE_MEMORY": ("promptkit.core.tool.memory", "WRITE_MEMORY"),
+    "MEMORY_LOGGER": ("promptkit.core.tool.memory", "MEMORY_LOGGER"),
+}
+
+
+def __getattr__(name: str):
+    '''按需导入搬家到 core 的记忆工具。'''
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
 from promptkit.memory.vector import (
     EmbeddingClient,
     InMemoryVectorStore,
@@ -116,6 +130,7 @@ __all__ = [
     "FolderVectorStore",
     "LayeredMemory",
     "long_term_memory",
+    "as_memory",
     # 存哪儿（存储位置抽象）
     "StorageConfig",
     "create_memory",

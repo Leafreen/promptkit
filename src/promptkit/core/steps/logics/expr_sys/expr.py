@@ -10,14 +10,27 @@ Python 不能重载 `and` / `or` / `not`，所以用 `&` / `|` / `~` 代替。
 from __future__ import annotations
 
 import operator
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, Protocol, cast
 
 from promptkit.core.errors import UndefinedVariable
 
 if TYPE_CHECKING:  # 只用于类型标注：运行时只对 context 做鸭子类型调用
     from promptkit.core.context import Context
 
-def _add(left: Any, right: Any) -> Any:
+
+class _Executable(Protocol):
+    '''只要能 `execute(context)` 就能被 `AgentReplyExpr` 驱动。'''
+
+    def execute(self, context: "Context") -> None: ...
+
+
+class _Subscriptable(Protocol):
+    '''运行时可下标取值的东西（list / dict / str / 自定义对象）。'''
+
+    def __getitem__(self, key: object) -> object: ...
+
+
+def _add(left: object, right: object) -> object:
     '''加法。沿用 Python 的语义（str + int 会报错），只是把报错说得更清楚。'''
     try:
         return operator.add(left, right)
@@ -29,8 +42,8 @@ def _add(left: Any, right: Any) -> Any:
         ) from None
 
 
-# 二元运算符表
-_BINOPS: Dict[str, Callable[[Any, Any], Any]] = {
+# 二元运算符表（运算符各自接受什么，只有运行时才知道）
+_BINOPS: Dict[str, Callable[..., object]] = {
     "==": operator.eq,
     "!=": operator.ne,
     "<": operator.lt,
@@ -46,8 +59,8 @@ _BINOPS: Dict[str, Callable[[Any, Any], Any]] = {
     "and": lambda a, b: bool(a) and bool(b),
     "or": lambda a, b: bool(a) or bool(b),
     # 成员判断。`in` 是 Python 关键字，写不成方法名，所以叫 `in_`
-    "in": lambda a, b: a in b,
-    "not in": lambda a, b: a not in b,
+    "in": lambda a, b: a in cast(Iterable[object], b),
+    "not in": lambda a, b: a not in cast(Iterable[object], b),
 }
 
 
@@ -57,73 +70,73 @@ class Expr:
     # 重载了 __eq__ 之后默认会变成不可哈希，这里显式恢复
     __hash__ = object.__hash__
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         raise NotImplementedError(f"{type(self).__name__} 没有实现 eval()")
 
     # ---------------- 比较 ----------------
-    def __eq__(self, other: Any) -> "BinaryExpr":  # type: ignore[override]
+    def __eq__(self, other: object) -> "BinaryExpr":  # type: ignore[override]
         return BinaryExpr("==", self, other)
 
-    def __ne__(self, other: Any) -> "BinaryExpr":  # type: ignore[override]
+    def __ne__(self, other: object) -> "BinaryExpr":  # type: ignore[override]
         return BinaryExpr("!=", self, other)
 
-    def __lt__(self, other: Any) -> "BinaryExpr":
+    def __lt__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("<", self, other)
 
-    def __le__(self, other: Any) -> "BinaryExpr":
+    def __le__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("<=", self, other)
 
-    def __gt__(self, other: Any) -> "BinaryExpr":
+    def __gt__(self, other: object) -> "BinaryExpr":
         return BinaryExpr(">", self, other)
 
-    def __ge__(self, other: Any) -> "BinaryExpr":
+    def __ge__(self, other: object) -> "BinaryExpr":
         return BinaryExpr(">=", self, other)
 
     # ---------------- 算术 ----------------
-    def __add__(self, other: Any) -> "BinaryExpr":
+    def __add__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("+", self, other)
 
-    def __sub__(self, other: Any) -> "BinaryExpr":
+    def __sub__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("-", self, other)
 
-    def __mul__(self, other: Any) -> "BinaryExpr":
+    def __mul__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("*", self, other)
 
-    def __truediv__(self, other: Any) -> "BinaryExpr":
+    def __truediv__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("/", self, other)
 
-    def __mod__(self, other: Any) -> "BinaryExpr":
+    def __mod__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("%", self, other)
 
     # 反向算术：让 `"前缀：" + Var("x")` 这种写法也能用
     # （str.__add__ 对 Expr 返回 NotImplemented，Python 会退回来找 __radd__）
-    def __radd__(self, other: Any) -> "BinaryExpr":
+    def __radd__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("+", other, self)
 
-    def __rsub__(self, other: Any) -> "BinaryExpr":
+    def __rsub__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("-", other, self)
 
-    def __rmul__(self, other: Any) -> "BinaryExpr":
+    def __rmul__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("*", other, self)
 
-    def __rtruediv__(self, other: Any) -> "BinaryExpr":
+    def __rtruediv__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("/", other, self)
 
-    def __rmod__(self, other: Any) -> "BinaryExpr":
+    def __rmod__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("%", other, self)
 
     # ---------------- 逻辑（替代 and / or / not）----------------
-    def __and__(self, other: Any) -> "BinaryExpr":
+    def __and__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("and", self, other)
 
-    def __or__(self, other: Any) -> "BinaryExpr":
+    def __or__(self, other: object) -> "BinaryExpr":
         return BinaryExpr("or", self, other)
 
     def __invert__(self) -> "UnaryExpr":
         return UnaryExpr("not", self)
 
     # ---------------- 钻进对象里 ----------------
-    def __getitem__(self, key: Any) -> "ItemExpr":
+    def __getitem__(self, key: object) -> "ItemExpr":
         '''`Var("xs")[0]` / `Var("d")["k"]` / `Var("xs")[1:3]`。'''
         return ItemExpr(self, key)
 
@@ -131,12 +144,12 @@ class Expr:
         '''取属性。Python 不允许重载 `.`，所以只能写成 `.attr("name")`。'''
         return AttrExpr(self, name)
 
-    def method(self, name: str, *args: Any, **kwargs: Any) -> "CallExpr":
+    def method(self, name: str, *args: object, **kwargs: object) -> "CallExpr":
         '''调用方法：`Var("s").method("replace", "a", "b")`。'''
         return CallExpr(AttrExpr(self, name), *args, **kwargs)
 
     # ---------------- 成员判断 ----------------
-    def in_(self, other: Any) -> "BinaryExpr":
+    def in_(self, other: object) -> "BinaryExpr":
         '''`Var("x").in_(["exit", "quit"])` —— 等价于 `x in [...]`。
 
         `in` 是 Python 关键字，没法当方法名，所以带下划线。
@@ -144,7 +157,7 @@ class Expr:
         '''
         return BinaryExpr("in", self, other)
 
-    def not_in(self, other: Any) -> "BinaryExpr":
+    def not_in(self, other: object) -> "BinaryExpr":
         '''`Var("x").not_in([...])`。'''
         return BinaryExpr("not in", self, other)
 
@@ -162,7 +175,7 @@ class Expr:
         )
 
 
-def as_expr(value: Any) -> Expr:
+def as_expr(value: object) -> Expr:
     '''把普通值包装成 Expr；已经是 Expr 就原样返回。'''
     if isinstance(value, Expr):
         return value
@@ -181,10 +194,10 @@ def as_expr(value: Any) -> Expr:
 class Const(Expr):
     '''字面量。'''
 
-    def __init__(self, value: Any):
+    def __init__(self, value: object):
         self.value = value
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         return self.value
 
     def __repr__(self) -> str:
@@ -203,7 +216,7 @@ class VarExpr(Expr):
             raise TypeError(f"变量名必须是非空字符串，得到 {var!r}")
         self.var = var
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         if self.var not in context and "." not in self.var:
             raise UndefinedVariable(
                 f"变量 {self.var!r} 未定义：请先用 NewVar({self.var!r}) 声明"
@@ -224,14 +237,14 @@ class VarExpr(Expr):
 class BinaryExpr(Expr):
     '''二元运算。'''
 
-    def __init__(self, op: str, left: Any, right: Any):
+    def __init__(self, op: str, left: object, right: object):
         if op not in _BINOPS:
             raise ValueError(f"不支持的运算符：{op!r}")
         self.op = op
         self.left = as_expr(left)
         self.right = as_expr(right)
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         return _BINOPS[self.op](self.left.eval(context), self.right.eval(context))
 
     def __repr__(self) -> str:
@@ -241,13 +254,13 @@ class BinaryExpr(Expr):
 class UnaryExpr(Expr):
     '''一元运算（目前只有 not）。'''
 
-    def __init__(self, op: str, operand: Any):
+    def __init__(self, op: str, operand: object):
         if op != "not":
             raise ValueError(f"不支持的一元运算符：{op!r}")
         self.op = op
         self.operand = as_expr(operand)
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         return not self.operand.eval(context)
 
     def __repr__(self) -> str:
@@ -264,13 +277,13 @@ class AgentReplyExpr(Expr):
     求值时才真正调用模型，所以在 While 循环里每轮都会重新执行。
     '''
 
-    def __init__(self, step: Any, key: str):
+    def __init__(self, step: object, key: str):
         if not hasattr(step, "execute"):
             raise TypeError("AgentReplyExpr 需要一个可执行的步骤")
-        self.step = step
+        self.step = cast(_Executable, step)
         self.key = key
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         self.step.execute(context)
         if self.key not in context:
             raise UndefinedVariable(
@@ -292,7 +305,7 @@ class CallExpr(Expr):
         Call(Var("callback"), 1)            # 函数本身也可以来自变量
     '''
 
-    def __init__(self, func: Any, *args: Any, **kwargs: Any):
+    def __init__(self, func: object, *args: object, **kwargs: object):
         if not callable(func) and not isinstance(func, Expr):
             raise TypeError(
                 f"Call 的第一个参数必须是可调用对象或表达式，得到 {func!r}"
@@ -302,7 +315,7 @@ class CallExpr(Expr):
         self.args = [as_expr(a) for a in args]
         self.kwargs = {k: as_expr(v) for k, v in kwargs.items()}
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         func = self.func.eval(context)
         if not callable(func):
             raise TypeError(f"{func!r} 不是可调用的")
@@ -322,12 +335,14 @@ class CallExpr(Expr):
 class ItemExpr(Expr):
     '''下标 / 切片：`Var("xs")[0]`、`Var("d")["k"]`、`Var("xs")[1:3]`。'''
 
-    def __init__(self, target: Any, key: Any):
+    def __init__(self, target: object, key: object):
         self.target = as_expr(target)
         self.key = as_expr(key)
 
-    def eval(self, context: Context) -> Any:
-        return self.target.eval(context)[self.key.eval(context)]
+    def eval(self, context: Context) -> object:
+        return cast(_Subscriptable, self.target.eval(context))[
+            self.key.eval(context)
+        ]
 
     def __repr__(self) -> str:
         return f"{self.target!r}[{self.key!r}]"
@@ -339,13 +354,13 @@ class AttrExpr(Expr):
     Python 不能重载 `.`，所以只能有这一种写法。
     '''
 
-    def __init__(self, target: Any, name: str):
+    def __init__(self, target: object, name: str):
         if not isinstance(name, str) or not name:
             raise TypeError(f"属性名必须是非空字符串，得到 {name!r}")
         self.target = as_expr(target)
         self.name = name
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         return getattr(self.target.eval(context), self.name)
 
     def __repr__(self) -> str:
@@ -372,12 +387,14 @@ class TemplateExpr(Expr):
         return repr(self.text)
 
 
-def Call(func: Callable, *args: Any, **kwargs: Any) -> CallExpr:  # noqa: N802
+def Call(  # noqa: N802
+    func: object, *args: object, **kwargs: object
+) -> CallExpr:
     '''把普通 Python 函数调用变成表达式：`Call(add, Var("a"), Var("b"))`。'''
     return CallExpr(func, *args, **kwargs)
 
 
-def Len(value: Any) -> CallExpr:  # noqa: N802
+def Len(value: object) -> CallExpr:  # noqa: N802
     '''长度：`Len(Var("items"))`，等价于 `Call(len, ...)`。
 
     不能做成 `len(expr)`：Python 的 len() 会立刻调用 __len__，

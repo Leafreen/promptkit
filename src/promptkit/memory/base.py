@@ -25,7 +25,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, TypeVar, cast
+
+from promptkit.types import JSONValue
+
+T = TypeVar("T")
 
 __all__ = [
     "Memory",
@@ -47,7 +51,7 @@ class MemoryError(RuntimeError):
     '''
 
 
-def item_text(item: Any) -> str:
+def item_text(item: object) -> str:
     '''从「一条召回结果」里取正文。
 
     召回结果可能是 `MemoryItem`、`dict`（`recall()` 的公开格式），
@@ -73,7 +77,7 @@ class MemoryItem:
     id: str
     text: str = ""
     vector: Optional[Sequence[float]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, JSONValue] = field(default_factory=dict)
     #: 召回时由存储层 / 重排器填上
     score: float = 0.0
 
@@ -84,9 +88,9 @@ class MemoryItem:
 
     def to_dict(
         self, *, include_metadata: bool = True, include_id: bool = True
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, object]:
         '''转成 `recall()` 的公开格式（普通 dict，能直接 JSON 序列化）。'''
-        data: Dict[str, Any] = {"text": self.text, "score": round(self.score, 4)}
+        data: Dict[str, object] = {"text": self.text, "score": round(self.score, 4)}
         if include_id:
             data["id"] = self.id
         if include_metadata:
@@ -114,15 +118,15 @@ class Memory(ABC):
 
     # ---------------- 必须实现 ----------------
     @abstractmethod
-    def read(self, key: str, default: Any = None) -> Any:
+    def read(self, key: str, default: object = None) -> object:
         '''按键读，没有就返回 `default`。'''
 
     @abstractmethod
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         '''按键写（覆盖）。'''
 
     # ---------------- 可选实现 ----------------
-    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, object]]:
         '''按语义召回，返回 `[{text, score, ...}, ...]`。
 
         默认抛 `NotImplementedError`：纯 KV 记忆没有「相似度」这回事。
@@ -149,7 +153,7 @@ class Memory(ABC):
         sentinel = object()
         return self.read(key, sentinel) is not sentinel
 
-    def get(self, key: str, default: Any = None) -> Any:
+    def get(self, key: str, default: object = None) -> object:
         '''`read` 的别名，方便当 Mapping 用。'''
         return self.read(key, default)
 
@@ -167,14 +171,16 @@ class InMemoryMemory(Memory):
     它不做任何序列化 —— 存进去是对象，取出来还是同一个对象。
     '''
 
-    def __init__(self, namespace: str = "default", initial: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self, namespace: str = "default", initial: Optional[Dict[str, object]] = None
+    ):
         self.namespace = str(namespace)
-        self._data: Dict[str, Any] = dict(initial or {})
+        self._data: Dict[str, object] = dict(initial or {})
 
-    def read(self, key: str, default: Any = None) -> Any:
+    def read(self, key: str, default: object = None) -> object:
         return self._data.get(str(key), default)
 
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         self._data[str(key)] = value
 
     def forget(self, key: str) -> bool:
@@ -183,7 +189,7 @@ class InMemoryMemory(Memory):
     def keys(self) -> List[str]:
         return list(self._data)
 
-    def items(self) -> Dict[str, Any]:
+    def items(self) -> Dict[str, object]:
         return dict(self._data)
 
     def clear(self) -> None:
@@ -194,11 +200,11 @@ class InMemoryMemory(Memory):
 
 
 #: `forget` / `has` 用的哨兵（和 `None` 区分开：值真的可以是 None）
-_MISSING: Any = object()
+_MISSING: object = object()
 
 
 def format_memories(
-    items: Sequence[Any],
+    items: Sequence[object],
     *,
     numbered: bool = True,
     with_score: bool = False,
@@ -231,16 +237,16 @@ def format_memories(
     return "\n".join(lines)
 
 
-def replace_item_text(item: Any, text: str) -> Any:
+def replace_item_text(item: T, text: str) -> T:
     '''截断后「同类型」地换掉正文（`TokenBudget` 用）。'''
     if isinstance(item, MemoryItem):
-        return replace(item, text=text)
+        return cast(T, replace(item, text=text))
     if isinstance(item, dict):
-        return {**item, "text": text}
-    return text
+        return cast(T, {**item, "text": text})
+    return cast(T, text)
 
 
-def empty(value: Any) -> bool:
+def empty(value: object) -> bool:
     '''值算不算「空」（写记忆前用它跳过空内容）。'''
     if value is None:
         return True

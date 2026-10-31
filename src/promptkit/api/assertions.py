@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional, Union, cast
 
 from promptkit.core.errors import WorkflowError
 from promptkit.core.steps.interface import Step
@@ -137,7 +137,7 @@ class Assertions:
         matched = [
             item
             for item in self._adapters
-            if (isinstance(item, adapter) if is_type else item is adapter)
+            if (isinstance(item, cast(type, adapter)) if is_type else item is adapter)
         ]
         for item in matched:
             self._adapters.remove(item)

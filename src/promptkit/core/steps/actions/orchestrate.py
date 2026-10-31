@@ -1,4 +1,4 @@
-# orchestrate/steps.py
+# core/steps/actions/orchestrate.py
 '''把编排接进工作流的三个 Step：
 
     PlanStep      需求 -> 计划（模板 or LLM）
@@ -8,7 +8,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+)
 
 from promptkit.core.event_sys.events import bus_of
 from promptkit.core.steps.interface import Step
@@ -20,6 +30,9 @@ from promptkit.orchestrate.plan_tool import PlanTool
 from promptkit.orchestrate.planner import coerce_planner
 from promptkit.orchestrate.task import Task, TaskResult, plan_from
 from promptkit.prompt import render_text
+
+if TYPE_CHECKING:  # 只用于类型标注
+    from promptkit.core.context import Context
 
 __all__ = [
     "PlanStep",
@@ -44,18 +57,18 @@ class PlanStep(Step):
         PlanStep(task=Var("usr_input"), planner=planner_agent, max_tasks=5)
     '''
 
-    task: Any = ""
+    task: object = ""
     #: `Planner` 实例 / 带 `plan()` 的对象 / `Agent`（会包成 `LLMPlanner`）
-    planner: Any = None
+    planner: object = None
     output_key: str = "plan"
     max_tasks: int = 5
     #: 规划时可以看的上下文键（别把整个 Context 塞进提示词）
     context_keys: Tuple[str, ...] = ()
-    tools: Optional[Sequence[Any]] = None
+    tools: Optional[Sequence[object]] = None
 
     name: str = "plan"
 
-    def execute(self, context: "Any") -> None:
+    def execute(self, context: "Context") -> None:
         task_text = _text_of(self.task, context)
         planner = coerce_planner(
             self.planner, max_tasks=self.max_tasks, tools=self.tools
@@ -63,6 +76,7 @@ class PlanStep(Step):
         materials = {
             key: context[key] for key in self.context_keys if key in context
         }
+        assert planner is not None  # allow_none=False 时 coerce_planner 不会返回 None
         plan = planner.plan(task_text, materials)
         context[self.output_key] = plan
         context.trace.append(f"{self.name}:{len(plan)}")
@@ -85,23 +99,23 @@ class PlanWithTool(Step):
     这里模型可以只聊不拆（`required=False`），也可以拆两次（`max_calls=2`）。
     '''
 
-    prompt: Any = ""
-    agent: Any = None
+    prompt: object = ""
+    agent: object = None
     #: `Tool` 产出的 `Plan` 放哪个 key（默认 "plan"）
     output_key: str = "plan"
     #: 模型这一步的自然语言回复放哪个 key
     reply_key: str = "plan_reply"
-    planner: Any = None
+    planner: object = None
     max_tasks: int = 5
     max_calls: int = 1
     context_keys: Tuple[str, ...] = ()
-    tools: Optional[Sequence[Any]] = None
+    tools: Optional[Sequence[object]] = None
     #: True = 模型没调规划工具就报错；False = 允许它只回话
     required: bool = True
 
     name: str = "plan_with_tool"
 
-    def execute(self, context: "Any") -> None:
+    def execute(self, context: "Context") -> None:
         if not str(self.prompt or "").strip():
             raise ValueError("PlanWithTool 需要 prompt=...：告诉模型什么时候该规划")
         agent = self.agent or context.get("agent")
@@ -119,7 +133,7 @@ class PlanWithTool(Step):
             max_calls=self.max_calls,
             context_keys=self.context_keys,
         )
-        reply = agent.ask(
+        reply = getattr(agent, "ask")(
             {"role": "user", "content": _text_of(self.prompt, context)},
             tools=[*(self.tools or []), tool],
         )
@@ -157,9 +171,9 @@ class ExecutePlan(Step):
     常见写法少一层包装；token 上限 / 超时 / 失败策略还是要 `config=`。
     '''
 
-    plan: Any = None
-    agent_factory: Optional[Callable[[Task], Any]] = None
-    agent: Any = None
+    plan: object = None
+    agent_factory: Optional[Callable[[Task], object]] = None
+    agent: object = None
     config: Optional[OrchestratorConfig] = None
     output_key: str = "task_results"
     result_key: str = "plan_result"
@@ -175,7 +189,7 @@ class ExecutePlan(Step):
 
     name: str = "execute_plan"
 
-    def execute(self, context: "Any") -> None:
+    def execute(self, context: "Context") -> None:
         spec = PlanSpec.from_dsl(_value_of(self.plan, context))
         plan = spec.to_plan()
         if self.config is not None and (
@@ -232,15 +246,15 @@ class AggregateStep(Step):
 
     results_key: str = "task_results"
     output_key: str = "final"
-    output_model: Any = None
-    agent: Any = None
-    tools: Optional[Sequence[Any]] = None
+    output_model: Optional[Type[object]] = None
+    agent: object = None
+    tools: Optional[Sequence[object]] = None
     instructions: str = "把这些子任务的结果合并成一份完整、不重复、不丢关键信息的答复。"
     max_chars: int = 8000
 
     name: str = "aggregate"
 
-    def execute(self, context: "Any") -> None:
+    def execute(self, context: "Context") -> None:
         results = context.get(self.results_key)
         if results is None:
             raise ValueError(
@@ -262,13 +276,13 @@ class AggregateStep(Step):
                 agent, prompt, self.output_model, tools=self.tools, bus=bus
             )
         else:
-            value = agent.ask(
+            value = getattr(agent, "ask")(
                 {"role": "user", "content": prompt}, tools=self.tools, bus=bus
             )
         context[self.output_key] = value
         context.trace.append(f"{self.name}:{len(items)}")
 
-    def _agent(self) -> Any:
+    def _agent(self) -> object:
         if self.agent is not None:
             return self.agent
         from promptkit.agent import Agent
@@ -288,11 +302,11 @@ class AggregateStep(Step):
 
 # ============================ 工具函数 ============================
 # `plan_from` 的唯一实现在 `orchestrate.task`（`Orchestrator` 与 `api` 共用），
-# 这里保留导出以维持旧的 `from promptkit.orchestrate.steps import plan_from`。
+# 这里保留导出以维持旧的 `from promptkit.orchestrate import plan_from`。
 
 
 def format_task_results(
-    results: Sequence[Any], *, max_chars: int = 8000
+    results: Sequence[object], *, max_chars: int = 8000
 ) -> str:
     '''把结果列表拼成给模型看的文本（带状态，失败/跳过也写进去）。'''
     blocks: List[str] = []
@@ -322,7 +336,7 @@ def format_task_results(
     return text
 
 
-def _as_result_dict(item: Any) -> Dict[str, Any]:
+def _as_result_dict(item: object) -> Dict[str, object]:
     if isinstance(item, TaskResult):
         return item.to_dict()
     if isinstance(item, Mapping):
@@ -330,18 +344,18 @@ def _as_result_dict(item: Any) -> Dict[str, Any]:
     return {"name": type(item).__name__, "status": "?", "output": item}
 
 
-def _text_of(value: Any, context: "Any") -> str:
+def _text_of(value: object, context: "Context") -> str:
     '''把 `task=` 参数变成文本：字符串当模板渲染，表达式求值。'''
     if isinstance(value, str):
         return render_text(
             value, {key: as_text(item) for key, item in context.to_dict().items()}
         )
     if hasattr(value, "eval"):
-        return as_text(value.eval(context))
+        return as_text(getattr(value, "eval")(context))
     return as_text(value)
 
 
-def _value_of(value: Any, context: "Any") -> Any:
+def _value_of(value: object, context: "Context") -> object:
     if hasattr(value, "eval"):
-        return value.eval(context)
+        return getattr(value, "eval")(context)
     return value

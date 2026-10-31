@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Callable, Tuple
+from typing import TYPE_CHECKING, Callable, Tuple, cast
 
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+from promptkit.core.steps.interface import (
+    Step,
+    StepLike,
+    coerce_steps,
+    execute_step,
+)
 from promptkit.core.steps.logics.conditions import ConditionLike, as_condition
 from promptkit.core.display_sys.tree import Node
 
@@ -42,7 +47,7 @@ class IfStep(Step):
         )
         self.else_steps = tuple(self.else_steps)
 
-    def Then(self, *steps: Any) -> "IfStep":  # noqa: N802 - 跟随 DSL 命名
+    def Then(self, *steps: StepLike) -> "IfStep":  # noqa: N802 - 跟随 DSL 命名
         '''设置最后一个分支的步骤。'''
         if not steps:
             raise ValueError("Then() 至少要有一个步骤")
@@ -54,9 +59,13 @@ class IfStep(Step):
 
     def ElseIf(self, condition: ConditionLike) -> "IfStep":  # noqa: N802
         '''前面都不成立时，再判断一个条件。'''
-        return replace(self, branches=self.branches + ((condition, ()),))
+        branch: Branch = (
+            as_condition(condition),
+            cast(Tuple[Step, ...], ()),
+        )
+        return replace(self, branches=self.branches + (branch,))
 
-    def Else(self, *steps: Any) -> "IfStep":  # noqa: N802 - 跟随 DSL 命名
+    def Else(self, *steps: StepLike) -> "IfStep":  # noqa: N802 - 跟随 DSL 命名
         '''所有分支都不成立时执行的步骤（可选）。'''
         return replace(self, else_steps=tuple(coerce_steps(*steps)))
 

@@ -27,6 +27,7 @@ from promptkit.core.steps.actions.memory import (
     ForgetMemory,
     MemoryStep,
     ReadMemory,
+    UseMemory,
     WriteMemory,
 )
 from promptkit.core.steps.actions.message import MessageStep
@@ -92,6 +93,7 @@ __all__ = [
     "WriteMemory",
     "ForgetMemory",
     "MemoryStep",
+    "UseMemory",
     # recall.py：语义召回
     "RecallMemory",
     "format_recalled",
@@ -124,5 +126,39 @@ __all__ = [
     "build_system_prompt",
     "save_format",
     "chat_context_vars",
-
+    # orchestrate.py / coding.py / skill.py：依赖上层包，按需导入
+    "PlanStep",
+    "PlanWithTool",
+    "ExecutePlan",
+    "AggregateStep",
+    "format_task_results",
+    "CodingStep",
+    "SkillStep",
 ]
+
+#: 这几类 Step 依赖上层包（orchestrate / skill / coding），只在真正取用时导入，
+#: 保证 `import promptkit.core` 不会把它们一起拖进来。
+_LAZY = {
+    "PlanStep": ("promptkit.core.steps.actions.orchestrate", "PlanStep"),
+    "PlanWithTool": ("promptkit.core.steps.actions.orchestrate", "PlanWithTool"),
+    "ExecutePlan": ("promptkit.core.steps.actions.orchestrate", "ExecutePlan"),
+    "AggregateStep": ("promptkit.core.steps.actions.orchestrate", "AggregateStep"),
+    "format_task_results": (
+        "promptkit.core.steps.actions.orchestrate",
+        "format_task_results",
+    ),
+    "CodingStep": ("promptkit.core.steps.actions.coding", "CodingStep"),
+    "SkillStep": ("promptkit.core.steps.actions.skill", "SkillStep"),
+}
+
+
+def __getattr__(name: str):
+    '''按需导入依赖上层包的那几类 Step。'''
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value

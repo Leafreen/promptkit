@@ -19,7 +19,7 @@ import re
 import sys
 import unicodedata
 from enum import IntEnum
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 __all__ = [
     "Verbosity",
@@ -204,12 +204,6 @@ _SUBSCRIPT = {
     "x": "ₓ",
 }
 
-#: 这些命令只是排版用的，直接丢掉
-_IGNORED = (
-    "left", "right", "displaystyle", "textstyle", "limits", "nolimits",
-    "quad", "qquad", "thinspace", "bigl", "bigr", "Bigl", "Bigr",
-    "mathstrut", "phantom", "mathrm", "mathit", "mathbf", "operatorname",
-)
 _IGNORED_SYMBOLS = ("\\,", "\\;", "\\!", "\\:", "\\ ", "~")
 
 _COMMAND = re.compile(r"\\([A-Za-z]+)")
@@ -329,10 +323,6 @@ def _rewrite_all(text: str, command: str, arity: int, build: Any) -> str:
 
 #: 多行环境（cases / matrix / aligned …）
 _ENVIRONMENT = re.compile(r"\\begin\{(\w+\*?)\}(.*?)\\end\{\1\}", re.S)
-_MULTILINE_ENVS = {
-    "cases", "matrix", "pmatrix", "bmatrix", "vmatrix", "aligned",
-    "align", "align*", "gathered", "gather", "split", "array", "eqnarray",
-}
 
 
 def _rewrite_environments(text: str) -> str:

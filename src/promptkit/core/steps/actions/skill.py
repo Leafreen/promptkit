@@ -1,4 +1,4 @@
-# skill/steps.py
+# core/steps/actions/skill.py
 '''`SkillStep`：在 DSL 工作流里调用一个 Skill。
 
 `FunctionStep` 是 Step（调用约定是 `func(context)`，只有一个参数），Skill 是
@@ -15,7 +15,14 @@
 '''
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    cast,
+)
 
 from promptkit.core.steps.interface import Step
 from promptkit.skill.context import SkillContext
@@ -51,14 +58,14 @@ class SkillStep(Step):
 
     def __init__(
         self,
-        skill: Any = None,
+        skill: object = None,
         *,
-        inputs: Optional[Mapping[str, Any]] = None,
+        inputs: Optional[Mapping[str, object]] = None,
         output_key: Optional[str] = None,
-        registry: Any = None,
-        ctx: Any = None,
+        registry: object = None,
+        ctx: object = None,
         name: str = "skill",
-        **arguments: Any,
+        **arguments,
     ):
         if skill is None:
             raise ValueError("SkillStep 需要 skill=...（Skill、函数，或注册表里的名字）")
@@ -68,10 +75,10 @@ class SkillStep(Step):
                 f"这些参数同时出现在 inputs= 和关键字里：{duplicated}；留一处就行"
             )
         self.skill = skill
-        self.inputs: Dict[str, Any] = {**dict(inputs or {}), **arguments}
+        self.inputs: Dict[str, object] = {**dict(inputs or {}), **arguments}
         self.output_key = output_key
         self.registry = registry
-        self.ctx = ctx
+        self.ctx: Optional[SkillContext] = cast(Optional[SkillContext], ctx)
         self.name = name
 
     # ---------------- 执行 ----------------
@@ -83,7 +90,7 @@ class SkillStep(Step):
         }
 
         if self.registry is not None:
-            result = self.registry.execute(
+            result = getattr(self.registry, "execute")(
                 skill.name, values, ctx=self._context(context)
             )
         else:
@@ -102,9 +109,9 @@ class SkillStep(Step):
                 raise SkillNotFound(
                     f"SkillStep 用名字 {self.skill!r} 调 Skill，但没给 registry="
                 )
-            return self.registry.get(self.skill)
+            return getattr(self.registry, "get")(self.skill)
         if callable(self.skill):
-            return Skill(build_spec(self.skill))
+            return Skill(build_spec(cast(Callable[..., object], self.skill)))
         raise TypeError(
             "SkillStep 的 skill 只能是 Skill / 函数 / 名字，"
             f"得到 {type(self.skill).__name__}"
@@ -124,7 +131,7 @@ class SkillStep(Step):
         return self.describe()
 
 
-def _short(value: Any) -> str:
+def _short(value: object) -> str:
     '''显示成 `text=source` 这种短样子（表达式就用它的变量名 / 表达式文本）。'''
     if isinstance(value, str):
         return repr(value)

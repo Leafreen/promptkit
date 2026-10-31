@@ -2,9 +2,20 @@ import locale
 import platform
 import subprocess
 
-from promptkit.tools import Tool
+from promptkit.core.tool.base import Tool
 
 DEFAULT_TIMEOUT = 30
+
+
+def _default_encoding() -> str:
+    '''本机编码；`locale.getencoding()` 只有 3.11+ 才有，老版本退回首选编码。
+
+    mypy 按 `python_version = "3.10"` 检查，所以不能直接写死调用。
+    '''
+    getencoding = getattr(locale, "getencoding", None)
+    if getencoding is not None:
+        return str(getencoding())
+    return locale.getpreferredencoding(False)
 
 
 def _decode(raw: bytes) -> str:
@@ -16,7 +27,7 @@ def _decode(raw: bytes) -> str:
     '''
     if not raw:
         return ""
-    for encoding in ("utf-8", locale.getencoding(), "gbk"):
+    for encoding in ("utf-8", _default_encoding(), "gbk"):
         if not encoding:
             continue
         try:

@@ -34,10 +34,21 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from promptkit.skill.errors import SkillValidationError
-from promptkit.tools import Tool
+from promptkit.core.tool import Tool
+from promptkit.core.tool.base import ToolSchema
 
 __all__ = ["MarkdownSkillTool", "as_skill", "as_skills"]
 
@@ -79,7 +90,7 @@ class MarkdownSkillTool(Tool):
         super().__init__(
             name=name,
             description=description,
-            parameters=parameters,
+            parameters=cast(ToolSchema, parameters),
             func=self.run,
         )
 

@@ -21,10 +21,11 @@ import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from promptkit.memory.base import Memory, MemoryError, MemoryItem, empty
 from promptkit.memory.budget import TokenBudget
+from promptkit.types import JSONValue
 
 __all__ = [
     "EmbeddingClient",
@@ -173,7 +174,7 @@ def cosine(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (math.sqrt(left_norm) * math.sqrt(right_norm))
 
 
-def _as_text(value: Any) -> str:
+def _as_text(value: object) -> str:
     '''写进向量记忆的内容统一成文本（dict / pydantic 转 JSON）。'''
     if isinstance(value, str):
         return value
@@ -286,7 +287,7 @@ class VectorMemory(Memory):
         max_age: Optional[float] = None,
         decay_half_life: Optional[float] = None,
         min_score: Optional[float] = 0.0,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, JSONValue]] = None,
     ):
         if embed_client is None:
             raise ValueError("VectorMemory 需要 embed_client（EmbeddingClient 实例）")
@@ -313,13 +314,13 @@ class VectorMemory(Memory):
         #: 想让阈值更严就设 0.2 / 0.3，`None` 表示什么都留
         self.min_score = min_score
         #: 每条记录都带上的固定 metadata（`{"source": "notes", "owner": "u1"}`）
-        self.metadata: Dict[str, Any] = dict(metadata or {})
+        self.metadata: Dict[str, JSONValue] = dict(metadata or {})
 
         # 构造时就校验 chunk 参数，别等第一次 write 才炸
         chunk_text("x", self.chunk_size, self.overlap)
 
     # ---------------- 写 ----------------
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         '''把一条内容切块后写进去；同 key 重写会**覆盖**旧的所有 chunk。'''
         key = str(key)
         text = _as_text(value)
@@ -358,7 +359,7 @@ class VectorMemory(Memory):
             )
 
     # ---------------- 读 / 遗忘 ----------------
-    def read(self, key: str, default: Any = None) -> Any:
+    def read(self, key: str, default: object = None) -> object:
         '''向量记忆不支持按键读原文（原文已经切块了）。'''
         raise NotImplementedError(
             "VectorMemory 没有 read()：内容被切成 chunk 了，读不回原文。"
@@ -370,7 +371,7 @@ class VectorMemory(Memory):
         return self.store.delete(self.namespace, key=str(key)) > 0
 
     # ---------------- 召回 ----------------
-    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, object]]:
         '''粗排 -> （可选）重排 -> （可选）预算裁剪 -> 公开格式。'''
         query = "" if query is None else str(query).strip()
         if not query:
@@ -442,7 +443,7 @@ class VectorMemory(Memory):
     def __enter__(self) -> "VectorMemory":
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.close()
 
     def __repr__(self) -> str:
@@ -454,7 +455,7 @@ class VectorMemory(Memory):
         return f"<VectorMemory {' '.join(bits)}>"
 
 
-def _timestamp(raw: Any, fallback: float) -> float:
+def _timestamp(raw: object, fallback: float) -> float:
     '''metadata["ts"] 可能是 float、字符串、甚至没有 —— 都要能算。'''
     try:
         value = float(raw)  # type: ignore[arg-type]

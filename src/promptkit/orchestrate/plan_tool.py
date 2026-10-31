@@ -21,7 +21,7 @@ from promptkit.orchestrate.agents import as_text
 from promptkit.orchestrate.errors import ErrorCode, PlanError
 from promptkit.orchestrate.planner import coerce_planner
 from promptkit.orchestrate.task import Plan
-from promptkit.tools import Tool
+from promptkit.core.tool import Tool
 
 __all__ = ["PlanTool"]
 
@@ -140,6 +140,7 @@ class PlanTool(Tool):
             max_tasks=self.max_tasks,
             tools=self.tools,
         )
+        assert planner is not None  # allow_none=False 时 coerce_planner 不会返回 None
         plan: Plan = planner.plan(text, self._materials(context_keys))
         self.used += 1
         self.plan = plan

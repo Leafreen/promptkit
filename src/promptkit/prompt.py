@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Dict, List, Mapping
 import re
 
 # 可用的提示词角色
@@ -28,7 +28,7 @@ _VAR_PATTERN = re.compile(
 _BRACE_PATTERN = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
 
 
-def _walk(value: Any, part: str, full_key: str) -> Any:
+def _walk(value: object, part: str, full_key: str) -> object:
     '''从对象 / 字典 / 列表里取出一个路径片段。'''
     if isinstance(value, dict):
         if part in value:
@@ -49,7 +49,7 @@ def _walk(value: Any, part: str, full_key: str) -> Any:
     )
 
 
-def resolve_variable(key: str, variables: Dict[str, Any]) -> Any:
+def resolve_variable(key: str, variables: Mapping[str, object]) -> object:
     '''按名字取变量，支持点路径。
 
     `key` 精确命中就用它（所以真的有个 key 叫 "a.b" 也不会被拆开）；
@@ -65,7 +65,7 @@ def resolve_variable(key: str, variables: Dict[str, Any]) -> Any:
     if "." in key:
         head, _, rest = key.partition(".")
         if head in variables:
-            value: Any = variables[head]
+            value: object = variables[head]
             for part in rest.split("."):
                 if part:
                     value = _walk(value, part, key)
@@ -76,7 +76,7 @@ def resolve_variable(key: str, variables: Dict[str, Any]) -> Any:
 
 
 def render_text(
-    text: str, variables: Dict[str, Any], *, allow_dollar: bool = True
+    text: str, variables: Mapping[str, object], *, allow_dollar: bool = True
 ) -> str:
     '''把文本里的变量占位符替换成变量的值。
 
@@ -120,7 +120,7 @@ class Prompt:
     role: str
     content: str
 
-    def render(self, **kwargs: Any) -> Dict[str, str]:
+    def render(self, **kwargs: object) -> Dict[str, str]:
         '''渲染该对象，返回支持的消息格式。'''
         if self.role not in SUPPORTED_ROLES:
             raise ValueError(
@@ -128,11 +128,11 @@ class Prompt:
             )
         return {"role": self.role, "content": render_text(self.content, kwargs)}
 
-    def _render_text(self, text: str, kwargs: Dict[str, Any]) -> str:
+    def _render_text(self, text: str, kwargs: Mapping[str, object]) -> str:
         '''渲染文本，替换其中的变量占位符。'''
         return render_text(text, kwargs)
 
 
-def render_messages(prompts: List[Prompt], **kwargs: Any) -> List[Dict[str, str]]:
+def render_messages(prompts: List[Prompt], **kwargs: object) -> List[Dict[str, str]]:
     '''批量渲染多个 Prompt，返回消息列表。'''
     return [p.render(**kwargs) for p in prompts]

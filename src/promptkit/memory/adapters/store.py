@@ -27,27 +27,49 @@ from __future__ import annotations
 import json
 import urllib.parse
 import uuid
-from typing import Any, Dict, List, Optional, Sequence
+from typing import (
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Union,
+    cast,
+)
 
 from promptkit.memory.base import MemoryItem
 from promptkit.memory.vector import InMemoryVectorStore, VectorStore
+from promptkit.types import JSONValue
 
 __all__ = ["InMemoryVectorStore", "ChromaVectorStore", "QdrantVectorStore"]
 
 
-def _scalarize(metadata: Dict[str, Any]) -> Dict[str, Any]:
+def _scalarize(metadata: Mapping[str, JSONValue]) -> Dict[str, JSONValue]:
     '''Chroma / Qdrant 的 metadata 只放标量；复杂值 JSON 成字符串。
 
     干脆丢掉不是不行，但「写进去的元数据查不出来」更难排查 ——
     至少留一个能看的字符串。
     '''
-    result: Dict[str, Any] = {}
+    result: Dict[str, JSONValue] = {}
     for key, value in (metadata or {}).items():
         if isinstance(value, (str, int, float, bool)) or value is None:
             result[str(key)] = value
         else:
             result[str(key)] = json.dumps(value, ensure_ascii=False)
     return result
+
+
+class _ChromaCollection(Protocol):
+    '''`chromadb` Collection 的鸭子类型（只列出我们用到的四个方法）。'''
+
+    def upsert(self, **kwargs: object) -> object: ...
+
+    def query(self, **kwargs: object) -> object: ...
+
+    def delete(self, **kwargs: object) -> object: ...
+
+    def get(self, **kwargs: object) -> object: ...
 
 
 class ChromaVectorStore(VectorStore):
@@ -65,10 +87,10 @@ class ChromaVectorStore(VectorStore):
     别拿去跟阈值比。
     '''
 
-    def __init__(self, collection: Any):
+    def __init__(self, collection: object):
         if collection is None:
             raise ValueError("ChromaVectorStore 需要 chromadb 的 Collection 实例")
-        self.collection = collection
+        self.collection = cast(_ChromaCollection, collection)
 
     @classmethod
     def at(
@@ -102,6 +124,7 @@ class ChromaVectorStore(VectorStore):
         else:
             from promptkit.memory.paths import expand_path
 
+            assert path is not None  # 上面已校验：path / url 至少给一个
             client = chromadb.PersistentClient(path=expand_path(path))
         # cosine 必须在这里指定：默认是 l2，score 就不是「相似度」了
         return cls(
@@ -128,10 +151,11 @@ class ChromaVectorStore(VectorStore):
             where={"namespace": str(namespace)},
             include=["documents", "metadatas", "distances"],
         )
-        ids = (result.get("ids") or [[]])[0]
-        documents = (result.get("documents") or [[]])[0]
-        metadatas = (result.get("metadatas") or [[]])[0]
-        distances = (result.get("distances") or [[]])[0]
+        payload = result if isinstance(result, Mapping) else {}
+        ids = (payload.get("ids") or [[]])[0]
+        documents = (payload.get("documents") or [[]])[0]
+        metadatas = (payload.get("metadatas") or [[]])[0]
+        distances = (payload.get("distances") or [[]])[0]
 
         items: List[MemoryItem] = []
         for index, item_id in enumerate(ids):
@@ -162,18 +186,20 @@ class ChromaVectorStore(VectorStore):
                 self.collection.delete(ids=target)
             return len(target)
 
-        where: Dict[str, Any] = {"namespace": str(namespace)}
+        where: Dict[str, JSONValue] = {"namespace": str(namespace)}
         if key is not None:
             where["key"] = str(key)
         found = self.collection.get(where=where, include=[])
-        target = [str(item) for item in (found or {}).get("ids") or []]
+        records = found if isinstance(found, Mapping) else {}
+        target = [str(item) for item in (records.get("ids") or [])]
         if target:
             self.collection.delete(ids=target)
         return len(target)
 
     def count(self, namespace: str) -> int:
         found = self.collection.get(where={"namespace": str(namespace)}, include=[])
-        return len((found or {}).get("ids") or [])
+        records = found if isinstance(found, Mapping) else {}
+        return len(records.get("ids") or [])
 
     def clear(self, namespace: str) -> None:
         self.delete(str(namespace))
@@ -181,6 +207,32 @@ class ChromaVectorStore(VectorStore):
     def __repr__(self) -> str:
         name = getattr(self.collection, "name", "collection")
         return f"<ChromaVectorStore {name!r}>"
+
+
+class _QdrantModels(Protocol):
+    '''`qdrant_client.models` 模块的鸭子类型（只用到这里几个构造函数）。'''
+
+    def PointStruct(self, **kwargs: object) -> object: ...
+
+    def Filter(self, **kwargs: object) -> object: ...
+
+    def FieldCondition(self, **kwargs: object) -> object: ...
+
+    def MatchValue(self, **kwargs: object) -> object: ...
+
+    def HasIdCondition(self, **kwargs: object) -> object: ...
+
+
+class _QdrantClient(Protocol):
+    '''`qdrant_client.QdrantClient` 的鸭子类型。'''
+
+    def upsert(self, **kwargs: object) -> object: ...
+
+    def search(self, **kwargs: object) -> object: ...
+
+    def delete(self, **kwargs: object) -> object: ...
+
+    def count(self, **kwargs: object) -> object: ...
 
 
 class QdrantVectorStore(VectorStore):
@@ -201,12 +253,16 @@ class QdrantVectorStore(VectorStore):
     `models=` 是为了测试 / 依赖注入：不传就 `import qdrant_client.models`。
     '''
 
-    def __init__(self, client: Any, collection_name: str, *, models: Any = None):
+    def __init__(
+        self, client: object, collection_name: str, *, models: object = None
+    ):
         if client is None:
             raise ValueError("QdrantVectorStore 需要 QdrantClient 实例")
-        self.client = client
+        self.client = cast(_QdrantClient, client)
         self.collection_name = str(collection_name)
-        self.models = models if models is not None else _qdrant_models()
+        self.models: _QdrantModels = (
+            cast(_QdrantModels, models) if models is not None else _qdrant_models()
+        )
 
     def upsert(self, namespace: str, item: MemoryItem) -> None:
         payload = {
@@ -271,9 +327,9 @@ class QdrantVectorStore(VectorStore):
             count_filter=self._condition(namespace),
             exact=True,
         )
-        return int(getattr(result, "count", result) or 0)
+        return int(cast(Union[str, int, float], getattr(result, "count", result) or 0))
 
-    def _condition(self, namespace: str, key: Optional[str] = None) -> Any:
+    def _condition(self, namespace: str, key: Optional[str] = None) -> object:
         must = [
             self.models.FieldCondition(
                 key="namespace",
@@ -297,7 +353,7 @@ def _point_id(raw: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, str(raw)))
 
 
-def _from_point(point: Any) -> MemoryItem:
+def _from_point(point: object) -> MemoryItem:
     payload = dict(getattr(point, "payload", None) or {})
     text = payload.pop("text", "")
     payload.pop("namespace", None)
@@ -309,11 +365,11 @@ def _from_point(point: Any) -> MemoryItem:
     )
 
 
-def _qdrant_models() -> Any:
+def _qdrant_models() -> _QdrantModels:
     try:
         from qdrant_client import models
     except ImportError:
         raise ImportError(
             "QdrantVectorStore 需要 qdrant-client：pip install qdrant-client"
         ) from None
-    return models
+    return cast(_QdrantModels, models)

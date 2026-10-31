@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from promptkit.core._missing import MISSING
 from promptkit.core.steps.interface import Step, execute_step
@@ -32,11 +32,17 @@ if TYPE_CHECKING:  # 只用于类型标注：运行时用鸭子类型，core 不
     from promptkit.core.context import Context
     from promptkit.memory.budget import TokenBudget
 
-__all__ = ["ReadMemory", "WriteMemory", "ForgetMemory", "MemoryStep"]
+__all__ = [
+    "ReadMemory",
+    "WriteMemory",
+    "ForgetMemory",
+    "MemoryStep",
+    "UseMemory",
+]
 
 
 # ============================ 小工具 ============================
-def _key_of(key: Any, context: Context) -> str:
+def _key_of(key: object, context: Context) -> str:
     '''键可以写死，也可以用表达式算（`Var("who") + "_level"`）。'''
     value = key.eval(context) if isinstance(key, Expr) else key
     if value is None:
@@ -44,12 +50,12 @@ def _key_of(key: Any, context: Context) -> str:
     return str(value)
 
 
-def _value_of(value: Any, context: Context) -> Any:
+def _value_of(value: object, context: Context) -> object:
     '''值是表达式就求值，否则原样（字面量就是字面量）。'''
     return value.eval(context) if isinstance(value, Expr) else value
 
 
-def _as_list(items: Any) -> List[Any]:
+def _as_list(items: object) -> List[object]:
     '''`read="level"` 和 `read=["level"]` 都当列表。'''
     if items is None:
         return []
@@ -60,14 +66,14 @@ def _as_list(items: Any) -> List[Any]:
     return [items]
 
 
-def _memory_label(memory: Any) -> str:
+def _memory_label(memory: object) -> str:
     '''步骤树里怎么显示这个记忆。'''
     namespace = getattr(memory, "namespace", "")
     name = type(memory).__name__
     return f"{name}({namespace})" if namespace else name
 
 
-def _require(memory: Any, method: str, step: str) -> None:
+def _require(memory: object, method: str, step: str) -> None:
     '''构造时就检查记忆有没有这个方法，别等跑起来才 AttributeError。'''
     if not callable(getattr(memory, method, None)):
         raise TypeError(
@@ -88,11 +94,11 @@ class ReadMemory(Step):
     「第一次来」而炸掉，你可以用 `If(Var("level") == None)` 走新手分支。
     '''
 
-    memory: Any
-    key: Any
+    memory: object
+    key: object
     #: 写进哪个变量；省略就用键名
     output_key: Optional[str] = None
-    default: Any = None
+    default: object = None
 
     name: str = "read_memory"
 
@@ -101,7 +107,7 @@ class ReadMemory(Step):
 
     def execute(self, context: Context) -> None:
         key = _key_of(self.key, context)
-        value = self.memory.read(key, self.default)
+        value = getattr(self.memory, "read")(key, self.default)
         context[self.output_key or key] = value
         context.trace.append(f"{self.name}:{key}")
 
@@ -129,10 +135,10 @@ class WriteMemory(Step):
     上次记的值清成 None。
     '''
 
-    memory: Any
-    key: Any
+    memory: object
+    key: object
     #: 要写的值（表达式或字面量）；和 `from_key` 二选一
-    value: Any = MISSING
+    value: object = MISSING
     #: 从 Context 的哪个变量取值
     from_key: Optional[str] = None
     #: `"skip"` 变量不存在就跳过 / `"write"` 写 None
@@ -165,7 +171,7 @@ class WriteMemory(Step):
         else:
             value = _value_of(self.value, context)
 
-        self.memory.write(key, value)
+        getattr(self.memory, "write")(key, value)
         context.trace.append(f"{self.name}:{key}")
 
     def describe(self) -> str:
@@ -186,8 +192,8 @@ class ForgetMemory(Step):
     「可遗忘」是记忆系统的基本要求：写进去的东西必须能删掉。
     '''
 
-    memory: Any
-    key: Any
+    memory: object
+    key: object
 
     name: str = "forget_memory"
 
@@ -196,7 +202,7 @@ class ForgetMemory(Step):
 
     def execute(self, context: Context) -> None:
         key = _key_of(self.key, context)
-        removed = bool(self.memory.forget(key))
+        removed = bool(getattr(self.memory, "forget")(key))
         context.trace.append(f"{self.name}:{key}:{'ok' if removed else 'miss'}")
 
     def describe(self) -> str:
@@ -222,13 +228,13 @@ class MemoryStep(Step):
     把「开跑前读」「每轮召回」「结束时写」放在三个位置。
     '''
 
-    memory: Any
+    memory: object
     #: 要读的键名（或现成的 `ReadMemory`）
-    read: Sequence[Any] = ()
+    read: Sequence[object] = ()
     #: `RecallConfig` / dict / 现成的 `RecallMemory`
-    recall: Any = None
+    recall: object = None
     #: 要写的键名（或现成的 `WriteMemory`）；`(键, 变量名)` 可以分开指定
-    write: Sequence[Any] = ()
+    write: Sequence[object] = ()
     #: 给召回用的预算（`RecallConfig.budget` 优先）
     budget: Optional["TokenBudget"] = None
     #: 变量不存在时：`"skip"` 跳过 / `"write"` 写 None
@@ -263,7 +269,7 @@ class MemoryStep(Step):
 
         return steps
 
-    def _recall_step(self, recall: Any) -> Step:
+    def _recall_step(self, recall: object) -> Step:
         from promptkit.memory.config import RecallConfig
 
         from promptkit.core.steps.actions.recall import RecallMemory
@@ -287,7 +293,7 @@ class MemoryStep(Step):
             f"得到 {type(recall).__name__}"
         )
 
-    def _write_step(self, entry: Any) -> Step:
+    def _write_step(self, entry: object) -> Step:
         if isinstance(entry, WriteMemory):
             return entry
         if isinstance(entry, (tuple, list)) and len(entry) == 2:
@@ -315,3 +321,93 @@ class MemoryStep(Step):
         if writes:
             bits.append(f"write={writes}")
         return f"MemoryStep({_memory_label(self.memory)}, {', '.join(bits)})"
+
+
+class UseMemory(Step):
+    '''链式写法：`UseMemory(mem).Read(...).Recall(...).Write(...)`。
+
+        UseMemory(memory).Read("level", "goal").Recall("usr_input").Write(
+            "topics_covered"
+        )
+
+    和 `MemoryStep(read=..., recall=..., write=...)` 完全等价 —— 只是把
+    关键字参数换成链式调用，方便手写 `Workflow` 时读起来像一句话。
+    真正执行时仍是编译出来的 `ReadMemory` / `RecallMemory` / `WriteMemory`，
+    所以步骤树、事件、trace 都和 `MemoryStep` 一致。
+
+    `memory` 接收 Memory / 路径 / 命名空间，和 `MEMORY_REFERENCE` /
+    `WRITE_MEMORY` / `Compact(...).To(...)` 一致：
+
+        UseMemory("data/tutor.db").Read("level")
+    '''
+
+    name = "use_memory"
+
+    def __init__(self, memory: object):
+        # 路径 / 命名空间要在这里落成记忆对象；延迟导入，core 不硬依赖 memory 包
+        from promptkit.memory.layered import as_memory
+
+        self.memory = as_memory(memory)
+        self._read: List[object] = []
+        self._recall: object = None
+        self._write: List[object] = []
+        self._steps: Optional[Tuple[Step, ...]] = None
+
+    # ---------------- DSL ----------------
+    def Read(self, *keys: object) -> "UseMemory":  # noqa: N802 - 跟随 DSL 命名
+        '''按键读，键名同时就是 Context 变量名。'''
+        _require(self.memory, "read", "UseMemory.Read")
+        self._read.extend(keys)
+        self._steps = None
+        return self
+
+    def Recall(
+        self, query_key: str, output_key: str = "related"
+    ) -> "UseMemory":  # noqa: N802 - 跟随 DSL 命名
+        '''按 `query_key` 做语义召回，结果写进 `output_key`。'''
+        _require(self.memory, "recall", "UseMemory.Recall")
+        self._recall = {"query_key": query_key, "output_key": output_key}
+        self._steps = None
+        return self
+
+    def Write(self, *keys: object) -> "UseMemory":  # noqa: N802 - 跟随 DSL 命名
+        '''写回长期记忆；`("键", "变量名")` 可以分开指定。'''
+        _require(self.memory, "write", "UseMemory.Write")
+        self._write.extend(keys)
+        self._steps = None
+        return self
+
+    # ---------------- 执行 ----------------
+    def _compile(self) -> Tuple[Step, ...]:
+        if self._steps is None:
+            if not (self._read or self._recall or self._write):
+                raise ValueError(
+                    "UseMemory 至少要链一个 Read() / Recall() / Write()；"
+                    "什么都不做请用 SkipStep()"
+                )
+            step = MemoryStep(
+                self.memory,
+                read=self._read,
+                recall=self._recall,
+                write=self._write,
+            )
+            self._steps = tuple(step.steps)
+        return self._steps
+
+    def execute(self, context: Context) -> None:
+        for step in self._compile():
+            execute_step(step, context)
+        context.trace.append(self.name)
+
+    def children(self) -> List[Step]:
+        return list(self._compile())
+
+    def describe(self) -> str:
+        bits: List[str] = []
+        if self._read:
+            bits.append(f"read={len(self._read)}")
+        if self._recall is not None:
+            bits.append("recall")
+        if self._write:
+            bits.append(f"write={len(self._write)}")
+        return f"UseMemory({_memory_label(self.memory)}, {', '.join(bits)})"

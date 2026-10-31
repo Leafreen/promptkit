@@ -1,10 +1,11 @@
 # executor.py
 '''把 Prompt 交给 Agent 执行，并把模型输出解析成 Pydantic 对象。'''
 import json
-from typing import Any, Optional, Sequence, Type
+from typing import Optional, Sequence, Tuple, Type, Union
 
 from pydantic import BaseModel, ValidationError
 
+from promptkit.core.event_sys import EventBus
 from promptkit.core.model_action.caution_related.formatter import (
     Formatter,
     FormatterError,
@@ -12,6 +13,7 @@ from promptkit.core.model_action.caution_related.formatter import (
 )
 from promptkit.core.settings import settings
 from promptkit.prompt import Prompt
+from promptkit.types import AgentLike, JSONValue, ToolLike
 
 
 class OutputValidationError(FormatterError):
@@ -23,12 +25,12 @@ class MaxRetriesExceeded(Exception):
 
 
 def run_structured(
-    agent: Any,
+    agent: AgentLike,
     text: str,
     output_model: Type[BaseModel],
     *,
-    tools: Optional[Sequence[Any]] = None,
-    bus: Any = None,
+    tools: Optional[Sequence[ToolLike]] = None,
+    bus: Optional[EventBus] = None,
     max_retries: Optional[int] = None,
 ) -> BaseModel:
     '''把一段**已经是数据**的文本发给 agent，解析成 `output_model`。
@@ -67,25 +69,27 @@ class Executor:
 
     def __init__(
         self,
-        agent: Any,
+        agent: AgentLike,
         max_retries: int = 2,
-        formatter: Any = None,
+        formatter: Optional[Union[Formatter, str]] = None,
     ):
         self.agent = agent
         self.max_retries = max_retries
         self.formatter = formatter
 
-    def _resolve_formatter(self, formatter: Any = None) -> Formatter:
+    def _resolve_formatter(
+        self, formatter: Optional[Union[Formatter, str]] = None
+    ) -> Formatter:
         return get_formatter(self.formatter if formatter is None else formatter)
 
     def run(
         self,
         prompt: Prompt,
         output_model: Type[BaseModel],
-        tools: Optional[Sequence[Any]] = None,
-        bus: Optional[Any] = None,
-        formatter: Any = None,
-        **kwargs: Any,
+        tools: Optional[Sequence[ToolLike]] = None,
+        bus: Optional[EventBus] = None,
+        formatter: Optional[Union[Formatter, str]] = None,
+        **kwargs: object,
     ) -> BaseModel:
         '''运行一个 Prompt，返回一个 BaseModel 对象。
 
@@ -121,7 +125,7 @@ class Executor:
         )
 
     @staticmethod
-    def _extract_json(text: str) -> Any:
+    def _extract_json(text: str) -> JSONValue:
         '''从模型输出里尽力抽取 JSON（默认格式化器的快捷方式）。'''
         try:
             return get_formatter(None).parse(text)
@@ -129,7 +133,9 @@ class Executor:
             raise OutputValidationError(str(exc)) from None
 
     @staticmethod
-    def _try_loads(text: str):
+    def _try_loads(
+        text: str,
+    ) -> Tuple[Optional[JSONValue], Optional[json.JSONDecodeError]]:
         '''保留的旧工具函数。'''
         try:
             return json.loads(text), None

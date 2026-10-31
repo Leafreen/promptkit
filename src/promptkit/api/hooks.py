@@ -135,8 +135,10 @@ class Hooks:
         kind: Optional[Union[str, HookType]] = None,
     ) -> bool:
         '''注销：句柄 / 函数都能传；函数不指定 kind 时从三类里全删。'''
+        kinds: Tuple[HookType, ...]
         if isinstance(target, HookHandle):
-            fn, kinds = target.fn, (_as_kind(target.kind),)
+            fn = target.fn
+            kinds = (_as_kind(target.kind),)
         elif callable(target):
             fn = target
             kinds = (_as_kind(kind),) if kind is not None else tuple(HookType)

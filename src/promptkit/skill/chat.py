@@ -9,16 +9,17 @@
 '''
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, cast
 
 from promptkit.core.context import Context
 from promptkit.core.steps.logics.function import BoundStep, FunctionDef
+from promptkit.core.tool.base import ToolSchema
 from promptkit.skill.context import SkillContext
 from promptkit.skill.errors import SkillError
 from promptkit.skill.schema import validate_args
 from promptkit.skill.spec import Skill, build_spec
-from promptkit.skill.tools import result_text
-from promptkit.tools import Tool
+from promptkit.core.tool.skill import result_text
+from promptkit.core.tool import Tool
 
 __all__ = ["AgentHolder", "as_tools", "function_parameters", "inherited_state"]
 
@@ -141,7 +142,7 @@ class _FunctionTool(Tool):
             name=definition.name,
             description=definition.description
             or f"{definition.name}（参数：{', '.join(definition.args) or '无'}）",
-            parameters=function_parameters(definition),
+            parameters=cast(ToolSchema, function_parameters(definition)),
             func=self.run,
         )
 
@@ -202,7 +203,7 @@ class _SkillTool(Tool):
         super().__init__(
             name=skill.name,
             description=skill.description,
-            parameters=skill.parameters,
+            parameters=cast(ToolSchema, skill.parameters),
             func=self.run,
         )
 

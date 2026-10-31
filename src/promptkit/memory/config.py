@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
 from promptkit.memory.budget import TokenBudget
 
@@ -83,7 +83,7 @@ class MemoryConfig:
     '''
 
     read: List[str] = field(default_factory=list)
-    recall: Optional[Any] = None
+    recall: Optional[object] = None
     write: List[str] = field(default_factory=list)
     budget: Optional[TokenBudget] = None
     write_on: str = "end"

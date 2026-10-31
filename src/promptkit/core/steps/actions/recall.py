@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from promptkit.core.steps.interface import Step
 from promptkit.core.steps.logics.expr_sys.expr import Expr
@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # 只用于类型标注
 __all__ = ["RecallMemory", "format_recalled"]
 
 
-def format_recalled(items: List[Any], *, max_chars: int = 0) -> str:
+def format_recalled(items: Sequence[object], *, max_chars: int = 0) -> str:
     '''把召回结果拼成文本（`RecallMemory` 的默认输出格式）。
 
         [1] 退款政策：7 天无理由……
@@ -43,9 +43,11 @@ def format_recalled(items: List[Any], *, max_chars: int = 0) -> str:
     return format_memories(items, max_chars=max_chars)
 
 
-def _score_of(item: Any) -> float:
+def _score_of(item: object) -> float:
     '''一条结果的分数（dict / MemoryItem / 别的都兜住）。'''
     raw = item.get("score") if isinstance(item, dict) else getattr(item, "score", None)
+    if raw is None:
+        return 0.0
     try:
         return float(raw)
     except (TypeError, ValueError):
@@ -70,9 +72,9 @@ class RecallMemory(Step):
     - `raw=True`：输出 `list[dict]` 而不是文本
     '''
 
-    memory: Any
+    memory: object
     #: 查询（表达式或字面量）
-    query: Any = None
+    query: object = None
     #: 从 Context 的哪个变量取查询
     query_key: Optional[str] = None
     output_key: str = "recalled"
@@ -136,7 +138,7 @@ class RecallMemory(Step):
             context.trace.append(f"{self.name}:skip")
             return
 
-        items = self.memory.recall(text, top_k=self.top_k)
+        items = getattr(self.memory, "recall")(text, top_k=self.top_k)
         if self.min_score is not None:
             items = [item for item in items if _score_of(item) >= self.min_score]
         if self.budget is not None:

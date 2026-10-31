@@ -12,13 +12,15 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional, TextIO, Union, cast
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
+    from promptkit.core.display_sys.render import Verbosity
 from promptkit.core.settings import settings
 from promptkit.core.steps.interface import Step
 from promptkit.core.steps.logics.expr_sys.expr import Expr, as_expr
+from promptkit.types import JSONValue
 
 # 结果输出流挂在 Context 上的键名（Workflow.run(out=...) 会写进来）
 OUTPUT_STREAM_KEY = "_output_stream"
@@ -27,7 +29,7 @@ OUTPUT_STREAM_KEY = "_output_stream"
 VERBOSITY_KEY = "_verbosity"
 
 
-def verbosity_of(context: Context) -> Any:
+def verbosity_of(context: Context) -> "Verbosity":
     '''当前这次运行的显示分级（默认 NORMAL）。'''
     from promptkit.core.display_sys.render import as_verbosity
 
@@ -45,9 +47,9 @@ def current_encoding(explicit: Optional[str] = None) -> str:
     return settings.encoding if explicit is None else explicit
 
 
-def output_stream(context: Context) -> Any:
+def output_stream(context: Context) -> TextIO:
     '''「结果」往哪儿写：默认 stdout，可以用 Workflow.run(out=...) 换掉。'''
-    return context.get(OUTPUT_STREAM_KEY) or sys.stdout
+    return cast(TextIO, context.get(OUTPUT_STREAM_KEY) or sys.stdout)
 
 
 def _prepare_path(path: str) -> str:
@@ -430,7 +432,7 @@ class SaveStep(Step):
 _INTERNAL_KEYS = frozenset({OUTPUT_STREAM_KEY, "_event_bus", "agent"})
 
 
-def _plain(value: Any, depth: int = 0) -> Any:
+def _plain(value: object, depth: int = 0) -> JSONValue:
     '''把任意值转成能 `json.dump` 的东西；转不了就用 `repr` 兜底。'''
     if depth > 12:  # 环 / 太深的结构，别再往下钻
         return repr(value)
@@ -546,7 +548,7 @@ def Confirm(  # noqa: N802
 
 
 def Choose(  # noqa: N802
-    prompt: str, *options: str, default: Optional[int] = None
+    prompt: str, *options: object, default: Optional[int] = None
 ) -> ChooseExpr:
     '''让用户从编号菜单里选一个，返回选项文本：
 
@@ -556,14 +558,14 @@ def Choose(  # noqa: N802
     `default` 是空输入时默认选中的**序号**（从 1 起）；
     链式写法是 `Choose(...).Default(2)`。
     '''
-    flat: List[Any] = list(options)
+    flat: List[object] = list(options)
     if len(flat) == 1 and isinstance(flat[0], (list, tuple)):
         flat = list(flat[0])
-    return ChooseExpr(prompt, flat, default)
+    return ChooseExpr(prompt, cast(List[str], flat), default)
 
 
 def Save(  # noqa: N802
-    *values: Any,
+    *values: object,
     file: str = "output.txt",
     append: bool = False,
     format: str = "text",
@@ -584,7 +586,7 @@ def Save(  # noqa: N802
     )
 
 
-def SaveJSON(value: Any, file: str = "output.json", **kwargs: Any) -> SaveStep:  # noqa: N802
+def SaveJSON(value: object, file: str = "output.json", **kwargs) -> SaveStep:  # noqa: N802
     '''把**一个**值写成 JSON：`SaveJSON(Var("info"), "info.json")`。
 
     等价于 `Save(value, file=file, format="json")`，只是名字更直白。
@@ -613,7 +615,7 @@ def SaveHistory(  # noqa: N802
 
 
 def Echo(  # noqa: N802
-    *parts: Any, sep: str = "", render: str = "text", title: Optional[str] = None
+    *parts: object, sep: str = "", render: str = "text", title: Optional[str] = None
 ) -> EchoStep:
     '''打印：`Echo("面试官：", Var("question"))`。
 

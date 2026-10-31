@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import Any, List, Optional, Sequence
+from typing import List, Optional, Sequence, Union, cast
 
 from promptkit.memory.base import MemoryItem, item_text
 from promptkit.memory.vector import Reranker
@@ -51,7 +51,7 @@ class LlmReranker(Reranker):
 
     def __init__(
         self,
-        agent: Any = None,
+        agent: object = None,
         *,
         max_chars: int = 200,
         max_candidates: int = 20,
@@ -86,16 +86,16 @@ class LlmReranker(Reranker):
             "请按「对回答这个问题有多相关」从高到低排序，"
             '只输出 JSON，形如 {"order": [2, 0, 1]}，不要解释。'
         )
-        raw = agent.ask({"role": "user", "content": prompt})
+        raw = getattr(agent, "ask")({"role": "user", "content": prompt})
         order = self._order(raw, len(candidates))
         return self._apply(candidates, order, top_k)
 
     # ---------------- 内部 ----------------
     @staticmethod
-    def _order(raw: Any, size: int) -> List[int]:
+    def _order(raw: object, size: int) -> List[int]:
         '''从模型输出里抠出下标数组（JSON 优先，抠不出来就找数字）。'''
         text = "" if raw is None else str(raw)
-        values: Any = None
+        values: object = None
         try:
             from promptkit.core.model_action.caution_related.formatter import (
                 get_formatter,
@@ -113,9 +113,9 @@ class LlmReranker(Reranker):
             values = re.findall(r"\d+", text)
 
         order: List[int] = []
-        for value in values or ():
+        for value in cast(Sequence[object], values or ()):
             try:
-                index = int(value)
+                index = int(cast(Union[str, int, float], value))
             except (TypeError, ValueError):
                 continue
             if 0 <= index < size and index not in order:
@@ -148,7 +148,7 @@ class CohereReranker(Reranker):
 
     def __init__(
         self,
-        client: Any = None,
+        client: object = None,
         *,
         model: str = "rerank-multilingual-v3.0",
         api_key: Optional[str] = None,
@@ -172,7 +172,7 @@ class CohereReranker(Reranker):
         if not candidates:
             return []
         documents = [item_text(item) for item in candidates]
-        response = self.client.rerank(
+        response = getattr(self.client, "rerank")(
             model=self.model,
             query=query,
             documents=documents,
@@ -202,7 +202,7 @@ class CrossEncoderReranker(Reranker):
 
     def __init__(
         self,
-        model: Any = None,
+        model: object = None,
         *,
         model_name: str = "BAAI/bge-reranker-base",
         device: Optional[str] = None,
@@ -229,7 +229,7 @@ class CrossEncoderReranker(Reranker):
         if not candidates:
             return []
         pairs = [(query, item_text(item)) for item in candidates]
-        scores = self.model.predict(pairs)
+        scores = getattr(self.model, "predict")(pairs)
         ranked = sorted(
             zip(candidates, scores), key=lambda pair: float(pair[1]), reverse=True
         )

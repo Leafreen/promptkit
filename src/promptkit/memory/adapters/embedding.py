@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 import zlib
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from promptkit.memory.vector import EmbeddingClient
 
@@ -77,7 +77,10 @@ class HashEmbedding(EmbeddingClient):
         self.ngram = ngram
 
     def embed(self, text: str) -> List[float]:
-        vector = [0.0] * self.dimension
+        dimension = self.dimension
+        if dimension is None:  # 构造时已校验，理论到不了
+            raise ValueError("dimension 必须 >= 8 的整数")
+        vector = [0.0] * dimension
         normalized = "".join(
             char for char in str(text or "").lower() if not char.isspace()
         )
@@ -87,7 +90,7 @@ class HashEmbedding(EmbeddingClient):
         for size in range(1, self.ngram + 1):
             for start in range(len(normalized) - size + 1):
                 gram = normalized[start : start + size]
-                index = zlib.crc32(gram.encode("utf-8")) % self.dimension
+                index = zlib.crc32(gram.encode("utf-8")) % dimension
                 vector[index] += 1.0
 
         norm = math.sqrt(sum(value * value for value in vector))
@@ -110,7 +113,7 @@ class OpenAIEmbedding(EmbeddingClient):
         self,
         model: str = "text-embedding-3-small",
         *,
-        client: Any = None,
+        client: object = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: Optional[float] = None,
@@ -152,7 +155,7 @@ class OpenAIEmbedding(EmbeddingClient):
             options: dict = {"model": self.model, "input": batch}
             if self.dimensions:
                 options["dimensions"] = self.dimensions
-            response = self.client.embeddings.create(**options)
+            response = getattr(self.client, "embeddings").create(**options)
             rows = sorted(
                 response.data, key=lambda row: getattr(row, "index", 0)
             )
@@ -174,7 +177,7 @@ class SentenceTransformerEmbedding(EmbeddingClient):
 
     def __init__(
         self,
-        model: Any = None,
+        model: object = None,
         *,
         model_name: str = "BAAI/bge-small-zh-v1.5",
         device: Optional[str] = None,
@@ -209,7 +212,7 @@ class SentenceTransformerEmbedding(EmbeddingClient):
         prepared = ["" if text is None else str(text) for text in texts]
         if not prepared:
             return []
-        encoded = self.model.encode(
+        encoded = getattr(self.model, "encode")(
             prepared, normalize_embeddings=self.normalize
         )
         return [[float(value) for value in row] for row in encoded]

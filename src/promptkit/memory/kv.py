@@ -20,7 +20,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from promptkit.memory.base import Memory, MemoryError
 from promptkit.memory.paths import default_kv_path, expand_path
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS memory (
 """
 
 
-def _json_default(value: Any) -> Any:
+def _json_default(value: object) -> object:
     '''JSON 编码不认识的类型时退一步（pydantic / dataclass / set）。'''
     dump = getattr(value, "model_dump", None)
     if callable(dump):
@@ -139,11 +139,11 @@ class KVMemory(Memory):
     def __enter__(self) -> "KVMemory":
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.close()
 
     # ---------------- 读写 ----------------
-    def read(self, key: str, default: Any = None) -> Any:
+    def read(self, key: str, default: object = None) -> object:
         row = self.conn.execute(
             "SELECT value FROM memory WHERE namespace = ? AND key = ?",
             (self.namespace, str(key)),
@@ -157,7 +157,7 @@ class KVMemory(Memory):
                 f"记忆 {self.namespace}/{key} 里存的不是合法 JSON：{exc}"
             ) from None
 
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         try:
             payload = json.dumps(value, ensure_ascii=False, default=_json_default)
         except (TypeError, ValueError) as exc:
@@ -193,12 +193,12 @@ class KVMemory(Memory):
         ).fetchall()
         return [row[0] for row in rows]
 
-    def items(self) -> Dict[str, Any]:
+    def items(self) -> Dict[str, object]:
         rows = self.conn.execute(
             "SELECT key, value FROM memory WHERE namespace = ? ORDER BY key",
             (self.namespace,),
         ).fetchall()
-        result: Dict[str, Any] = {}
+        result: Dict[str, object] = {}
         for key, raw in rows:
             try:
                 result[key] = json.loads(raw)

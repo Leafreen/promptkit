@@ -41,6 +41,10 @@ class EventType(str, Enum):
     #: 一次模型调用的 token 用量。终端默认不显示，日志处理器会记下来。
     USAGE = "usage"
 
+    # ---- 语义判定（If / ElseIf 里的 Intent / Similar）----
+    #: 每次语义判定的结果：标签 / 置信度 / 来源 / 是否命中缓存
+    SEMANTIC_JUDGE = "semantic_judge"
+
     # ---- 出错 ----
     ERROR = "error"
 
@@ -58,6 +62,7 @@ MESSAGE_END = EventType.MESSAGE_END
 STEP_START = EventType.STEP_START
 STEP_END = EventType.STEP_END
 USAGE = EventType.USAGE
+SEMANTIC_JUDGE = EventType.SEMANTIC_JUDGE
 ERROR = EventType.ERROR
 
 # 事件总线挂在 Context 里的键名

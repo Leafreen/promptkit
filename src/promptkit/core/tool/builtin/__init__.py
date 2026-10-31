@@ -4,7 +4,7 @@
 - `WEB_SEARCH`：联网搜索（免密钥，有 API Key 会自动升级后端）
 - `WriteFile` / `WRITE_FILE`：让**模型自己决定**把成果写进文件
 
-    from promptkit.default_tools import WriteFile
+    from promptkit.core.tool import WriteFile
     from promptkit.core import Tools
 
     writer = WriteFile("outputs")       # 沙箱：只能写 outputs/ 下面
@@ -15,9 +15,9 @@
 `WRITE_FILE` 更是直接**由模型驱动写磁盘**，所以默认带沙箱（根目录限制 +
 扩展名白名单 + 大小上限）；别为了省事把 `sandbox=False` 打开。
 '''
-from promptkit.default_tools.run_command import RUN_COMMAND
-from promptkit.default_tools.web_search import WEB_SEARCH, WebSearch
-from promptkit.default_tools.write_file import (
+from promptkit.core.tool.builtin.run_command import RUN_COMMAND
+from promptkit.core.tool.builtin.web_search import WEB_SEARCH, WebSearch
+from promptkit.core.tool.builtin.write_file import (
     DEFAULT_ALLOWED_EXTENSIONS,
     MAX_CONTENT_CHARS,
     WRITE_FILE,

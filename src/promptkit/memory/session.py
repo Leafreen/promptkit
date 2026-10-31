@@ -18,7 +18,7 @@
 '''
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from promptkit.memory.base import Memory, MemoryError
 
@@ -63,7 +63,7 @@ class SessionMemory(Memory):
         self.include_system = include_system
 
     # ---------------- 解析目标 ----------------
-    def target(self) -> Any:
+    def target(self) -> "Agent":
         '''真正要读的 agent：显式传的，否则默认 agent。'''
         if self.agent is not None:
             return self.agent
@@ -78,7 +78,7 @@ class SessionMemory(Memory):
         return agent
 
     # ---------------- 读 ----------------
-    def read(self, key: str = "history", default: Any = None) -> Any:
+    def read(self, key: str = "history", default: object = None) -> object:
         agent = self.target()
         name = str(key)
 
@@ -105,7 +105,7 @@ class SessionMemory(Memory):
         return default
 
     # ---------------- 只读 ----------------
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         raise MemoryError(
             "SessionMemory 是只读的：改对话历史请用 agent.ask() / "
             "agent.load_history() / agent.reset()，"
@@ -113,7 +113,7 @@ class SessionMemory(Memory):
         )
 
     # ---------------- 内部 ----------------
-    def _messages(self, agent: Any) -> List[Dict[str, Any]]:
+    def _messages(self, agent: "Agent") -> List[Dict[str, object]]:
         history = [dict(message) for message in getattr(agent, "history", [])]
         if not self.include_system:
             return history
@@ -123,13 +123,13 @@ class SessionMemory(Memory):
         return [{"role": "system", "content": system}, *history]
 
     @staticmethod
-    def _system_prompt(agent: Any) -> str:
+    def _system_prompt(agent: "Agent") -> str:
         for message in getattr(agent, "start_prompts", []) or []:
             if isinstance(message, dict) and message.get("role") == "system":
                 return str(message.get("content") or "")
         return ""
 
-    def _as_text(self, agent: Any) -> str:
+    def _as_text(self, agent: "Agent") -> str:
         lines: List[str] = []
         for message in self._messages(agent):
             role = str(message.get("role", "?"))

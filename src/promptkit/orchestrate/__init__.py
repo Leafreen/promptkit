@@ -64,15 +64,33 @@ from promptkit.orchestrate.planner import (
     TemplatePlanner,
     coerce_planner,
 )
-from promptkit.orchestrate.steps import (
-    AggregateStep,
-    ExecutePlan,
-    PlanStep,
-    PlanWithTool,
-    format_task_results,
-    plan_from,
-)
-from promptkit.orchestrate.task import Plan, Task, TaskResult
+from promptkit.orchestrate.task import Plan, Task, TaskResult, plan_from
+
+# 这三个 Step 现在住 `core.steps.actions.orchestrate`；这里延迟导入，
+# 避免 `core` 与 `orchestrate` 在包初始化时互相套圈。
+_LAZY = {
+    "PlanStep": ("promptkit.core.steps.actions.orchestrate", "PlanStep"),
+    "PlanWithTool": ("promptkit.core.steps.actions.orchestrate", "PlanWithTool"),
+    "ExecutePlan": ("promptkit.core.steps.actions.orchestrate", "ExecutePlan"),
+    "AggregateStep": ("promptkit.core.steps.actions.orchestrate", "AggregateStep"),
+    "format_task_results": (
+        "promptkit.core.steps.actions.orchestrate",
+        "format_task_results",
+    ),
+}
+
+
+def __getattr__(name: str):
+    '''按需导入搬家到 core 的 Step。'''
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     # 数据

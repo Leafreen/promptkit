@@ -18,7 +18,7 @@
 '''
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Iterable
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
@@ -77,7 +77,7 @@ def Goto(label: str) -> GotoStep:  # noqa: N802 - 跟随 DSL 命名
     return GotoStep(label)
 
 
-def collect_labels(steps: Any) -> dict:
+def collect_labels(steps: Iterable[object]) -> Dict[str, int]:
     '''收集顶层步骤里的标签 -> 下标。'''
     return {
         step.label: index

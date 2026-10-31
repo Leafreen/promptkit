@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from promptkit.orchestrate.errors import DelegateError, DepthExceeded
-from promptkit.tools import Tool
+from promptkit.core.tool import Tool
 
 __all__ = ["DelegateTool"]
 

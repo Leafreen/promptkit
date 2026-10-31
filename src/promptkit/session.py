@@ -33,25 +33,23 @@ import tempfile
 import time
 from contextlib import contextmanager
 from typing import (
-    TYPE_CHECKING,
-    Any,
     Dict,
+    Iterable,
     Iterator,
-    List,
+    Mapping,
     Optional,
     Sequence,
     Tuple,
     Union,
+    cast,
 )
 
-if TYPE_CHECKING:
-    from promptkit.agent import Agent
+from promptkit.types import AgentLike, JSONValue, Message
 
 __all__ = [
     "Session",
     "SESSION_VERSION",
     "as_session",
-    "run_with_session",
     "set_system_prompt_reset",
 ]
 
@@ -59,17 +57,17 @@ __all__ = [
 SESSION_VERSION = 1
 
 
-def _jsonable_variables(variables: Dict[str, Any]) -> Dict[str, Any]:
+def _jsonable_variables(variables: Mapping[str, object]) -> Dict[str, JSONValue]:
     '''把要存下来的变量转成能 `json.dump` 的东西。
 
     转不了（自定义对象之类）就用 `repr` 兜底 —— 会话文件是「尽力保存」，
     为了一个怪对象导致整份会话存不下来不值得。
     '''
-    jsonable: Dict[str, Any] = {}
+    jsonable: Dict[str, JSONValue] = {}
     for name, value in variables.items():
         try:
             json.dumps(value, ensure_ascii=False)
-            jsonable[name] = value
+            jsonable[name] = cast(JSONValue, value)
         except (TypeError, ValueError):
             jsonable[name] = repr(value)
     return jsonable
@@ -119,34 +117,49 @@ class Session:
         #: 要跟着会话一起存的 Context 变量名
         self.variables: Tuple[str, ...] = tuple(str(name) for name in variables)
 
+    # ---------------- DSL ----------------
+    def Variables(self, *names: str) -> "Session":  # noqa: N802 - 跟随 DSL 命名
+        '''要跟着会话一起存的 Context 变量名（链式写法）。'''
+        self.variables = tuple(str(name) for name in names)
+        return self
+
     # ---------------- 查询 ----------------
     def exists(self) -> bool:
         '''会话文件在不在了。'''
         return os.path.exists(self.path)
 
-    def read(self) -> Dict[str, Any]:
+    def read(self) -> Dict[str, JSONValue]:
         '''把会话文件读成 dict（不会有副作用）。文件不在就返回空结构。'''
+        empty: Dict[str, JSONValue] = {
+            "version": SESSION_VERSION,
+            "messages": [],
+            "turns": 0,
+        }
         if not self.exists():
-            return {"version": SESSION_VERSION, "messages": [], "turns": 0}
+            return empty
         payload = self._read_raw()
         if isinstance(payload, list):          # export_history 写的裸数组
             return {
                 "version": SESSION_VERSION,
-                "messages": payload,
+                "messages": cast(JSONValue, payload),
                 "turns": len(payload) // 2,
             }
         if not isinstance(payload, dict):
-            return {"version": SESSION_VERSION, "messages": [], "turns": 0}
-        messages = payload.get("messages")
+            return empty
+        data = cast(Dict[str, JSONValue], payload)
+        messages = data.get("messages")
         if not isinstance(messages, list):
-            messages = payload.get("history") or []
-        return {**payload, "messages": messages}
+            messages = data.get("history") or []
+        result: Dict[str, JSONValue] = dict(data)
+        result["messages"] = cast(JSONValue, messages)
+        return result
 
     def turns(self) -> int:
         '''会话里大概有几轮对话（一问一答算一轮）。'''
-        return int(self.read().get("turns") or 0)
+        value = self.read().get("turns")
+        return int(value) if isinstance(value, (int, float, str)) else 0
 
-    def load_variables(self) -> Dict[str, Any]:
+    def load_variables(self) -> Dict[str, JSONValue]:
         '''读回上次存下的 Context 变量（没有就返回空 dict）。'''
         stored = self.read().get("variables")
         return dict(stored) if isinstance(stored, dict) else {}
@@ -154,10 +167,10 @@ class Session:
     # ---------------- 保存 / 恢复 ----------------
     def save(
         self,
-        agent: "Agent",
+        agent: AgentLike,
         *,
-        variables: Optional[Dict[str, Any]] = None,
-        **metadata: Any,
+        variables: Optional[Mapping[str, object]] = None,
+        **metadata: JSONValue,
     ) -> str:
         '''把 `agent` 的上下文写进文件，返回路径。
 
@@ -165,6 +178,16 @@ class Session:
         用 `load_variables()` 读回来。`metadata` 只是方便事后查，
         `load` 时不会用到。
         '''
+        return self._save(agent, variables=variables, metadata=metadata)
+
+    def _save(
+        self,
+        agent: AgentLike,
+        *,
+        variables: Optional[Mapping[str, object]],
+        metadata: Mapping[str, JSONValue],
+    ) -> str:
+        '''写入实现：`metadata` 用现成 mapping 传，避免 `**` 解包与 `variables` 冲突。'''
         from promptkit.agent import normalize_history
 
         messages = normalize_history(agent.get_history())
@@ -174,12 +197,12 @@ class Session:
                 system = message.get("content") or ""
                 break
 
-        payload: Dict[str, Any] = {
+        payload: Dict[str, JSONValue] = {
             "version": SESSION_VERSION,
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "turns": len(messages) // 2,
             "system_prompt": system,
-            "messages": messages,
+            "messages": cast(JSONValue, messages),
             **metadata,
         }
         if variables:
@@ -204,7 +227,7 @@ class Session:
             raise
         return self.path
 
-    def load(self, agent: "Agent", *, replace: bool = True) -> int:
+    def load(self, agent: AgentLike, *, replace: bool = True) -> int:
         '''把会话里的上下文装回 `agent`，返回恢复了几条。
 
         文件不存在时**什么也不做**（返回 0，不动 `agent`）——
@@ -227,7 +250,7 @@ class Session:
 
     # ---------------- 便利 ----------------
     @contextmanager
-    def open(self, agent: "Agent", **metadata: Any) -> Iterator["Session"]:
+    def open(self, agent: AgentLike, **metadata: JSONValue) -> Iterator["Session"]:
         '''先 `load`，退出时 `save`（**异常退出也会存**）。
 
             with Session("sessions/a.json").open(agent):
@@ -237,9 +260,9 @@ class Session:
         try:
             yield self
         finally:
-            self.save(agent, **metadata)
+            self._save(agent, variables=None, metadata=metadata)
 
-    def _read_raw(self) -> Any:
+    def _read_raw(self) -> object:
         with open(self.path, encoding=self.encoding or "utf-8") as handle:
             return json.load(handle)
 
@@ -259,7 +282,7 @@ def as_session(value: Union[str, "Session", None]) -> Optional["Session"]:
     raise TypeError(f"session 只能是路径或 Session，得到 {type(value).__name__}")
 
 
-def set_system_prompt_reset(workflow: Any, reset: bool) -> None:
+def set_system_prompt_reset(workflow: object, reset: bool) -> None:
     '''把 `reset` 选项写进 workflow 里所有 `SystemPrompt` 步骤。
 
     续接会话时必须让 `SystemPrompt` **不要**清空历史 —— 否则刚 `load`
@@ -267,7 +290,7 @@ def set_system_prompt_reset(workflow: Any, reset: bool) -> None:
     '''
     from promptkit.core.steps.actions.chat_util import SystemPrompt
 
-    def walk(steps: Any) -> None:
+    def walk(steps: Iterable[object]) -> None:
         for step in steps:
             if isinstance(step, SystemPrompt):
                 step.reset = reset
@@ -276,71 +299,3 @@ def set_system_prompt_reset(workflow: Any, reset: bool) -> None:
                 walk(children())
 
     walk(getattr(workflow, "steps", []))
-
-
-def run_with_session(
-    workflow: Any,
-    agent: Any = None,
-    session: Union[str, "Session", None] = None,
-    *,
-    reset: Optional[bool] = None,
-    verbose: Any = None,
-    variables: Optional[Sequence[str]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    agent_required: str = "run(session=...)",
-    **kwargs: Any,
-) -> Any:
-    '''`load -> 跑 -> 存`（异常也存）。`Workflow.run(session=...)` 走的就是这里。
-
-    顺序很重要：**先决定要不要保留历史，再装历史**。
-    反过来的话，`SystemPrompt(reset=True)` 会把刚装回来的清掉。
-
-    `variables` 是要**跟着会话一起存**的 Context 变量名（比如 `["basic_info"]`）。
-    存了之后，下次 `workflow.run()` 会以关键字参数把它们塞回 Context ——
-    这样开头那段问卷就会读到上次填好的值（当然，问卷本身得用
-    `If(Var("basic_info") == {})` 之类的条件跳过）。
-    '''
-    active = as_session(session)
-    if active is None:
-        return workflow.run(agent=agent, verbose=verbose, **kwargs)
-
-    if agent is None:
-        from promptkit.agent import Agent
-
-        agent = Agent.default()
-        if agent is None:
-            raise ValueError(
-                f"{agent_required} 需要 agent：要么先 `Agent()` 建一个"
-                "（会自动注册为默认），要么显式传 `agent=...`。"
-            )
-
-    names = tuple(variables) if variables is not None else active.variables
-
-    # 要记的变量：把上次存的值当 kwargs 传给 workflow.run()。
-    # `NewVar(...)` 用的是 setdefault，所以传进来的值不会被默认值盖掉。
-    seeded: Dict[str, Any] = {}
-    if names:
-        stored = active.load_variables()
-        seeded = {name: stored[name] for name in names if name in stored}
-
-    keep = (active.exists()) if reset is None else (not reset)
-    restored = active.load(agent)
-
-    set_system_prompt_reset(workflow, not keep)
-    context: Any = None
-    try:
-        context = workflow.run(
-            agent=agent, verbose=verbose, **{**seeded, **kwargs}
-        )
-        return context
-    finally:
-        # 异常退出也要存 —— 聊到一半 Ctrl+C 不该把整段对话丢掉
-        snapshot: Optional[Dict[str, Any]] = None
-        if names and context is not None:
-            snapshot = {name: context.get(name) for name in names}
-        active.save(
-            agent,
-            variables=snapshot,
-            restored=restored,
-            **(metadata or {}),
-        )

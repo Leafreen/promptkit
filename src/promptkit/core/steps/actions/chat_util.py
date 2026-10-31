@@ -26,13 +26,27 @@ prompt 文本，就绑死在「必须一次性拼完」上了。
 from __future__ import annotations
 
 import os
+import time
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
+    from promptkit.memory.base import Memory
 
-from promptkit.core.steps.interface import Step, coerce_steps, execute_step
+T = TypeVar("T")
+
+from promptkit.core.steps.interface import Step, StepLike, coerce_steps, execute_step
 from promptkit.core.steps.logics.expr_sys.expr import VarExpr
 
 __all__ = [
@@ -106,7 +120,23 @@ def chat_context_vars() -> List[str]:
     ]
 
 
-def flatten_single(items: Sequence[Any]) -> Tuple[Any, ...]:
+def _as_memory(source: object) -> "Memory":
+    '''把「Memory 对象 / 路径 / 命名空间」统一成一份长期记忆。
+
+    和 `MEMORY_REFERENCE(...)` / `WRITE_MEMORY(...)` 用同一套规则，
+    所以 `Compact(...).To(...)` 也能直接收路径：
+
+        Compact(40).To(long_term_memory("data/tutor.db"))
+        Compact(40).To("data/tutor.db")
+
+    记忆是实现细节，`core` 不硬依赖 memory 包，延迟导入。
+    '''
+    from promptkit.memory.layered import as_memory
+
+    return as_memory(source)
+
+
+def flatten_single(items: Sequence[T]) -> Tuple[T, ...]:
     '''`Rules(["a", "b"])` 和 `Rules("a", "b")` 都当两个处理。
 
     这是最容易写错的一处：`Deliverables([Deliverable(...)])` 传的是**一个列表**，
@@ -168,7 +198,7 @@ class Rules(Step):
 
     name = "rules"
 
-    def __init__(self, *rules: Any, replace: bool = False):
+    def __init__(self, *rules: object, replace: bool = False):
         self.rules = [str(rule) for rule in flatten_single(rules)]
         self.replace = replace
 
@@ -194,7 +224,7 @@ class Tools(Step):
 
     name = "tools"
 
-    def __init__(self, *tools: Any, replace: bool = False):
+    def __init__(self, *tools: object, replace: bool = False):
         self.tools = list(flatten_single(tools))
         self.replace = replace
 
@@ -224,7 +254,7 @@ class Deliverables(Step):
 
     name = "deliverables"
 
-    def __init__(self, *items: Any, replace: bool = False):
+    def __init__(self, *items: object, replace: bool = False):
         self.items = list(flatten_single(items))
         self.replace = replace
 
@@ -245,7 +275,7 @@ class ExitWords(Step):
 
     name = "exit_words"
 
-    def __init__(self, *words: Any):
+    def __init__(self, *words: object):
         flat = [str(word) for word in flatten_single(words)]
         self.words = flat or list(DEFAULT_EXIT_WORDS)
 
@@ -267,8 +297,8 @@ class Behavior(Step):
 
     name = "behavior"
 
-    def __init__(self, *steps: Any):
-        self.steps = tuple(coerce_steps(*steps))
+    def __init__(self, *steps: object):
+        self.steps = tuple(coerce_steps(*cast(Sequence[StepLike], steps)))
 
     def execute(self, context: Context) -> None:
         for step in self.steps:
@@ -287,8 +317,8 @@ def build_system_prompt(
     role: str = "",
     want: str = "",
     rules: Optional[Sequence[str]] = None,
-    deliverables: Optional[Sequence[Any]] = None,
-    variables: Optional[Dict[str, Any]] = None,
+    deliverables: Optional[Sequence[object]] = None,
+    variables: Optional[Dict[str, object]] = None,
 ) -> str:
     '''把角色 / 目标 / 规矩 / 交付物拼成 system prompt 文本。
 
@@ -345,6 +375,12 @@ class SystemPrompt(Step):
         self.template = template
         self.reset = reset
 
+    # ---------------- DSL ----------------
+    def KeepHistory(self) -> "SystemPrompt":  # noqa: N802
+        '''保留 `agent.history`，只按新 system prompt 重建（续接会话用）。'''
+        self.reset = False
+        return self
+
     def execute(self, context: Context) -> None:
         agent = context.get("agent")
         if agent is None:
@@ -375,7 +411,7 @@ class SystemPrompt(Step):
         return "SystemPrompt(自定义模板)"
 
 
-def _install_system_prompt(agent: Any, content: str, *, reset: bool) -> None:
+def _install_system_prompt(agent: object, content: str, *, reset: bool) -> None:
     '''把 system prompt 装到 agent 上，并让 `messages` 跟上。
 
     两种模式的区别只在于**历史留不留**：
@@ -383,9 +419,9 @@ def _install_system_prompt(agent: Any, content: str, *, reset: bool) -> None:
     - `reset=True`：`agent.reset()` —— 清历史 + 重建
     - `reset=False`：`agent.rebuild()` —— **只重建**，历史留着
     '''
-    agent.start_prompts = [{"role": "system", "content": content}]
+    setattr(agent, "start_prompts", [{"role": "system", "content": content}])
     if reset:
-        agent.reset()
+        getattr(agent, "reset")()
         return
     rebuild = getattr(agent, "rebuild", None)
     if not callable(rebuild):
@@ -413,7 +449,7 @@ class ChatTurn(Step):
         prompt_role: str = "user",
         prompt_content: str = "{{usr_input}}",
         output_key: str = CHAT_REPLY_KEY,
-        cautions: Optional[Sequence[Any]] = None,
+        cautions: Optional[Sequence[object]] = None,
     ):
         self.prompt_role = prompt_role
         self.prompt_content = prompt_content
@@ -425,7 +461,7 @@ class ChatTurn(Step):
         from promptkit.prompt import Prompt
 
         tools = context.get(CHAT_TOOLS_KEY) or None
-        step = LLMStep(
+        step: Step = LLMStep(
             prompt=Prompt(role=self.prompt_role, content=self.prompt_content),
             output_key=self.output_key,
             cautions=self.cautions,
@@ -439,22 +475,24 @@ class ChatTurn(Step):
 
 
 def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
-    *steps: Any,
-    behavior: Optional[Sequence[Any]] = None,
+    *steps: object,
+    behavior: Optional[Sequence[object]] = None,
     input_key: str = CHAT_INPUT_KEY,
     output_key: str = CHAT_REPLY_KEY,
     signal_key: str = CHAT_SIGNAL_KEY,
     read_prompt: str = ">>> ",
     render: str = "markdown",
     exit_words: Optional[Sequence[str]] = None,
-    after_turn: Optional[Sequence[Any]] = None,
-    after_end: Sequence[Any] = (),
-    cautions: Optional[Sequence[Any]] = None,
+    after_turn: Optional[Sequence[object]] = None,
+    after_end: Sequence[object] = (),
+    cautions: Optional[Sequence[object]] = None,
     max_turns: Optional[int] = None,
     turn_template: Optional[str] = None,
     compact_after: Optional[int] = None,
     compact_keep: int = 6,
     compact_prompt: Optional[str] = None,
+    compact_memory: object = None,
+    compact_memory_key: Optional[str] = None,
 ) -> Step:
     '''组装多轮对话循环，返回一个 `Workflow`（本身就是 Step）。
 
@@ -490,6 +528,10 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     一段摘要，最近 `compact_keep` 条（默认 6）原样保留。压缩发生在每轮
     **调模型之前**，所以本轮请求立刻用上更短的历史；摘要这次调用本身
     不会留在历史里。`compact_prompt` 换摘要提示词（`{{messages}}` 占位）。
+
+    给了 `compact_memory` 时，每次真正发生压缩后会把摘要**追加**进长期记忆
+    （键是 `compact_memory_key:时间戳`，默认前缀 `conversation_summary`）——
+    短期上下文被压掉的内容，仍能在后续轮次通过语义召回拿回来。
     '''
     from promptkit.core.steps.actions.interactive import Echo, Read
     from promptkit.core.steps.logics.if_step import If
@@ -497,6 +539,59 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     from promptkit.core.steps.logics.var import NewVar, Set, Var
     from promptkit.core.steps.logics.while_step import While
     from promptkit.core.steps.workflow import Workflow
+
+    class ChatLoopWorkflow(Workflow):
+        '''`ChatLoop(...)` 返回的 `Workflow`，链式改本轮模板。
+
+            ChatLoop(...).Template("{{usr_input}}\\n\\n相关记忆：{{related}}")
+
+        和 `turn_template=` 完全等价，只是不用关键字参数。
+        （类在函数内定义：`chat_util` 顶部 import `Workflow` 会形成循环导入。）
+        '''
+
+        def __init__(self, *steps: object, chat_turn: ChatTurn, **kwargs):
+            super().__init__(*cast(Sequence[StepLike], steps), **kwargs)
+            self._chat_turn = chat_turn
+            self._finally: List[Step] = []
+
+        def Template(self, text: str) -> "ChatLoopWorkflow":  # noqa: N802
+            '''换掉每轮发给模型的内容（支持 `{{var}}` 占位）。'''
+            self._chat_turn.prompt_content = text
+            return self
+
+        def Finally(self, *steps: object) -> "ChatLoopWorkflow":  # noqa: N802
+            '''循环结束后**无论如何**都要跑的步骤。
+
+                ChatLoop(...).Finally(UseMemory(mem).Write("topics_covered"))
+
+            断网 / 模型报错 / Ctrl+C / `max_turns` 用尽时，普通「循环后面
+            的步骤」会被跳过；`.Finally()` 里的步骤仍会执行，再抛原异常。
+            '''
+            self._finally.extend(coerce_steps(*cast(Sequence[StepLike], steps)))
+            return self
+
+        def execute(self, context: Context) -> None:
+            failure: Optional[BaseException] = None
+            try:
+                super().execute(context)
+            except BaseException as exc:  # 控制流信号也先收尾再往上抛
+                failure = exc
+
+            cleanup_error: Optional[BaseException] = None
+            for step in self._finally:
+                try:
+                    execute_step(step, context)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+                    context.trace.append(
+                        f"finally:{step.name}:error:{type(exc).__name__}"
+                    )
+
+            if failure is not None:
+                raise failure
+            if cleanup_error is not None:
+                raise cleanup_error
 
     # 循环体从哪来：位置参数（DSL 写法）或 behavior= 关键字（老写法），二选一。
     # 两个都给的话「谁先谁后」只能靠猜，所以显式报错而不是静默合并。
@@ -523,6 +618,8 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             max_messages=compact_after,
             keep_recent=compact_keep,
             compact_prompt=compact_prompt or DEFAULT_COMPACT_PROMPT,
+            memory=compact_memory,
+            memory_key=compact_memory_key,
         )
         if compact_after is not None
         else None
@@ -537,6 +634,13 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         list(resolved_exit) if resolved_exit is not None else Var(CHAT_EXIT_KEY)
     )
 
+    turn = ChatTurn(
+        prompt_content=(
+            turn_template if turn_template is not None else "{{%s}}" % input_key
+        ),
+        output_key=output_key,
+        cautions=cautions,
+    )
     loop = While(
         Var(signal_key) != "end", max_iterations=max_turns
     ).Do(
@@ -545,27 +649,19 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         # 默认的 `raise` 会让整个工作流抛异常退出，收尾步骤全跳过，
         # 表现就是「聊完了，但桌面上没有文件」。
         Set(Var(input_key), Read(read_prompt, on_eof="break")),
-        If(Var(input_key).in_(exit_expr)).Then(
+        If(cast(VarExpr, Var(input_key)).in_(exit_expr)).Then(
             Set(Var(signal_key), "end"),
             Break(),
         ),
-        *coerce_steps(*loop_body),
+        *coerce_steps(*cast(Sequence[StepLike], loop_body)),
         # 压缩放在调模型**之前**（没配 compact_after 就没有这一步）
         *(() if compact_step is None else (compact_step,)),
-        ChatTurn(
-            prompt_content=(
-                turn_template
-                if turn_template is not None
-                else "{{%s}}" % input_key
-            ),
-            output_key=output_key,
-            cautions=cautions,
-        ),
+        turn,
         Echo(Var(output_key), render=render),
         *coerce_steps(*resolved_after_turn),
     )
 
-    return Workflow(
+    return ChatLoopWorkflow(
         NewVar(signal_key, default="start"),
         NewVar(input_key, default=""),
         NewVar(output_key, default=""),
@@ -573,7 +669,8 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         loop,
         # 用户退出后的收尾：退出词和 Ctrl+D 两条路都会走到这儿
         # （`max_turns` 用尽会抛 LoopLimitExceeded，不会走到）。
-        *coerce_steps(*after_end),
+        *coerce_steps(*cast(Sequence[StepLike], after_end)),
+        chat_turn=turn,
         name="chat_loop",
     )
 
@@ -606,7 +703,9 @@ class CompactStep(Step):
         keep_recent: int = 6,
         compact_prompt: str = DEFAULT_COMPACT_PROMPT,
         output_key: str = "compact_summary",
-        agent: Any = None,
+        agent: object = None,
+        memory: object = None,
+        memory_key: Optional[str] = None,
     ):
         if max_messages is not None and max_messages < 1:
             raise ValueError(
@@ -619,6 +718,30 @@ class CompactStep(Step):
         self.compact_prompt = compact_prompt
         self.output_key = output_key
         self.agent = agent
+        self.memory = None if memory is None else _as_memory(memory)
+        self.memory_key = memory_key or "conversation_summary"
+
+    # ---------------- DSL ----------------
+    def Keep(self, keep_recent: int) -> "CompactStep":  # noqa: N802
+        '''保留最近多少条原样不动（默认 6）。'''
+        if keep_recent < 0:
+            raise ValueError(f"keep_recent 不能是负数，得到 {keep_recent!r}")
+        self.keep_recent = keep_recent
+        return self
+
+    def To(
+        self, memory: object, key: Optional[str] = None
+    ) -> "CompactStep":  # noqa: N802
+        '''把压缩摘要追加进长期记忆；`key` 是前缀（默认 conversation_summary）。
+
+        `memory` 和读写工具一样，接收「Memory / 路径 / 命名空间」：
+
+            Compact(40).To(long_term_memory("data/tutor.db"))
+            Compact(40).To("data/tutor.db")      # 同一个路径 → 同一种布局
+        '''
+        self.memory = _as_memory(memory)
+        self.memory_key = key or self.memory_key
+        return self
 
     def execute(self, context: Context) -> None:
         agent = self.agent if self.agent is not None else context.get("agent")
@@ -637,7 +760,7 @@ class CompactStep(Step):
                 f"但 {type(agent).__name__} 没有。（promptkit.agent.Agent 有。）"
             )
 
-        history = agent.get_history()
+        history = getattr(agent, "get_history")()
         if self.max_messages is not None and len(history) <= self.max_messages:
             context.trace.append(self.name + ":skip")
             return
@@ -648,15 +771,22 @@ class CompactStep(Step):
             return
 
         summary = self._summarize(agent, old)
-        agent.load_history(
+        getattr(agent, "load_history")(
             [{"role": "user", "content": f"（之前对话的摘要：{summary}）"}]
             + list(recent),
             replace=True,
         )
         context[self.output_key] = summary
         context.trace.append(f"{self.name}:{len(old)}->{1 + len(recent)}")
+        if self.memory is not None:
+            # 压缩掉的短期内容转存长期记忆：用时间戳做键，保证每次压缩
+            # 都追加一条（KV 同名键会被覆盖，向量索引也会重复写同一个 id）。
+            self.memory.write(f"{self.memory_key}:{time.time_ns()}", summary)
+            context.trace.append(f"{self.name}:promote")
 
-    def _summarize(self, agent: Any, old: List[dict]) -> str:
+    def _summarize(
+        self, agent: object, old: Sequence[Mapping[str, object]]
+    ) -> str:
         '''把旧消息发给 agent 换一段摘要（摘要这次调用不留进历史）。'''
         from promptkit.prompt import render_text
 
@@ -671,12 +801,12 @@ class CompactStep(Step):
             allow_dollar=False,
         )
         saved = list(getattr(agent, "history", None) or [])
-        reply = agent.ask({"role": "user", "content": prompt})
+        reply = getattr(agent, "ask")({"role": "user", "content": prompt})
         # ask 会往历史里追加「摘要请求 / 摘要回复」，截回去 —— 紧接着
         # load_history(replace=True) 会重建，这一步让中间态也不残留。
         # （必须用副本：`ask` 追加的就是同一个列表对象。）
         if getattr(agent, "history", None) is not None:
-            agent.history = saved
+            setattr(agent, "history", saved)
         return str(reply)
 
     def describe(self) -> str:
@@ -693,16 +823,23 @@ def Compact(  # noqa: N802 - 跟随 DSL 命名
     keep_recent: int = 6,
     compact_prompt: str = DEFAULT_COMPACT_PROMPT,
     output_key: str = "compact_summary",
-    agent: Any = None,
+    agent: object = None,
+    memory: object = None,
+    memory_key: Optional[str] = None,
 ) -> CompactStep:
     '''压缩对话历史（塞进循环体，或用 `ChatLoop(compact_after=...)` 自动挂）。
 
         ChatLoop(compact_after=20)      # 声明式：循环里每轮自动检查
         ChatLoop(Compact(20))           # 手写：自己塞进循环体
         Compact(keep_recent=10)         # 总是压，保留最近 10 条
+        Compact(20, memory=mem)         # 压出来的摘要同时写进长期记忆
+        Compact(20).To("data/tutor.db") # 也可以直接给路径 / 命名空间
 
     `max_messages`：历史超过多少条才压（None = 总是压）。
     `keep_recent`：最近多少条原样保留，其余总结成一段摘要。
+    `memory`：给了就把摘要追加进长期记忆（键前缀见 `memory_key`）；
+    接收 Memory / 路径 / 命名空间，和 `MEMORY_REFERENCE` / `WRITE_MEMORY` 一致。
+    `memory_key`：追加键的前缀，默认 `conversation_summary`。
     '''
     return CompactStep(
         max_messages=max_messages,
@@ -710,6 +847,8 @@ def Compact(  # noqa: N802 - 跟随 DSL 命名
         compact_prompt=compact_prompt,
         output_key=output_key,
         agent=agent,
+        memory=memory,
+        memory_key=memory_key,
     )
 
 
@@ -738,7 +877,7 @@ class MakeFile(Step):
 
     name = "make_file"
 
-    def __init__(self, deliverable: Any):
+    def __init__(self, deliverable: object):
         self.deliverable = deliverable
 
     def execute(self, context: Context) -> None:
@@ -830,7 +969,7 @@ class SaveDeliverables(Step):
 
     def __init__(
         self,
-        items: Optional[Sequence[Any]] = None,
+        items: Optional[Sequence[object]] = None,
         *,
         when: str = "end",
     ):

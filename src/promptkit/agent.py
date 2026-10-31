@@ -20,7 +20,6 @@ import os
 import sys
 from contextlib import contextmanager
 from typing import (
-    Any,
     Dict,
     Iterator,
     List,
@@ -28,6 +27,7 @@ from typing import (
     Sequence,
     Type,
     Union,
+    cast,
 )
 
 from pydantic import BaseModel
@@ -51,16 +51,31 @@ from promptkit.config import (
     load_env_file,  # 再导出，保持 `from promptkit.agent import load_env_file` 可用
     resolve_api_key,  # 再导出：老代码仍可用（只认 DeepSeek 的密钥）
 )
+from promptkit.client_sys.types import Chunk, Completion, Message as ClientMessage
 from promptkit.core.display_sys.display import console_display
-from promptkit.core.event_sys import Event, EventBus, EventType, extract_reasoning
+from promptkit.core.event_sys import (
+    Event,
+    EventBus,
+    EventHandler,
+    EventType,
+    extract_reasoning,
+)
 from promptkit.core.display_sys.render import Verbosity, as_verbosity, render_markdown
 from promptkit.core.settings import settings
 from promptkit.executor import Executor
 from promptkit.prompt import Prompt
-from promptkit.tools import Tool, as_tools
+from promptkit.core.tool import Tool, as_tools
+from promptkit.types import (
+    JSONValue,
+    Message,
+    MessageContent,
+    MessageRole,
+    PromptInput,
+    ToolCall,
+    ToolCallFunction,
+    ToolLike,
+)
 
-# ask() 接受的消息类型：纯文本，或 {"role": ..., "content": ...}
-Message = Union[str, Dict[str, str]]
 
 __all__ = [
     "Agent",
@@ -85,7 +100,7 @@ _ROLE_LABELS = {"user": "你", "assistant": "助手", "system": "系统", "tool"
 _HISTORY_ROLES = frozenset({"user", "assistant", "tool", "function"})
 
 
-def normalize_history(records: Any) -> List[Dict[str, Any]]:
+def normalize_history(records: object) -> List[Message]:
     '''把「各种来源的历史」统一成干净的 `[{role, content}, ...]`。
 
     接受的东西：
@@ -105,14 +120,15 @@ def normalize_history(records: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw, (list, tuple)):
         return []
 
-    cleaned: List[Dict[str, Any]] = []
+    cleaned: List[Message] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "")).strip()
         if role not in _HISTORY_ROLES:
             continue
-        message: Dict[str, Any] = {"role": role, "content": item.get("content")}
+        content: MessageContent = item.get("content")
+        message: Message = {"role": cast(MessageRole, role), "content": content}
         # 工具调用记录要原样带着，否则续聊时模型会发现「工具结果没有对应的调用」
         if item.get("tool_calls"):
             message["tool_calls"] = item["tool_calls"]
@@ -124,7 +140,7 @@ def normalize_history(records: Any) -> List[Dict[str, Any]]:
     return cleaned
 
 
-def _load_history_source(records: Any) -> Any:
+def _load_history_source(records: object) -> object:
     '''路径就开文件读，其它原样返回。'''
     if not isinstance(records, (str, os.PathLike)):
         return records
@@ -142,7 +158,7 @@ def _load_history_source(records: Any) -> Any:
     return json.loads(text)
 
 
-def _history_as_markdown(history: Sequence[dict]) -> str:
+def _history_as_markdown(history: Sequence[Message]) -> str:
     '''把对话历史写成 Markdown（给人看的）。'''
     lines: List[str] = ["# 对话历史", ""]
     for message in history:
@@ -166,13 +182,13 @@ def _history_as_markdown(history: Sequence[dict]) -> str:
 class _SimpleCall:
     '''把流式拼出来的工具调用包装成和非流式一样的形状。'''
 
-    def __init__(self, payload: Dict[str, Any]):
+    def __init__(self, payload: ToolCall):
         self.id = payload["id"]
         self.function = _SimpleFunction(payload["function"])
 
 
 class _SimpleFunction:
-    def __init__(self, payload: Dict[str, Any]):
+    def __init__(self, payload: ToolCallFunction):
         self.name = payload["name"]
         self.arguments = payload["arguments"]
 
@@ -205,15 +221,15 @@ class Agent:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        start_prompts: Optional[List[Dict[str, str]]] = None,
+        start_prompts: Optional[Sequence[Dict[str, str]]] = None,
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         bus: Optional[EventBus] = None,
-        on_event: Optional[Any] = None,
+        on_event: Optional[EventHandler] = None,
         verbose: bool = False,
         register_as_default: bool = True,
         vendor: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, JSONValue]] = None,
         timeout: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ):
@@ -225,15 +241,14 @@ class Agent:
         self.api_key = resolve_vendor_api_key(self.spec, api_key)
 
         # 厂商默认参数（DeepSeek 的思考模式就住这儿）+ 用户参数。用户优先。
-        self.params: Dict[str, Any] = with_params(self.spec, params)
+        self.params: Dict[str, JSONValue] = with_params(self.spec, params)
         if max_tokens is not None:
             self.params["max_tokens"] = max_tokens
         self.timeout = timeout
 
         # 不要用可变对象做默认参数，否则所有实例会共享同一份列表
-        self.start_prompts = list(
-            DEFAULT_START_PROMPTS if start_prompts is None else start_prompts
-        )
+        start = DEFAULT_START_PROMPTS if start_prompts is None else start_prompts
+        self.start_prompts: List[Message] = [cast(Message, item) for item in start]
 
         self.bus = bus if bus is not None else EventBus()
         if on_event is not None:
@@ -252,8 +267,8 @@ class Agent:
             timeout=timeout,
         )
 
-        self.history: List[Dict[str, Any]] = []  # 上下文
-        self.messages: List[Dict[str, Any]] = self._build_messages()
+        self.history: List[Message] = []  # 上下文
+        self.messages: List[Message] = self._build_messages()
 
         if register_as_default:
             Agent._default = self
@@ -272,53 +287,67 @@ class Agent:
     def __repr__(self) -> str:
         return f"<Agent {self.vendor} model={self.model!r}>"
 
-    def on(self, handler: Any) -> Any:
+    def on(self, handler: EventHandler) -> EventHandler:
         '''挂一个事件 handler，返回它（可以当装饰器）。'''
         return self.bus.on(handler)
 
-    def _build_messages(self) -> List[Dict[str, Any]]:
+    def _build_messages(self) -> List[Message]:
         '''把系统提示和上下文拼成要发送给模型的消息列表。'''
         return [*self.start_prompts, *self.history]
 
     # ---------------- 请求 ----------------
     def _create(
-        self, tools: Optional[List[Dict[str, Any]]] = None, stream: bool = False
-    ):
+        self, tools: Optional[List[Dict[str, JSONValue]]] = None, stream: bool = False
+    ) -> object:
         '''发一次请求。只有传了工具才带 tools 参数。
 
         `self.params` 是厂商默认参数（DeepSeek 的思考模式）和用户参数的合并结果；
         Anthropic 那种不认这些参数的厂商，由客户端自己忽略 / 翻译，
         Agent 不需要知道。
         '''
-        kwargs: Dict[str, Any] = {
-            **self.params,
-            "model": self.model,
-            "messages": self.messages,
-            "stream": stream,
+        # 显式的 model / messages / stream / tools 优先于 params 里的同名项
+        extra = {
+            key: value
+            for key, value in self.params.items()
+            if key not in ("model", "messages", "stream", "tools")
         }
-        if tools:
-            kwargs["tools"] = tools
         # `chat.completions` 只是兼容外壳，等价于 client.create(...)
-        return self.client.chat.completions.create(**kwargs)
+        if tools:
+            return self.client.chat.completions.create(
+                model=self.model,
+                messages=self.messages,
+                stream=stream,
+                tools=tools,
+                **extra,
+            )
+        return self.client.chat.completions.create(
+            model=self.model,
+            messages=self.messages,
+            stream=stream,
+            **extra,
+        )
 
-    def _append_message(self, message: Dict[str, Any]) -> None:
+    def _append_message(self, message: Message) -> None:
         self.history.append(message)
         self.messages = self._build_messages()
 
-    def _append_assistant(self, assistant: Any) -> Dict[str, Any]:
+    def _append_assistant(self, assistant: object) -> Message:
         '''把助手的回复记进上下文。
 
         关键是**保留 reasoning_content**：请求里带了 tools 时，DeepSeek 要求
         把之前所有轮次的 reasoning_content 原样传回去，否则会返回 400。
         '''
-        message: Dict[str, Any] = {
+        message: Message = {
             "role": "assistant",
             "content": getattr(assistant, "content", None) or "",
         }
         tool_calls = getattr(assistant, "tool_calls", None)
         if tool_calls:
             message["tool_calls"] = [
-                call.model_dump() if hasattr(call, "model_dump") else dict(call)
+                cast(
+                    ToolCall,
+                    call.model_dump() if hasattr(call, "model_dump") else dict(call),
+                )
                 for call in tool_calls
             ]
         reasoning = extract_reasoning(assistant)
@@ -328,7 +357,7 @@ class Agent:
         self._append_message(message)
         return message
 
-    def _run_tool(self, tools_by_name: Dict[str, Tool], call: Any) -> Dict[str, Any]:
+    def _run_tool(self, tools_by_name: Dict[str, Tool], call: object) -> Message:
         '''执行一次工具调用，把结果包成 role="tool" 的消息。
 
         工具报错不会中断整个对话，而是把错误文本交给模型，让它自己决定怎么办。
@@ -336,8 +365,8 @@ class Agent:
         function = getattr(call, "function", None)
         name = getattr(function, "name", "") or ""
         raw = getattr(function, "arguments", "") or "{}"
-        call_id = getattr(call, "id", None) or name
-        reply: Dict[str, Any] = {"role": "tool", "tool_call_id": call_id}
+        call_id = cast(str, getattr(call, "id", None) or name)
+        reply: Message = {"role": "tool", "content": "", "tool_call_id": call_id}
 
         tool = tools_by_name.get(name)
         if tool is None:
@@ -358,10 +387,10 @@ class Agent:
 
     @contextmanager
     def _extra_handlers(
-        self, bus: EventBus, on_event: Optional[Any], verbose: bool
+        self, bus: EventBus, on_event: Optional[EventHandler], verbose: bool
     ) -> Iterator[EventBus]:
         '''给「这一次调用」临时挂 handler，结束就摘掉。'''
-        attached = []
+        attached: List[EventHandler] = []
         if on_event is not None:
             attached.append(bus.on(on_event))
         if verbose:
@@ -377,11 +406,11 @@ class Agent:
     # ---------------- 非流式 ----------------
     def ask(
         self,
-        prompt: Message,
-        tools: Optional[Sequence[Any]] = None,
+        prompt: PromptInput,
+        tools: Optional[Sequence[ToolLike]] = None,
         max_tool_rounds: Optional[int] = None,
         bus: Optional[EventBus] = None,
-        on_event: Optional[Any] = None,
+        on_event: Optional[EventHandler] = None,
         verbose: bool = False,
         stream: bool = False,
     ) -> str:
@@ -409,8 +438,8 @@ class Agent:
 
     def _ask_once(
         self,
-        prompt: Message,
-        tools: Optional[Sequence[Any]],
+        prompt: PromptInput,
+        tools: Optional[Sequence[ToolLike]],
         bus: EventBus,
         max_tool_rounds: int,
     ) -> str:
@@ -421,7 +450,7 @@ class Agent:
         by_name = {item.name: item for item in tool_list}
 
         for _ in range(max_tool_rounds + 1):
-            response = self._create(schemas)
+            response = cast(Completion, self._create(schemas))
             self._emit_usage(bus, response)
             assistant = response.choices[0].message
 
@@ -450,7 +479,7 @@ class Agent:
                 clean = clean[:-1]
             self.history = clean
             self.messages = self._build_messages()
-            replies: List[Dict[str, Any]] = []
+            replies: List[Message] = []
             try:
                 for call in calls:
                     function = getattr(call, "function", None)
@@ -494,7 +523,7 @@ class Agent:
         )
 
     @staticmethod
-    def _emit_usage(bus: EventBus, response: Any) -> None:
+    def _emit_usage(bus: EventBus, response: object) -> None:
         '''把这次调用的 token 用量发出去（服务端没给就跳过）。
 
         终端默认不显示，`log_display(...)` 会写进日志文件。
@@ -513,10 +542,10 @@ class Agent:
     # ---------------- 流式 ----------------
     def ask_stream(
         self,
-        prompt: Message,
-        tools: Optional[Sequence[Any]] = None,
+        prompt: PromptInput,
+        tools: Optional[Sequence[ToolLike]] = None,
         max_tool_rounds: Optional[int] = None,
-        on_event: Optional[Any] = None,
+        on_event: Optional[EventHandler] = None,
         verbose: bool = False,
     ) -> Iterator[Event]:
         '''流式版：**逐个事件**返回，边到边处理。
@@ -530,7 +559,7 @@ class Agent:
         否则自己迭代 + 总线显示就会看到两遍。想让总线处理就用
         `agent.ask(..., stream=True)` 或 `agent.ask(..., verbose=True)`。
         '''
-        handlers = []
+        handlers: List[EventHandler] = []
         if on_event is not None:
             handlers.append(on_event)
         if verbose:
@@ -553,8 +582,8 @@ class Agent:
 
     def _stream_events(
         self,
-        prompt: Message,
-        tools: Optional[Sequence[Any]],
+        prompt: PromptInput,
+        tools: Optional[Sequence[ToolLike]],
         max_tool_rounds: int,
     ) -> Iterator[Event]:
         self._append_message(self._normalise(prompt))
@@ -569,7 +598,7 @@ class Agent:
             pending: Dict[int, Dict[str, str]] = {}
             reasoning_open = False
 
-            for chunk in self._create(schemas, stream=True):
+            for chunk in cast(Iterator[Chunk], self._create(schemas, stream=True)):
                 choices = getattr(chunk, "choices", None)
                 if not choices:
                     continue
@@ -625,7 +654,7 @@ class Agent:
                 reasoning_open = False
                 yield Event(EventType.THINKING_END, {"text": reasoning})
 
-            calls = [
+            calls: List[ToolCall] = [
                 {
                     "id": slot["id"] or f"call_{index}",
                     "type": "function",
@@ -637,7 +666,7 @@ class Agent:
                 for index, slot in sorted(pending.items())
             ]
 
-            assistant: Dict[str, Any] = {"role": "assistant", "content": content}
+            assistant: Message = {"role": "assistant", "content": content}
             if calls:
                 assistant["tool_calls"] = calls
             if reasoning:
@@ -674,11 +703,11 @@ class Agent:
 
     # ---------------- 其它 ----------------
     @staticmethod
-    def _normalise(prompt: Message) -> Dict[str, str]:
+    def _normalise(prompt: PromptInput) -> Message:
         if isinstance(prompt, dict):
             return {
-                "role": prompt.get("role", "user"),
-                "content": prompt.get("content", ""),
+                "role": cast(MessageRole, prompt.get("role", "user")),
+                "content": cast(MessageContent, prompt.get("content", "")),
             }
         return {"role": "user", "content": str(prompt)}
 
@@ -696,7 +725,7 @@ class Agent:
         self.history = []
         self.rebuild()
 
-    def load_history(self, records: Any, *, replace: bool = True) -> int:
+    def load_history(self, records: object, *, replace: bool = True) -> int:
         '''把对话历史装回来，返回恢复了几条。
 
         这是 `export_history` 的反向操作，用来实现「这次退出、下次接着聊」：
@@ -717,7 +746,7 @@ class Agent:
         self.messages = self._build_messages()
         return len(messages)
 
-    def get_history(self) -> List[dict]:
+    def get_history(self) -> List[Message]:
         '''返回上下文（副本，避免外部意外修改）。'''
         return list(self.history)
 
@@ -760,7 +789,9 @@ class Agent:
         return full
 
     # ====================== 运行模型 ========================
-    def run(self, tools: Optional[Sequence[Any]] = None, verbose: bool = True) -> None:
+    def run(
+        self, tools: Optional[Sequence[ToolLike]] = None, verbose: bool = True
+    ) -> None:
         '''命令行对话，输入空行或 Ctrl+C / Ctrl+D 结束。'''
         print("输入空行结束对话。")
         while True:
@@ -783,7 +814,7 @@ def run_prompt(
     prompt: Prompt,
     output_model: Type[BaseModel],
     reset: bool = True,
-    tools: Optional[Sequence[Any]] = None,
+    tools: Optional[Sequence[ToolLike]] = None,
     **kwargs,
 ) -> BaseModel:
     '''运行一次「提示词 -> 结构化输出」，返回 output_model 的实例。'''

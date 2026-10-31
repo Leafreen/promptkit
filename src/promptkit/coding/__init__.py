@@ -14,7 +14,7 @@
   `ApplyChanges` / `ListDir` / `SearchCode`
 - **执行原语**（`coding.exec` / `coding.git`）：`RunCommand` / `RunTests` /
   `LintStep` / `GitDiff` / `GitCommit`
-- **生成与修复**（`coding.step` / `coding.loop`）：`CodingStep` / `FixLoop`
+- **生成与修复**（`core.steps.actions.coding` / `coding.loop`）：`CodingStep` / `FixLoop`
 
 再加一层**安全边界**（`coding.sandbox.Sandbox`）：相对路径、`base_dir` 之内、
 敏感文件黑名单、写权限、命令 allowlist、审计日志。
@@ -40,9 +40,10 @@
         ),
     )
 
-注意：这些步骤**不从 `promptkit.core` 导出**（core 是底层，不能反过来依赖
-coding）。显式 `from promptkit.coding import ...` 即可，也避免了和
-`core.ReadFile`（惰性表达式）、`default_tools.WriteFile`（工具）撞名。
+注意：`CodingStep` 的实现现在在 `core.steps.actions.coding`（Step 都归 core），
+这里仍按老路径 `from promptkit.coding import CodingStep` 再导出；其余步骤
+（`ReadFileStep` / `ApplyDiff` / `RunCommand` …）留在本包。也避免了和
+`core.ReadFile`（惰性表达式）、`core.tool.WriteFile`（工具）撞名。
 '''
 from promptkit.coding.diff import (
     FilePatch,
@@ -89,17 +90,33 @@ from promptkit.coding.io import (
 )
 from promptkit.coding.loop import FixLoop
 from promptkit.coding.sandbox import CODING_LOGGER, Sandbox
-from promptkit.coding.step import CodingStep
-from promptkit.coding.tools import (
-    ApplyDiffTool,
-    ListDirTool,
-    ReadFileTool,
-    RunCommandTool,
-    RunTestsTool,
-    SearchCodeTool,
-    WriteFileTool,
-    default_coding_tools,
-)
+
+# `CodingStep` 在 `core.steps.actions.coding`、工具在 `core.tool.coding`；
+# 延迟导入避免 `core` 与 `coding` 在包初始化时互相套圈。
+_LAZY = {
+    "CodingStep": ("promptkit.core.steps.actions.coding", "CodingStep"),
+    "ReadFileTool": ("promptkit.core.tool.coding", "ReadFileTool"),
+    "WriteFileTool": ("promptkit.core.tool.coding", "WriteFileTool"),
+    "ApplyDiffTool": ("promptkit.core.tool.coding", "ApplyDiffTool"),
+    "ListDirTool": ("promptkit.core.tool.coding", "ListDirTool"),
+    "SearchCodeTool": ("promptkit.core.tool.coding", "SearchCodeTool"),
+    "RunCommandTool": ("promptkit.core.tool.coding", "RunCommandTool"),
+    "RunTestsTool": ("promptkit.core.tool.coding", "RunTestsTool"),
+    "default_coding_tools": ("promptkit.core.tool.coding", "default_coding_tools"),
+}
+
+
+def __getattr__(name: str):
+    '''按需导入搬家到 core 的编码步骤 / 工具。'''
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(target[0]), target[1])
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     # 异常

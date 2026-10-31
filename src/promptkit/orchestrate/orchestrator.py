@@ -224,7 +224,7 @@ class Orchestrator:
                 )
                 by_name[task.name] = self._skipped(task, reason)
 
-        result = PlanResult(
+        plan_result = PlanResult(
             task=plan.task,
             results=[by_name[task.name] for task in plan.tasks],
             elapsed=time.perf_counter() - started,
@@ -236,10 +236,10 @@ class Orchestrator:
             raise TaskError(
                 f"任务 {aborted.name!r} 失败，计划已中止：{failed.error}",
                 task=aborted.name,
-                result=result,
+                result=plan_result,
                 code=propagated_code,
             )
-        return result
+        return plan_result
 
     # ---------------- 一层 ----------------
     def _execute_layer(

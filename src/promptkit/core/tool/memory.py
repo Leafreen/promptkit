@@ -1,4 +1,4 @@
-# memory/tool.py
+# core/tool/memory.py
 '''`RecallMemoryTool`：**只给读**的记忆工具，给 Agent 自主循环用。
 
 固定上下文用 `MemoryStep` / `RecallMemory` 就够了；只有「模型自己决定要不要
@@ -20,11 +20,12 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from typing import Any, Dict, Iterable, Optional, Sequence
+from typing import Dict, Iterable, Optional, Sequence, Union, cast
 
 from promptkit.memory.base import Memory, item_text
 from promptkit.memory.budget import TokenBudget
-from promptkit.tools import Tool
+from promptkit.memory.vector import EmbeddingClient
+from promptkit.core.tool.base import Tool, ToolSchema
 
 __all__ = [
     "RecallMemoryTool",
@@ -43,7 +44,7 @@ DEFAULT_DESCRIPTION = (
     "只是聊当前这几句时不要调用 —— 对话内容你已经看得到。"
 )
 
-DEFAULT_PARAMETERS: Dict[str, Any] = {
+DEFAULT_PARAMETERS: ToolSchema = {
     "type": "object",
     "properties": {
         "query": {
@@ -82,7 +83,7 @@ class RecallMemoryTool(Tool):
         budget: Optional[TokenBudget] = None,
         name: str = "recall_memory",
         description: Optional[str] = None,
-        parameters: Optional[Dict[str, Any]] = None,
+        parameters: Optional[ToolSchema] = None,
         logger: Optional[logging.Logger] = None,
     ):
         if memory is None:
@@ -108,7 +109,7 @@ class RecallMemoryTool(Tool):
         super().__init__(
             name=name,
             description=DEFAULT_DESCRIPTION if description is None else description,
-            parameters=dict(DEFAULT_PARAMETERS if parameters is None else parameters),
+            parameters=DEFAULT_PARAMETERS if parameters is None else parameters,
             func=self.run,
         )
 
@@ -124,7 +125,7 @@ class RecallMemoryTool(Tool):
         return self
 
     # ---------------- 工具本体 ----------------
-    def run(self, query: str, top_k: Optional[int] = None) -> Dict[str, Any]:
+    def run(self, query: str, top_k: Optional[int] = None) -> Dict[str, object]:
         '''工具的实际实现；返回值由 `Tool.call()` 转成 JSON 文本交给模型。'''
         text = "" if query is None else str(query).strip()
         if not text:
@@ -143,7 +144,7 @@ class RecallMemoryTool(Tool):
         requested = self.top_k if top_k is None else _int_or(top_k, self.top_k)
         capped = max(1, min(requested, self.max_top_k))
         try:
-            items: Sequence[Any] = self.memory.recall(text, top_k=capped)
+            items: Sequence[object] = self.memory.recall(text, top_k=capped)
         except NotImplementedError as exc:  # 纯 KV 记忆
             return {"error": str(exc), "results": []}
 
@@ -161,13 +162,13 @@ class RecallMemoryTool(Tool):
         return {"query": text, "results": results, "count": len(results)}
 
     # ---------------- 结果整形 ----------------
-    def _shape(self, item: Any) -> Dict[str, Any]:
+    def _shape(self, item: object) -> Dict[str, object]:
         '''一条结果：截断正文、四舍五入分数、按需过滤 metadata。'''
         body = item_text(item)
         if len(body) > self.max_item_chars:
             body = body[: max(1, self.max_item_chars - 1)] + "…"
 
-        shaped: Dict[str, Any] = {"text": body}
+        shaped: Dict[str, object] = {"text": body}
         score = item.get("score") if isinstance(item, dict) else getattr(item, "score", None)
         if isinstance(score, (int, float)):
             shaped["score"] = round(float(score), 4)
@@ -221,7 +222,7 @@ class WriteMemoryTool(Tool):
         "不要记录密码、密钥等敏感信息，也不要记录普通闲聊。"
     )
 
-    DEFAULT_PARAMETERS: Dict[str, Any] = {
+    DEFAULT_PARAMETERS: ToolSchema = {
         "type": "object",
         "properties": {
             "content": {
@@ -245,7 +246,7 @@ class WriteMemoryTool(Tool):
         *,
         name: str = "write_memory",
         description: Optional[str] = None,
-        parameters: Optional[Dict[str, Any]] = None,
+        parameters: Optional[ToolSchema] = None,
         max_calls: int = 5,
         max_chars: int = 2000,
         key_prefix: str = "note",
@@ -273,7 +274,7 @@ class WriteMemoryTool(Tool):
         super().__init__(
             name=name,
             description=self.DEFAULT_DESCRIPTION if description is None else description,
-            parameters=dict(self.DEFAULT_PARAMETERS if parameters is None else parameters),
+            parameters=self.DEFAULT_PARAMETERS if parameters is None else parameters,
             func=self.run,
         )
 
@@ -289,7 +290,7 @@ class WriteMemoryTool(Tool):
         return self
 
     # ---------------- 工具本体 ----------------
-    def run(self, content: str, key: Optional[str] = None) -> Dict[str, Any]:
+    def run(self, content: str, key: Optional[str] = None) -> Dict[str, object]:
         '''工具的实际实现；返回值由 `Tool.call()` 转成 JSON 文本交给模型。'''
         if self._calls >= self.max_calls:
             return {
@@ -338,16 +339,16 @@ class WriteMemoryTool(Tool):
         )
 
 
-def _int_or(value: Any, fallback: int) -> int:
+def _int_or(value: object, fallback: int) -> int:
     '''模型传的 `top_k` 可能是字符串甚至胡说，别让它炸掉工具。'''
     try:
-        return int(value)
+        return int(cast(Union[str, int, float], value))
     except (TypeError, ValueError):
         return fallback
 
 
 def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
-    source: Any,
+    source: object,
     *,
     name: str = "recall_memory",
     description: Optional[str] = None,
@@ -357,15 +358,15 @@ def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
     max_item_chars: int = 500,
     budget: Optional[TokenBudget] = None,
     namespace: Optional[str] = None,
-    embed_client: Optional[Any] = None,
-    **kwargs: Any,
+    embed_client: Optional[EmbeddingClient] = None,
+    **kwargs,
 ) -> Tool:
     '''把「命名空间 / 路径 / Memory / 现成 Tool」统一成一个**只读**的回忆工具。
 
     一行把长期记忆接进聊天，跟 `KNOWLEDGE_REFERENCE` 对称：
 
         from promptkit.memory import MEMORY_REFERENCE
-        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+        from promptkit.core.tool.builtin import WEB_SEARCH, WRITE_FILE
 
         Tools(WEB_SEARCH, MEMORY_REFERENCE("learner_001"), WRITE_FILE)
 
@@ -383,26 +384,30 @@ def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
     if isinstance(source, Tool):
         return source
 
-    tool_kwargs: Dict[str, Any] = dict(
-        name=name,
-        description=description,
-        top_k=top_k,
-        max_top_k=max_top_k,
-        max_calls=max_calls,
-        max_item_chars=max_item_chars,
-        budget=budget,
-    )
+    def wrap(memory: Memory) -> Tool:
+        return RecallMemoryTool(
+            memory,
+            name=name,
+            description=description,
+            top_k=top_k,
+            max_top_k=max_top_k,
+            max_calls=max_calls,
+            max_item_chars=max_item_chars,
+            budget=budget,
+        )
 
     # 2) 现成的记忆对象（有 recall 就行）
-    if isinstance(source, Memory) or callable(getattr(source, "recall", None)):
-        return RecallMemoryTool(source, **tool_kwargs)
+    if isinstance(source, Memory):
+        return wrap(source)
+    if callable(getattr(source, "recall", None)):
+        return wrap(cast(Memory, source))
 
     # 3) 命名空间 或 路径 → 先建一份长期记忆，再包一层
     if isinstance(source, (str, os.PathLike)):
         memory = _memory_from_source(
             source, namespace=namespace, embed_client=embed_client, **kwargs
         )
-        return RecallMemoryTool(memory, **tool_kwargs)
+        return wrap(memory)
 
     raise TypeError(
         "MEMORY_REFERENCE 需要命名空间字符串、路径、Memory 或 Tool，"
@@ -411,46 +416,27 @@ def MEMORY_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
 
 
 def _memory_from_source(
-    source: Any,
+    source: object,
     *,
     namespace: Optional[str] = None,
-    embed_client: Optional[Any] = None,
-    **kwargs: Any,
+    embed_client: Optional[EmbeddingClient] = None,
+    **kwargs,
 ) -> Memory:
     '''把「命名空间 / 路径」编译成一个 `LayeredMemory`（KV + 向量）。
 
     `MEMORY_REFERENCE` 和 `WRITE_MEMORY` 共用这段，保证两个工具拿到的
-    记忆对象**配置一致**（同一个路径 → 同一种 KV/向量布局）。
+    记忆对象**配置一致**（同一个路径 → 同一种 KV/向量布局）。规则本身
+    放在 `memory.as_memory`，`Compact(...).To(...)` 也走同一套。
     '''
-    from promptkit.memory.layered import long_term_memory
+    from promptkit.memory.layered import as_memory
 
-    if embed_client is None:
-        from promptkit.memory.adapters import HashEmbedding
-
-        embed_client = HashEmbedding(dimension=512)
-
-    text = os.fspath(source)
-    if os.sep in text or text.endswith((".db", ".sqlite", ".db3", ".jsonl")):
-        identity = namespace or (
-            os.path.splitext(os.path.basename(text))[0] or "default"
-        )
-        return long_term_memory(
-            identity,
-            path=text,
-            vector_path=text + ".vectors",
-            embed_client=embed_client,
-            **kwargs,
-        )
-    # 命名空间：默认数据目录
-    return long_term_memory(
-        namespace or text,
-        embed_client=embed_client,
-        **kwargs,
+    return as_memory(
+        source, namespace=namespace, embed_client=embed_client, **kwargs
     )
 
 
 def WRITE_MEMORY(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
-    source: Any,
+    source: object,
     *,
     name: str = "write_memory",
     description: Optional[str] = None,
@@ -458,15 +444,15 @@ def WRITE_MEMORY(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
     max_chars: int = 2000,
     key_prefix: str = "note",
     namespace: Optional[str] = None,
-    embed_client: Optional[Any] = None,
-    **kwargs: Any,
+    embed_client: Optional[EmbeddingClient] = None,
+    **kwargs,
 ) -> Tool:
     '''把「命名空间 / 路径 / Memory / 现成 Tool」统一成一个**可写**的记忆工具。
 
     一行把「写记忆」接进聊天，跟 `MEMORY_REFERENCE`（只读）对称：
 
         from promptkit.memory import MEMORY_REFERENCE, WRITE_MEMORY
-        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+        from promptkit.core.tool.builtin import WEB_SEARCH, WRITE_FILE
 
         Tools(
             WEB_SEARCH,
@@ -498,24 +484,28 @@ def WRITE_MEMORY(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
     if isinstance(source, Tool):
         return source
 
-    tool_kwargs: Dict[str, Any] = dict(
-        name=name,
-        description=description,
-        max_calls=max_calls,
-        max_chars=max_chars,
-        key_prefix=key_prefix,
-    )
+    def wrap(memory: Memory) -> Tool:
+        return WriteMemoryTool(
+            memory,
+            name=name,
+            description=description,
+            max_calls=max_calls,
+            max_chars=max_chars,
+            key_prefix=key_prefix,
+        )
 
     # 2) 现成的记忆对象（有 write 就行）
-    if isinstance(source, Memory) or callable(getattr(source, "write", None)):
-        return WriteMemoryTool(source, **tool_kwargs)
+    if isinstance(source, Memory):
+        return wrap(source)
+    if callable(getattr(source, "write", None)):
+        return wrap(cast(Memory, source))
 
     # 3) 命名空间 或 路径 → 先建一份长期记忆，再包一层
     if isinstance(source, (str, os.PathLike)):
         memory = _memory_from_source(
             source, namespace=namespace, embed_client=embed_client, **kwargs
         )
-        return WriteMemoryTool(memory, **tool_kwargs)
+        return wrap(memory)
 
     raise TypeError(
         "WRITE_MEMORY 需要命名空间字符串、路径、Memory 或 Tool，"

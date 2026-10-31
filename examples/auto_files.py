@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from promptkit.agent import Agent  # noqa: E402
 from promptkit.core import ChatWorkflow  # noqa: E402
-from promptkit.default_tools import WEB_SEARCH, WriteFile  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH, WriteFile  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "output")

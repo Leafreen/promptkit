@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, List, Sequence
+from typing import TYPE_CHECKING, List, Sequence, TypeAlias, Union
 
 from promptkit.core.errors import BreakSignal, ContinueSignal, GotoSignal, ReturnSignal
 from promptkit.core.event_sys.events import Event, EventType, bus_of
@@ -106,7 +106,11 @@ class Step(ABC):
         return f"<{type(self).__name__} name={self.name!r}>"
 
 
-def coerce_steps(*items: Any) -> List[Step]:
+#: 步骤：一个 Step，或一串 Step（含嵌套列表，`coerce_steps` 负责展平）
+StepLike: TypeAlias = Union[Step, Sequence[Step]]
+
+
+def coerce_steps(*items: StepLike) -> List[Step]:
     '''把「Step / Step 列表 / 嵌套列表」展平成一维的 Step 列表。
 
     这样 `.Then(a, b)`、`.Then([a, b])`、`.Then(workflow)` 都能用。

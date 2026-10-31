@@ -16,7 +16,7 @@ OpenAI 的 Chat Completions 和 Anthropic 的 Messages 只差四件事：
 响应翻译回 `types.py` 的 `Completion` / `Chunk`。`Agent` 那边一行都不用改。
 
 刻意**不用 anthropic SDK**：只有一个端点、一种 SSE 格式，urllib 几十行就够了，
-还省掉一个依赖（和 `default_tools/web_search.py` 一个路子）。
+还省掉一个依赖（和 `core/tool/builtin/web_search.py` 一个路子）。
 
 已知限制
 --------

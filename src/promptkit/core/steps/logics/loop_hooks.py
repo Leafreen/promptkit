@@ -51,7 +51,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
+
+if TYPE_CHECKING:  # 只用于类型标注：避免 loop_hooks <-> while_step 循环导入
+    from promptkit.core.context import Context
+    from promptkit.core.steps.logics.while_step import WhileStep
 
 __all__ = [
     "HookPoint",
@@ -151,8 +166,8 @@ class LoopHookEvent:
     '''
 
     point: HookPoint
-    loop: Any
-    context: Any
+    loop: "WhileStep"
+    context: "Context"
     iteration: int = 0
     condition: Optional[bool] = None
     signal: Optional[str] = None
@@ -180,6 +195,13 @@ class LoopHookEvent:
 #: 钩子抛任何 `Exception` 都不会影响主循环（见 `LoopHooks.trigger`）。
 LoopHookFn = Callable[[LoopHookEvent], Optional[bool]]
 
+#: 初始钩子的三种写法：另一张表 / {扩展点: 函数或函数列表} / (扩展点, 函数) 序列
+HookSpec = Union[
+    "LoopHooks",
+    Mapping[Union[str, HookPoint], object],
+    Iterable[object],
+]
+
 
 @dataclass(frozen=True)
 class HookFailure:
@@ -203,7 +225,7 @@ class HookFailure:
     '''
 
     point: HookPoint
-    fn: Any
+    fn: LoopHookFn
     error: BaseException
     iteration: int = 0
 
@@ -269,7 +291,7 @@ class LoopHooks:
 
     def __init__(
         self,
-        hooks: Optional[Union["LoopHooks", Mapping[Any, Any], Iterable[Any]]] = None,
+        hooks: Optional[HookSpec] = None,
         *,
         max_failures: int = 100,
     ):
@@ -513,24 +535,30 @@ class LoopHooks:
             return
         self.failures.append(HookFailure(point, fn, error, iteration))
 
-    def _load(self, hooks: Optional[Union["LoopHooks", Mapping[Any, Any], Iterable[Any]]]) -> None:
+    def _load(self, hooks: Optional[HookSpec]) -> None:
         if hooks is None:
             return
         if isinstance(hooks, LoopHooks):
             self.extend(hooks)
             return
+        pairs: Iterable[Tuple[Union[str, HookPoint], object]]
         if isinstance(hooks, Mapping):
-            pairs: Iterable[Any] = hooks.items()
+            pairs = cast(
+                Iterable[Tuple[Union[str, HookPoint], object]], hooks.items()
+            )
         elif isinstance(hooks, (list, tuple)):
-            pairs = hooks
+            pairs = cast(Iterable[Tuple[Union[str, HookPoint], object]], hooks)
         else:
             raise TypeError(
                 "hooks 需要 LoopHooks / dict（{扩展点: 函数或函数列表}）/ "
                 f"(扩展点, 函数) 列表，得到 {type(hooks).__name__}"
             )
         for point, value in pairs:
-            for fn in (value if _is_seq(value) else (value,)):
-                self.register(point, fn)
+            sequence = (
+                cast(Iterable[object], value) if _is_seq(value) else (value,)
+            )
+            for fn in sequence:
+                self.register(point, cast(LoopHookFn, fn))
 
     def __bool__(self) -> bool:
         return any(self._buckets.values())
@@ -543,7 +571,7 @@ class LoopHooks:
         return f"<LoopHooks {counts or 'empty'}>"
 
 
-def _is_seq(value: Any) -> bool:
+def _is_seq(value: object) -> bool:
     '''`dict` 的值是「函数列表」还是「单个函数」——注意别把 callable 当序列。'''
     return isinstance(value, (list, tuple)) and not callable(value)
 
@@ -571,7 +599,7 @@ def as_hook_point(point: Union[str, HookPoint]) -> HookPoint:
         raise ValueError(f"未知的循环 Hook 扩展点 {point!r}，可选：{options}") from None
 
 
-def loop_hooks(context: Any, *, create: bool = True) -> Optional[LoopHooks]:
+def loop_hooks(context: "Context", *, create: bool = True) -> Optional[LoopHooks]:
     '''取（或懒建）Context 里的**全局**循环钩子表 —— 运行时给所有循环挂钩子。
 
         def add_hook(ctx):

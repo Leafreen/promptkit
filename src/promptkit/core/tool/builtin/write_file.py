@@ -8,7 +8,7 @@
 后者才是「在合适的地方自动生成文件」。模型判断「这轮该产出文件了」，
 就调 `write_file`，框架负责安全地写下去。
 
-    from promptkit.default_tools import WriteFile
+    from promptkit.core.tool import WriteFile
     from promptkit.core import Tools
 
     writer = WriteFile("outputs")          # 只允许写在 outputs/ 下面
@@ -29,9 +29,10 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from promptkit.tools import Tool
+from promptkit.core.tool.base import Tool
+from promptkit.types import JSONValue
 
 __all__ = [
     "WriteFile",
@@ -241,7 +242,7 @@ class WriteFile:
             return
         path = os.path.join(self.root, self.index_file)
         try:
-            data: Dict[str, Any] = {}
+            data: Dict[str, JSONValue] = {}
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as handle:
                     loaded = json.load(handle)
@@ -250,7 +251,11 @@ class WriteFile:
             files = data.get("files")
             if not isinstance(files, list):
                 files = []
-            files = [item for item in files if item.get("path") != relative]
+            files = [
+                item
+                for item in files
+                if isinstance(item, dict) and item.get("path") != relative
+            ]
             files.append({"path": relative, "chars": size})
             data["files"] = files
             data["count"] = len(files)

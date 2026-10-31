@@ -11,9 +11,11 @@ ASCII 约 4 字符 1 token，非 ASCII（中文 / emoji）约 1 字符 1 token�
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence, TypeVar
 
 from promptkit.memory.base import item_text, replace_item_text
+
+T = TypeVar("T")
 
 __all__ = ["estimate_tokens", "TokenBudget"]
 
@@ -62,7 +64,7 @@ class TokenBudget:
         self.tokenizer = tokenizer
 
     # ---------------- 计数 ----------------
-    def count(self, text: Any) -> int:
+    def count(self, text: object) -> int:
         '''一段文本要花多少 token。'''
         content = "" if text is None else str(text)
         if self.tokenizer is not None:
@@ -74,17 +76,17 @@ class TokenBudget:
                 ) from None
         return estimate_tokens(content)
 
-    def count_items(self, items: Sequence[Any]) -> int:
+    def count_items(self, items: Sequence[object]) -> int:
         '''一串召回结果总共要花多少 token（调试 / 测试用）。'''
         return sum(self.count(item_text(item)) for item in items or ())
 
     # ---------------- 裁剪 ----------------
     def trim(
-        self, items: Sequence[Any], *, max_tokens: Optional[int] = None
-    ) -> List[Any]:
+        self, items: Sequence[T], *, max_tokens: Optional[int] = None
+    ) -> List[T]:
         '''裁到预算之内，返回**同类型**的列表。'''
         limit = self.max_tokens if max_tokens is None else int(max_tokens)
-        kept: List[Any] = []
+        kept: List[T] = []
         used = 0
 
         for index, item in enumerate(items or ()):
@@ -102,7 +104,7 @@ class TokenBudget:
         return kept
 
     # ---------------- 内部 ----------------
-    def _shorten(self, item: Any, text: str, room: int) -> Any:
+    def _shorten(self, item: T, text: str, room: int) -> T:
         '''把正文截到 `room` 个 token 以内（二分猜字符数，对自定义 tokenizer 也适用）。'''
         if not text:
             return replace_item_text(item, "")

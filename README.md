@@ -49,11 +49,9 @@ python -m build            # 产物在 dist/
 不用装也能用：项目本身就是 `promptkit` 这个包，把它的**父目录**放进
 `sys.path` 即可（见下节）。
 
-⚠️ 打包配置有个坑，已经处理了：这个项目是「**包目录 == 项目根目录**」的平铺结构
-（`promptkit/` 下面直接就是 `core/`、`cautions/`……），所以 `pyproject.toml` 里
-用了 `package-dir = {"promptkit": "."}` 显式映射，并且**手写了 `packages` 列表** ——
-`packages.find` 在这里会把 `core` / `cautions` / `default_tools` 当成顶层包。
-**新加子包时记得同步那个列表**，有测试盯着（`test_pyproject_package_list_covers_every_subpackage`）。
+⚠️ 布局已经改成 **src 布局**：包在 `src/promptkit/`，`pyproject.toml` 用
+`packages.find`（`where = ["src"]`）自动发现全部子包，不用再手写清单。
+有测试盯着（`test_pyproject_package_list_covers_every_subpackage`）。
 
 ## 作为包使用
 
@@ -291,6 +289,65 @@ If(lambda ctx: ctx["n"] > 1)              # 普通函数
 If(NeedRefund())                          # Condition 子类（可复用、有名字）
 If(And(big, even))                        # And / Or / Not 组合
 ```
+
+#### 语义条件：意图识别 / 语义比较
+
+`If / ElseIf / Switch` 也能接语义判断，但它做的是**闭集判定**，不是让模型自由发挥。
+多分类路由的推荐写法是「判一次 + Switch 分支」：
+
+```python
+from promptkit.core import Classify, Echo, Set, Switch, Var, Workflow
+from promptkit.core import LLMJudge
+
+wf = Workflow(
+    Set("sentiment", Classify(Var("usr_inpt"), "积极的", "消极的", "其他")),
+    Switch(Var("sentiment"))
+        .Case("积极的").Then(Echo("积极的"))
+        .Case("消极的").Then(Echo("消极的"))
+        .Default(Echo("判断不出来")),
+)
+wf.run(judge=LLMJudge(agent))   # judge 注入一次，所有语义判断共享
+```
+
+单个判断用 `Intent`（是不是这一档）/ `Similar`（两段文本的语义关系）：
+
+```python
+If(Intent(Var("reply"), "退款", "其他").AtLeast(0.8)).Then(...)   # 闭集：目标 + 「其他」
+If(Similar(Var("a"), Var("b"), "same", "contains")).Then(...)     # same / contains / entails
+If(Similar(Var("a"), Var("b"), "contradicts")).Then(...)          # 两者互相否定
+If(Similar(Var("a"), Var("b"), "independent")).Then(...)          # 两者无关
+```
+
+`Similar` 也可以用运算符写法（`Sem` 包住左边）：
+
+```python
+If(Sem(Var("a")) == Var("b")).Then(...)   # 语义相同（== 用在 Sem 上才是语义的）
+If(Sem(Var("a")) >= Var("b")).Then(...)   # a 包含 b
+If(Sem(Var("a")) >> Var("b")).Then(...)   # a 能推出 b
+If(Sem(Var("a")) ^  Var("b")).Then(...)   # a 和 b 互相否定
+```
+
+关系闭集共五个：`same`（等价）、`contains`（左边范围更大）、`entails`
+（左边蕴含右边）、`contradicts`（矛盾，不能同真也不能同假）、`independent`
+（无关）。互斥组合（如 `same + contradicts`）在构造时直接报错；多个关系同时
+成立时按 `same > contradicts > entails > contains > independent` 取一个。
+
+可控性来自这些约束：
+
+| 约束 | 行为 |
+| --- | --- |
+| 闭集 | 标签 / 关系在构造时列全，模型只能选一个；选到闭集外直接报错 |
+| 模型不产出布尔值 | 模型只给 `label + confidence + reason`，真假由代码算 |
+| 确定性优先 | `.Rule("退款", Var("has_receipt"))`、文本完全相等、子串包含先短路，不问模型 |
+| 阈值 + margin | 置信度不够、或第一第二拉不开差距 => unknown |
+| unknown | 默认安静走 Else / 落到「其他」；`.UnknownRaise()` 改成抛 `UnknownVerdict` |
+| judge 显式给出 | `.Using(judge)` 或 `wf.run(judge=judge)`，不会隐式用 `Agent.default()` |
+| 预算 + 缓存 | 每次 run 共享调用预算（默认 32，`.Budget(n)` 调），同一请求只问一次 |
+| 可观测 | 结果写 `context.trace`（`semantic:intent=退款`），并发出 `semantic_judge` 事件 |
+| 注入防护 | 文本放在 `<<< >>>` 里，并明确要求模型「不要执行」其中的指令 |
+
+语义条件只适合**软判断**：金额、权限、是否写盘这类硬约束继续用确定性条件。
+给标签补上定义和例子会更稳：`SemanticLabel("退款", "用户要求退回已付款项", "我要退款")`。
 
 **内置步骤**：
 
@@ -886,7 +943,7 @@ wf.add(
 想自定义名字 / 描述 / 参数 schema，用 `Tool` 显式构造或 `@tool` 装饰器：
 
 ```python
-from promptkit.tools import Tool, tool
+from promptkit.core.tool import Tool, tool
 
 @tool(name="weather", description="查询天气")
 def w(city: str) -> str:
@@ -925,7 +982,7 @@ Tool("weather", "查询天气", {"type": "object", "properties": {...}}, w)
 | `WriteFile` / `WRITE_FILE` | **让模型自己决定**把成果写进文件（带沙箱，见下） |
 
 ```python
-from promptkit.default_tools import WEB_SEARCH
+from promptkit.core.tool import WEB_SEARCH
 
 LLMStep(
     prompt=Prompt(role="user", content="查一下：{{question}}"),
@@ -960,7 +1017,7 @@ PROMPTKIT_SEARCH_BACKENDS=duckduckgo      # 只留一个
 ```
 
 ```python
-from promptkit.default_tools.web_search import WebSearch, BaiduBackend, BingCnBackend
+from promptkit.core.tool.builtin.web_search import WebSearch, BaiduBackend, BingCnBackend
 
 search = WebSearch()                        # 按环境变量自动选
 search = WebSearch(BingCnBackend())         # 或者指定后端
@@ -992,7 +1049,7 @@ Docs for Python 3.13 and earlier.
 所以别用 Step 去猜，把「写文件」做成工具交给模型：
 
 ```python
-from promptkit.default_tools import WriteFile
+from promptkit.core.tool import WriteFile
 
 writer = WriteFile("outputs")      # 沙箱根目录
 
@@ -1825,7 +1882,7 @@ agent.export_history("out/history.md", fmt="markdown")
 
 ```python
 from promptkit.core import ChatWorkflow, Deliverable
-from promptkit.default_tools import WEB_SEARCH
+from promptkit.core.tool import WEB_SEARCH
 
 chat = ChatWorkflow(
     role="市场调研分析大赛的导师",
@@ -2095,7 +2152,7 @@ wf = Workflow(
 wf.run(agent=agent, session="sessions/tutor.json")     # ← 就这样
 ```
 
-和 `ChatWorkflow(session=...)` 走的是**同一份代码**（`session.run_with_session`），
+和 `ChatWorkflow(session=...)` 走的是**同一份代码**（`Workflow.run(session=...)`），
 所以「开跑前 load、结束时 save、异常也 save」的行为完全一致。
 
 几个要点：
@@ -2176,7 +2233,7 @@ chat.run(agent=tutor, reset=True)           # 这次强制清空历史
 `D:\projects\outputs\`，桌面自然找不到。想让它写桌面，就自己建一个 writer：
 
 ```python
-from promptkit.default_tools import WriteFile
+from promptkit.core.tool import WriteFile
 
 writer = WriteFile(r"C:\Users\DELL\Desktop", allow=("md", "json", "txt"))
 Tools(WEB_SEARCH, RUN_COMMAND, writer)
@@ -2648,6 +2705,121 @@ SaveDeliverables()
   想写结构化内容得先 `LLMStep(output_model=...)` 抽出来 ——
   想写什么，由工作流显式决定。
 
+`write_on="end"` 的写回放在 `finally` 语义里：**断网、模型调用抛错、Ctrl+C、
+`max_turns` 用尽**时也会先把已经产生的记忆写回去，再继续抛原异常。之前这些
+情况会跳过循环后的写记忆，下次启动就像「记忆全没了」；`write_on="each_turn"`
+则每轮就落库，最多只丢当前这一轮。
+
+持久化取决于记忆后端本身：
+
+| 后端 | 是否持久化 |
+| --- | --- |
+| `long_term_memory("u1")` / `ChatWorkflow(memory="u1.db")` | 是（默认落到数据目录，KV 每条写完即提交、向量逐条追加） |
+| `KVMemory(":memory:")` | 否（进程内） |
+| `VectorMemory(embed)` 不传 `path=` | 否（内存索引） |
+
+聊天**历史**要跨进程保留还得配 `session=`（第 20 节），它和长期记忆是两套东西。
+
+ #### 短期 + 长期：一个 `store` 工作区
+
+`session` 管短期（会话里最近的消息），`memory` 管长期（结构化事实 + 可召回片段）。
+`ChatWorkflow(store=目录)` 把两者接在一起：
+
+```python
+chat = ChatWorkflow(
+    role="学习导师",
+    store="data/learners/u001",          # -> session.json + memory.db(+.vectors)
+    compact_after=40,                    # 历史超过 40 条自动压缩
+    compact_keep=8,                      # 最近 8 条原样保留
+    promote_compaction=True,             # 压出来的摘要追加进长期记忆
+    memory_config=MemoryConfig(
+        read=["level", "goal"],          # 开场读取结构化事实
+        recall=RecallConfig(output_key="related"),
+        write=["topics_covered"],        # 结束时写回结构化事实
+    ),
+    session_variables=["basic_info"],    # 开场问卷也一起跨进程保存
+)
+
+chat.run(agent=agent)
+```
+
+运行时的闭环：
+
+1. 启动：`session.json` 装回最近历史（含上次的摘要）；`MemoryStep(read)` 读取结构化长期事实
+2. 每轮：按用户输入召回相关长期片段，拼进这一轮 prompt
+3. 历史超过 `compact_after`：旧消息压成摘要，最近 `compact_keep` 条保留 —— 短期窗口封顶
+4. 压缩摘要按 `conversation_summary:时间戳` 追加进长期记忆（KV + 向量），后续轮次还能召回
+5. 退出 / 断网 / 异常：会话原子落盘，`MemoryStep(write)` 先执行再抛原异常
+
+边界：
+
+- 短期是 **session 文件**，长期是 **memory**。别用 session 存「永久事实」，
+  也别指望 memory 保存每句话原文。
+- `promote_compaction` 默认关，需要显式开启；必须同时有 `memory`（或 `store`）和
+  `compact_after`，否则构造时报错而不是静默不生效。
+- 显式传给 `session=` / `memory=` 的值优先于 `store`。
+- 不配 `memory_config` 时，`store` 只自动配「每轮召回」；写哪些结构化键仍然由你决定。
+
+#### 手写 `Workflow`：同一套能力用链式 DSL
+
+不想用 `ChatWorkflow` 的关键字参数时，每个能力都有对应的 DSL 形态：
+
+| 声明式写法 | 手写 DSL |
+| --- | --- |
+| `store=目录` | `Session("…/session.json")` + `long_term_memory("…/memory.db")` |
+| `session_variables=[...]` | `Session(path).Variables("basic_info")` |
+| `SystemPrompt(reset=False)` | `SystemPrompt().KeepHistory()` |
+| `memory_config.read=[...]` | `UseMemory(mem).Read("level", "goal")` |
+| `recall=RecallConfig(...)` | `UseMemory(mem).Recall("usr_input")` |
+| `write=[...]` | `UseMemory(mem).Write("topics_covered")` |
+| `compact_after=40` | `ChatLoop(Compact(40))` |
+| `compact_keep=8` | `Compact(40).Keep(8)` |
+| `promote_compaction=True` | `Compact(40).To(mem)` |
+| `turn_template=...` | `ChatLoop(...).Template(...)` |
+
+完整的手写版：
+
+```python
+memory = long_term_memory("data/u1/memory.db")
+
+chat = Workflow(
+    Role("学习导师"),
+    Want("陪练"),
+    ExitWords("exit"),
+
+    SystemPrompt().KeepHistory(),              # 装回会话历史，不重置
+    UseMemory(memory).Read("level", "goal"),
+
+    ChatLoop(
+        UseMemory(memory).Recall("usr_input"), # 每轮召回 → {{related}}
+        Compact(40).Keep(8).To(memory),        # 自动压缩 + 摘要进长期记忆
+    )
+    .Template("{{usr_input}}\n\n相关记忆：\n{{related}}")
+    .Finally(UseMemory(memory).Write("topics_covered")),
+
+    # 其余收尾步骤（交付物等）照常写在循环后面
+)
+
+chat.run(agent, session=Session("data/u1/session.json").Variables("basic_info"))
+```
+
+要点：
+
+- `Session` 是短期：文件里存 `messages` + `Variables(...)` 列出的 Context 变量。
+- `UseMemory` 是长期：`Read` / `Recall` / `Write` 编译成的仍是
+  `ReadMemory` / `RecallMemory` / `WriteMemory`，步骤树、事件、trace 不变。
+- `Compact(...).To(mem)` 是压缩摘要的出口：每次真正压缩都会追加一条
+  `conversation_summary:时间戳`。
+- **`.Finally(...)`** 是手写版的安全网：断网 / 报错 / Ctrl+C / 上限耗尽时，
+  循环后的普通步骤会被跳过，`.Finally()` 里的写记忆仍会执行。
+- `run(session=...)` 负责「先 load、结束后 save（异常也 save）」——
+  手写版和 `ChatWorkflow` 共用这一条入口，不需要额外函数。
+- `UseMemory(...)` / `Compact(...).To(...)` / `MEMORY_REFERENCE(...)` /
+  `WRITE_MEMORY(...)` 的「记忆来源」是同一套规则：可以给 `Memory` 对象，
+  也可以给路径或命名空间（`as_memory` 统一解析）。
+  **同一个路径会建出各自独立的实例**：KV 在磁盘上互通，向量索引是进程内的；
+  要「写了立刻能召回」，请只建一份 `memory` 再传给各处。
+
 #### 显式：普通 `Workflow`
 
 ```python
@@ -2770,7 +2942,7 @@ id ↔ 文本映射），pgvector 用 `psycopg` 实现那 4 个方法即可。
 | 想干的事 | 本仓库的名字 | 规格里的叫法 |
 | --- | --- | --- |
 | 读源码 | `ReadFileStep` | `ReadFile`（名字被 `core.ReadFile` 占了） |
-| 整文件写 | `WriteFileStep` | `WriteFile`（和 `default_tools.WriteFile` 撞名） |
+| 整文件写 | `WriteFileStep` | `WriteFile`（和 `core.tool.WriteFile` 撞名） |
 | 应用补丁 | `ApplyDiff` / `ApplyChanges` | `ApplyDiff` |
 | 列 / 搜 | `ListDir` / `SearchCode` | 同 |
 | 跑命令 / 测试 / lint | `RunCommand` / `RunTests` / `LintStep` | 同 |
@@ -3043,7 +3215,7 @@ diff 可应用率（干跑通过的比例）、lint 通过率、token / 延迟�
 #### 和规格的几处差异
 
 - **`ReadFile` → `ReadFileStep`**：`core.ReadFile` 是惰性表达式，重名会互相
-  覆盖；`WriteFile` 同理（`default_tools.WriteFile` 是工具）。
+  覆盖；`WriteFile` 同理（`core.tool.WriteFile` 是工具）。
 - **`Var("x").passed` → `Var("x")["passed"]`**：这个 DSL 不支持属性重载。
 - **`promptkit.io` → `promptkit.coding.io`**：所有编码原语收在一个包里，
   不给顶层加 `io` 这种容易撞名的模块。
@@ -3436,7 +3608,7 @@ def brief(topic: str, ctx: SkillContext) -> str:
 
 ```python
 from promptkit.core import ChatWorkflow, Function, LLMStep, Prompt
-from promptkit.default_tools import WEB_SEARCH, WriteFile
+from promptkit.core.tool import WEB_SEARCH, WriteFile
 
 WRITE = WriteFile("outputs")
 
@@ -3725,7 +3897,6 @@ config.py                     运行配置：密钥查找 / 模型名 / 默认�
 pyproject.toml                打包配置（wheel / sdist）
 agent.py                      Agent：请求、工具循环、发事件（自己不 print）
 session.py                    Session：会话持久化（退出保存、下次接着聊）
-tools.py                      Tool 与 JSON Schema 生成（function calling）
 executor.py                   结构化输出：JSON 抽取 + 重试
 prompt.py                     Prompt 对象与变量渲染（支持 {{a.b}} 点路径）
 features.py                   功能开关（实验性功能默认关闭）
@@ -3749,34 +3920,32 @@ memory/session.py             SessionMemory（包 Agent.history，只读）
 memory/vector.py              VectorMemory + Embedding/Store/Reranker 接口 + 切分
 memory/folder_store.py        FolderVectorStore（一个文件夹一份向量记忆）
 memory/layered.py             LayeredMemory / long_term_memory（KV + 向量）
-memory/tool.py                RecallMemoryTool（只给读的工具）
 memory/adapters/              embedding / store / rerank 的具体实现
 
 coding/                       ── 编码任务（见第 24 节）──
 coding/sandbox.py             路径白名单 / 敏感文件 / 写权限 / 命令 allowlist / 审计
 coding/diff.py                unified diff 解析 + 应用（不依赖 git）
 coding/formats.py             diff / full_file / json 三种可执行输出 + 校验
-coding/step.py                CodingStep（生成变更 + 干跑 + 重试）
 coding/io.py                  ReadFileStep / WriteFileStep / ApplyDiff / ApplyChanges / ListDir / SearchCode
 coding/exec.py                RunCommand / RunTests / LintStep
 coding/git.py                 GitDiff / GitCommit
 coding/loop.py                FixLoop（测试失败 → 带错误重试）
-coding/tools.py               给 Agent 自主编码用的工具
+# CodingStep 在 core/steps/actions/coding.py；给 Agent 自主编码的工具在 core/tool/coding.py
 
 orchestrate/                  ── 多代理编排（见第 25 节）──
 orchestrate/task.py           Task / TaskResult / Plan（重名、依赖、查环、分层）
 orchestrate/planner.py        TemplatePlanner / LLMPlanner
 orchestrate/orchestrator.py   Orchestrator：调度、预算、失败降级、结果汇总
-orchestrate/steps.py          PlanStep / ExecutePlan / AggregateStep
 orchestrate/agents.py         sub_agent / RoleFactory / 结构化回答
 orchestrate/delegate.py       DelegateTool（max_delegations / max_depth）
+# PlanStep / ExecutePlan / AggregateStep 在 core/steps/actions/orchestrate.py
 
 skill/                        ── Skill（见第 26 节）──
 skill/spec.py                 SkillSpec / Skill / @skill 装饰器
 skill/schema.py               从函数签名生成 JSON Schema + 参数校验
 skill/context.py              SkillContext（agent / executor / memory / tools / trace）
 skill/registry.py             SkillRegistry（注册、导出、执行、插件）
-skill/tools.py                把 Skill 包成 Tool 给 Agent
+# SkillStep 在 core/steps/actions/skill.py；Skill 的 Tool 视图在 core/tool/skill.py
 
 core/                         ── 工作流核心 ──
 core/errors.py                WorkflowError / UndefinedVariable / LoopLimitExceeded / ...
@@ -3796,6 +3965,15 @@ core/model_action/defaults.py                   全局默认约束
 core/model_action/caution_related/caution.py    Caution / CautionGroup
 core/model_action/caution_related/formatter.py  Formatter / Json / Xml / Regex / Yaml
 
+core/tool/                    ── 工具（function calling）──
+core/tool/base.py             Tool 与 JSON Schema 生成
+core/tool/coding.py           给 Agent 自主编码用的工具
+core/tool/skill.py            把 Skill 包成 Tool 给 Agent
+core/tool/memory.py           RecallMemoryTool（只给读的工具）
+core/tool/builtin/run_command.py    RUN_COMMAND：跑 shell 命令，跨平台 + UTF-8 容错
+core/tool/builtin/write_file.py     WriteFile：**模型自己决定**写文件（带沙箱）
+core/tool/builtin/web_search.py     WEB_SEARCH：联网搜索，四种后端可插拔
+
 core/steps/                   ── 步骤 ──
 core/steps/interface.py       Step 基类 + coerce_steps + execute_step（发 STEP 事件）
 core/steps/workflow.py        Workflow —— 顺序执行，本身也是 Step
@@ -3806,6 +3984,9 @@ core/steps/actions/interactive.py    Read / ReadFile / Echo / Save / SaveHistory
 core/steps/actions/memory.py         ReadMemory / WriteMemory / ForgetMemory / MemoryStep
 core/steps/actions/recall.py         RecallMemory（召回 + 预算 + 拼文本）
 core/steps/actions/message.py        MessageStep
+core/steps/actions/coding.py         CodingStep（生成变更 + 干跑 + 重试）
+core/steps/actions/orchestrate.py    PlanStep / ExecutePlan / AggregateStep
+core/steps/actions/skill.py          SkillStep
 core/steps/logics/conditions.py      条件对象 Condition / And / Or / Not / When
 core/steps/logics/var.py             变量步骤 NewVar / Set / Inc / Dec / Var
 core/steps/logics/if_step.py         If(...).Then(...).ElseIf(...).Else(...)
@@ -3819,10 +4000,6 @@ core/steps/logics/expr_sys/vartypes.py  Number / Str
 
 cautions/builtin.py           内置约束（OutputFormat / NoExtraText / ...）
 cautions/presets.py           预置组合（JSON_ONLY / PLAIN_TEXT / ...）
-default_tools/                自带工具
-default_tools/run_command.py    RUN_COMMAND：跑 shell 命令，跨平台 + UTF-8 容错
-default_tools/write_file.py     WriteFile：**模型自己决定**写文件（带沙箱）
-default_tools/web_search.py     WEB_SEARCH：联网搜索，四种后端可插拔
 examples/                     可运行示例
 tests/test_promptkit.py       冒烟测试
 .env.example                  密钥模板（复制成 .env，已被 .gitignore 忽略）
@@ -3853,49 +4030,55 @@ client_sys/registry      汇总：厂商表 / 识别 / 密钥 / 工厂
 agent                    只依赖 client_sys 的接口，不认具体厂商
 ```
 
-记忆也是独立的一层，**`core.steps` 只在函数里延迟 import 它**：
+记忆也是独立的一层，**`core.steps` / `core.tool` 只在函数里延迟 import 它**：
 
 ```
 memory/base / budget / config    纯数据 + 接口，不依赖任何东西
 memory/kv / vector / layered     具体实现（sqlite3 / 接口 + 适配器）
 memory/adapters                  OpenAI / Chroma / Qdrant / 本地模型
 core/steps/actions/memory.py     只认「有 read/write/recall 的对象」，鸭子类型
+core/tool/memory.py              RecallMemoryTool（同样只做鸭子类型调用）
 ```
 
 所以 `import promptkit.core` 不会把 SQLite 和向量库一起拖进来（有测试盯着）。
 
-编码任务是**最上面**的一层，只依赖 core，不被 core 依赖：
+编码任务的纯逻辑（diff / formats / sandbox / io / exec / git）只依赖 core；
+`CodingStep` 的实现归 `core.steps.actions.coding`，它按需导入本包的格式与沙箱，
+所以 `import promptkit.core` 不会把子进程和沙箱一起拖进来：
 
 ```
 coding/errors / diff / formats    纯逻辑（diff 解析、输出校验），不碰步骤
 coding/sandbox                    文件与命令的安全边界
-coding/step / io / exec / git     步骤（都实现 core 的 Step）
-coding/tools                      同一批能力的 Tool 包装
+coding/io / exec / git            步骤（都实现 core 的 Step）
+core/steps/actions/coding.py      CodingStep
+core/tool/coding.py               同一批能力的 Tool 包装
 ```
 
-`promptkit.coding` 也**不从 `core` 导出** —— 否则 `import promptkit.core`
-就会把子进程和文件沙箱一起拖进来（同样有测试盯着）。
+`promptkit.coding` 不从 `core` 的 `__init__` 导出，`CodingStep` 只在本包里
+再导出（同样有测试盯着）。
 
-编排在最上面，只依赖 core 和 `Agent`：
+编排只依赖 core 和 `Agent`，它的三个 Step 归 `core.steps.actions.orchestrate`：
 
 ```
 orchestrate/task                 Task / TaskResult / Plan（纯数据 + 校验）
 orchestrate/planner              需求 -> Plan（模板 / LLM）
 orchestrate/orchestrator         调度、预算、失败降级
-orchestrate/steps                PlanStep / ExecutePlan / AggregateStep
+core/steps/actions/orchestrate   PlanStep / ExecutePlan / AggregateStep
 orchestrate/delegate             委派工具（带次数和深度护栏）
 ```
 
-`import promptkit.core` 不会拖进编排；`promptkit.orchestrate` 里的东西
-也不会自动出现在 `core` 的命名空间里。
+`import promptkit.core` 不会拖进编排（那三个 Step 是惰性导出的）；
+`promptkit.orchestrate` 里的东西也不会自动出现在 `core` 的命名空间里。
 
-Skill 更靠上：它只依赖 `Agent` / `Executor` / `Tool` / `Workflow`，不被任何一层
-反依赖：
+Skill 只依赖 `Agent` / `Executor` / `Tool` / `Workflow`；它的 Step 和 Tool 视图
+归 core 里对应的模块，并且是惰性导出的：
 
 ```
 skill/spec / schema            纯定义（装饰器 + 从签名生成 Schema）
 skill/context                  Skill 运行时（需要模型时才拿 agent）
-skill/registry / tools         注册、导出成 Tool、执行
+skill/registry                 注册、导出、执行
+core/steps/actions/skill       SkillStep（工作流里的一步）
+core/tool/skill                Skill 的 Tool 视图
 ```
 
 `skill` 里没有任何全局注册表 —— 注册表是你显式创建、显式传进 `SkillContext` 的。
@@ -3918,6 +4101,7 @@ from promptkit.core.steps.logics import If, NewVar, Function     # 只要控制�
 from promptkit.core.steps.logics.expr_sys import Expr, Number    # 只要表达式层
 
 from promptkit.core.context import Context
+from promptkit.core.tool import Tool, WEB_SEARCH, WriteFile          # 工具
 from promptkit.core.model_action import Caution, JsonFormatter
 from promptkit.core.model_action.caution_related import RegexFormatter
 ```

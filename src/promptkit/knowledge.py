@@ -42,9 +42,19 @@ from promptkit.features import require
 require("knowledge")
 
 from dataclasses import dataclass, field  # noqa: E402
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence  # noqa: E402
+from typing import (  # noqa: E402
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Union,
+    cast,
+)
 
-from promptkit.tools import Tool  # noqa: E402
+from promptkit.core.tool import Tool  # noqa: E402
+from promptkit.types import JSONValue  # noqa: E402
 
 #: 持久化文件的格式版本（读旧文件永远兼容，读到更新的会报错）
 FORMAT_VERSION = 2
@@ -218,7 +228,7 @@ class Hit:
     score: float = 0.0
     index: int = -1
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, JSONValue]:
         '''转成可 JSON 序列化的字典。
 
         返回：
@@ -229,12 +239,13 @@ class Hit:
             只是展示 / 落盘用的快照，四舍五入会丢精度；需要精确分数
             就直接读 `.score`。
         '''
-        return {
+        payload: Dict[str, JSONValue] = {
             "text": self.text,
             "source": self.source,
             "score": round(self.score, 4),
             "index": self.index,
         }
+        return payload
 
     def __str__(self) -> str:
         '''人类可读形式：`正文（来源）`；来源为空时只输出正文。
@@ -281,7 +292,7 @@ class KnowledgeBase:
     max_chars: int = 400
     overlap: int = 60
     #: 增量同步的台账：source -> {"mtime": ..., "size": ...}
-    ingested: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    ingested: Dict[str, Dict[str, JSONValue]] = field(default_factory=dict)
 
     # 派生数据：按需重建（_dirty 时）
     _index: Dict[str, Dict[int, int]] = field(
@@ -495,7 +506,7 @@ class KnowledgeBase:
             present.add(name)
 
             info = os.stat(full)
-            fingerprint = {
+            fingerprint: Dict[str, JSONValue] = {
                 "mtime": round(info.st_mtime, 3),
                 "size": info.st_size,
             }
@@ -524,7 +535,13 @@ class KnowledgeBase:
         return stats
 
     @classmethod
-    def from_texts(cls, texts: Iterable[str], **kwargs: Any) -> "KnowledgeBase":
+    def from_texts(
+        cls,
+        texts: Iterable[str],
+        *,
+        max_chars: int = 400,
+        overlap: int = 60,
+    ) -> "KnowledgeBase":
         '''用一堆文本快速建库。
 
         参数：
@@ -540,13 +557,19 @@ class KnowledgeBase:
             逐条 `add()` 只标脏，索引在第一次检索时一次性重建，建库阶段
             不会反复分词。
         '''
-        kb = cls(**kwargs)
+        kb = cls(max_chars=max_chars, overlap=overlap)
         for text in texts:
             kb.add(text)
         return kb
 
     @classmethod
-    def from_dir(cls, directory: str, **kwargs: Any) -> "KnowledgeBase":
+    def from_dir(
+        cls,
+        directory: str,
+        *,
+        max_chars: int = 400,
+        overlap: int = 60,
+    ) -> "KnowledgeBase":
         '''用目录建库，等价于 `cls(**kwargs).add_dir(directory)`。
 
         参数：
@@ -564,7 +587,7 @@ class KnowledgeBase:
             语义是「一次性全量灌」：重复调用会重复灌。要幂等请用
             `KnowledgeBase(**kwargs).sync_dir(directory)`。
         '''
-        return cls(**kwargs).add_dir(directory)
+        return cls(max_chars=max_chars, overlap=overlap).add_dir(directory)
 
     # ---------------- 检索 ----------------
     def search(self, query: str, k: int = 3, min_score: float = 0.0) -> List[Hit]:
@@ -650,7 +673,7 @@ class KnowledgeBase:
 
     # ---------------- 拼提示词 ----------------
     @staticmethod
-    def format(hits: Sequence[Any], query: str = "") -> str:
+    def format(hits: "Sequence[Union[Hit, Dict[str, JSONValue]]]", query: str = "") -> str:
         '''把检索结果拼成带编号的资料块文本。
 
         参数：
@@ -735,7 +758,7 @@ class KnowledgeBase:
         )
 
     # ---------------- 持久化 ----------------
-    def to_dict(self, include_index: bool = False) -> Dict[str, Any]:
+    def to_dict(self, include_index: bool = False) -> Dict[str, JSONValue]:
         '''组装成可 JSON 序列化的字典（`save` 的内部表示）。
 
         参数：
@@ -754,18 +777,18 @@ class KnowledgeBase:
             `include_index=False` —— 频繁序列化大库时这点开销要算进去。
         '''
         self._ensure_index()
-        payload: Dict[str, Any] = {
+        payload: Dict[str, JSONValue] = {
             "format": _FORMAT_NAME,
             "version": FORMAT_VERSION,
             "max_chars": self.max_chars,
             "overlap": self.overlap,
-            "chunks": self.chunks,
-            "sources": self.sources,
-            "ingested": self.ingested,
+            "chunks": cast(JSONValue, self.chunks),
+            "sources": cast(JSONValue, self.sources),
+            "ingested": cast(JSONValue, self.ingested),
         }
         if include_index:
-            payload["index"] = self._index
-            payload["lengths"] = self._lengths
+            payload["index"] = cast(JSONValue, self._index)
+            payload["lengths"] = cast(JSONValue, self._lengths)
         return payload
 
     def save(self, path: str, include_index: bool = False) -> None:
@@ -807,7 +830,13 @@ class KnowledgeBase:
             raise
 
     @classmethod
-    def load(cls, path: str, **kwargs: Any) -> "KnowledgeBase":
+    def load(
+        cls,
+        path: str,
+        *,
+        max_chars: Optional[int] = None,
+        overlap: Optional[int] = None,
+    ) -> "KnowledgeBase":
         '''从磁盘加载知识库。
 
         参数：
@@ -833,7 +862,8 @@ class KnowledgeBase:
               错误会在分词阶段才暴露。
         '''
         with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
+            raw = json.load(handle)
+        data: Dict[str, JSONValue] = raw if isinstance(raw, dict) else {}
 
         version = data.get("version")
         if isinstance(version, int) and version > FORMAT_VERSION:
@@ -842,32 +872,32 @@ class KnowledgeBase:
                 f"v{FORMAT_VERSION}：请升级 promptkit 或重新构建"
             )
 
-        settings = dict(kwargs)
-        settings.setdefault("max_chars", data.get("max_chars", 400))
-        settings.setdefault("overlap", data.get("overlap", 60))
+        file_max_chars = data.get("max_chars", 400)
+        file_overlap = data.get("overlap", 60)
 
         kb = cls(
-            chunks=list(data.get("chunks", [])),
-            sources=list(data.get("sources", [])),
-            **settings,
+            chunks=list(cast(List[str], data.get("chunks") or [])),
+            sources=list(cast(List[str], data.get("sources") or [])),
+            max_chars=max_chars if max_chars is not None else cast(int, file_max_chars),
+            overlap=overlap if overlap is not None else cast(int, file_overlap),
         )
-        kb.ingested = dict(data.get("ingested", {}))
+        kb.ingested = cast(Dict[str, Dict[str, JSONValue]], data.get("ingested", {}))
 
         # 存了索引就直接用，省掉一次全量分词
-        raw_index = data.get("index")
+        raw_index = cast(Dict[str, Dict[str, int]], data.get("index") or {})
         if raw_index:
             kb._index = {
                 token: {int(position): count for position, count in postings.items()}
                 for token, postings in raw_index.items()
             }
-            kb._lengths = [int(n) for n in data.get("lengths", [])]
+            kb._lengths = [int(n) for n in cast(List[int], data.get("lengths") or [])]
             kb._dirty = len(kb._lengths) != len(kb.chunks)
         return kb
 
     # 旧名字，保留可用。注意：它是 `to_dict` 的**别名**，返回 dict，不是 JSON 字符串
     dumps = to_dict
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> Dict[str, int]:
         '''给 CLI / 日志看的概况。
 
         返回：
@@ -907,19 +937,20 @@ class KnowledgeBase:
 
 
 def KNOWLEDGE_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
-    source: Any,
+    source: object,
     *,
     name: str = "search_knowledge_base",
     description: Optional[str] = None,
     k: int = 3,
-    **kwargs: Any,
+    max_chars: int = 400,
+    overlap: int = 60,
 ) -> Tool:
     '''把「目录 / 单文件 / KnowledgeBase / 现成 Tool」统一成一个检索工具。
 
     一行把知识库接进聊天：
 
         from promptkit.knowledge import KNOWLEDGE_REFERENCE
-        from promptkit.default_tools import WEB_SEARCH, WRITE_FILE
+        from promptkit.core.tool.builtin import WEB_SEARCH, WRITE_FILE
 
         Tools(WEB_SEARCH, KNOWLEDGE_REFERENCE("path/to/knowledge"), WRITE_FILE)
 
@@ -963,9 +994,11 @@ def KNOWLEDGE_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool�
     if isinstance(source, (str, os.PathLike)):
         path = os.fspath(source)
         if os.path.isdir(path):
-            kb = KnowledgeBase.from_dir(path, **kwargs)
+            kb = KnowledgeBase.from_dir(
+                path, max_chars=max_chars, overlap=overlap
+            )
         else:
-            kb = KnowledgeBase(**kwargs)
+            kb = KnowledgeBase(max_chars=max_chars, overlap=overlap)
             kb.add_file(path)
         return kb.as_tool(name=name, description=description, k=k)
     raise TypeError(

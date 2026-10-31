@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, List, Optional, Sequence, Type, TypeVar, cast
+from typing import TYPE_CHECKING, Generic, List, Optional, Sequence, Type, TypeVar, cast
 
 from promptkit.core.model_action.caution_related.caution import (
     Caution,
@@ -17,9 +17,14 @@ from promptkit.core.event_sys.events import bus_of
 from promptkit.core.settings import settings
 from promptkit.core.steps.interface import Step
 from promptkit.prompt import Prompt
+from promptkit.types import ToolLike
 
 if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
     from pydantic import BaseModel
+
+    from promptkit.core.event_sys import EventBus
+    from promptkit.core.model_action.caution_related.formatter import Formatter
+    from promptkit.types import AgentLike
 
 #: 输出类型参数：`LLMStep[Intent](...)`，让 IDE / mypy 知道这一步产出什么
 T = TypeVar("T", bound="BaseModel")
@@ -53,15 +58,15 @@ class LLMStep(Step, Generic[T]):
     prompt: Prompt
     output_model: Optional[Type["BaseModel"]] = None
     output_key: str = "output"
-    agent: Any = None
+    agent: object = None
     reset: bool = False
     max_retries: Optional[int] = None      # None = 用 settings.max_retries
-    tools: Optional[List[Any]] = None  # 工具：Tool / 函数 / API 原生 dict
+    tools: Optional[Sequence[ToolLike]] = None  # 工具：Tool / 函数 / API 原生 dict
 
     #: 约束：Caution / 字符串 / 它们的列表 / 组合，都会被展平
-    cautions: Optional[Sequence[Any]] = None
+    cautions: Optional[Sequence[object]] = None
     #: 事后解析器：Formatter 实例，或 "json" / "xml" / "yaml" / "regex:<pattern>"
-    formatter: Any = None
+    formatter: object = None
     #: 自动把 output_model 的 JSON Schema 作为约束加进去（会多花 token）
     #: None = 用 settings.auto_schema
     auto_schema: Optional[bool] = None
@@ -149,23 +154,23 @@ class LLMStep(Step, Generic[T]):
         variables = context.to_dict()
 
         if self.reset:
-            agent.reset()
+            getattr(agent, "reset")()
 
         # 把工作流上的事件总线交给模型层，这样「思考/工具调用/回复」
         # 也能在 Workflow.run(bus=...) 这一层看到
-        bus = cast(Any, bus_of(context))
+        bus: Optional["EventBus"] = bus_of(context)
 
         prompt = self.build_prompt(context)
 
         if self.output_model is None:
-            value: Any = agent.ask(
+            value: object = getattr(agent, "ask")(
                 prompt.render(**variables), tools=self.tools, bus=bus
             )
         else:
             value = Executor(
-                agent=agent,
+                agent=cast("AgentLike", agent),
                 max_retries=self.retry_count(),
-                formatter=self.formatter,
+                formatter=cast("Formatter | str | None", self.formatter),
             ).run(prompt, self.output_model, tools=self.tools, bus=bus, **variables)
 
         context[self.output_key] = value
@@ -179,7 +184,7 @@ class LLMStep(Step, Generic[T]):
         tools = ""
         if self.tools:
             names = ", ".join(
-                getattr(t, "name", None) or getattr(t, "__name__", "?")
+                str(getattr(t, "name", None) or getattr(t, "__name__", "?"))
                 for t in self.tools
             )
             tools = f" [tools: {names}]"

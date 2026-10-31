@@ -2,7 +2,7 @@
 '''If / While 用的条件。'''
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Union
+from typing import TYPE_CHECKING, Callable, Union
 
 from promptkit.core.steps.logics.expr_sys.expr import Expr, as_expr
 
@@ -148,12 +148,12 @@ class WhenExpr(Expr):
     和 C 一样是**短路**的：只求值被选中的那一边。
     '''
 
-    def __init__(self, condition: ConditionLike, then_value: Any, else_value: Any):
+    def __init__(self, condition: ConditionLike, then_value: object, else_value: object):
         self.condition = as_condition(condition)
         self.then_value = as_expr(then_value)
         self.else_value = as_expr(else_value)
 
-    def eval(self, context: Context) -> Any:
+    def eval(self, context: Context) -> object:
         chosen = self.then_value if self.condition(context) else self.else_value
         return chosen.eval(context)
 
@@ -162,7 +162,7 @@ class WhenExpr(Expr):
 
 
 def When(  # noqa: N802
-    condition: ConditionLike, then_value: Any, else_value: Any
+    condition: ConditionLike, then_value: object, else_value: object
 ) -> WhenExpr:
     '''When(条件, 成立时的值, 不成立时的值)：C 的 `cond ? a : b`。'''
     return WhenExpr(condition, then_value, else_value)

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import operator
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional, Union, cast
 
 from promptkit.core._missing import MISSING
 from promptkit.core.errors import UndefinedVariable
@@ -32,13 +32,13 @@ class VarDecl(VarExpr, Step):
         self,
         var: str,
         var_type: Optional[VarType] = None,
-        default: Any = MISSING,
+        default: object = MISSING,
     ):
         VarExpr.__init__(self, var)
         self.var_type = var_type
         self.default = default
 
-    def default_value(self) -> Any:
+    def default_value(self) -> object:
         '''没有显式给 default 时，用类型自带的默认值。'''
         if self.default is not MISSING:
             return self.default
@@ -65,7 +65,7 @@ class SetStep(Step):
 
     name = "set"
 
-    def __init__(self, var: str, value: Any):
+    def __init__(self, var: str, value: object):
         if not isinstance(var, str) or not var:
             raise TypeError(f"变量名必须是非空字符串，得到 {var!r}")
         self.var = var
@@ -96,13 +96,13 @@ class SetItemStep(Step):
 
     name = "set_item"
 
-    def __init__(self, item: ItemExpr, value: Any):
+    def __init__(self, item: ItemExpr, value: object):
         if not isinstance(item, ItemExpr):
             raise TypeError(f"SetItemStep 需要一个下标表达式，得到 {item!r}")
         self.item = item
         self.value = as_expr(value)
 
-    def _key(self, context: Context) -> Any:
+    def _key(self, context: Context) -> object:
         key = self.item.key
         return key.eval(context) if isinstance(key, Expr) else key
 
@@ -123,11 +123,11 @@ class SetItemStep(Step):
         return f"SetItem({self.item!r}, {self.value!r})"
 
 
-def _var_name(name: Any) -> str:
+def _var_name(name: object) -> str:
     '''既接受字符串，也接受 NewVar(...) / Number(...) 返回的句柄。'''
     if isinstance(name, VarExpr):
         return name.var
-    return name
+    return cast(str, name)
 
 
 # 复合赋值用到的运算
@@ -150,7 +150,7 @@ class CompoundAssignStep(Step):
 
     name = "compound"
 
-    def __init__(self, var: str, by: Any = 1, op: str = "+"):
+    def __init__(self, var: str, by: object = 1, op: str = "+"):
         if not isinstance(var, str) or not var:
             raise TypeError(f"变量名必须是非空字符串，得到 {var!r}")
         if op not in _COMPOUND_OPS:
@@ -178,12 +178,12 @@ class CompoundAssignStep(Step):
         return f"CompoundAssign({self.var!r}, {self.op!r}, {self.by!r})"
 
 
-def Inc(name: Any, by: Any = 1) -> CompoundAssignStep:  # noqa: N802
+def Inc(name: object, by: object = 1) -> CompoundAssignStep:  # noqa: N802
     '''Inc("i") 相当于 i++；Inc("i", 2) 相当于 i += 2。'''
     return CompoundAssignStep(_var_name(name), by, "+")
 
 
-def Dec(name: Any, by: Any = 1) -> CompoundAssignStep:  # noqa: N802
+def Dec(name: object, by: object = 1) -> CompoundAssignStep:  # noqa: N802
     '''Dec("i") 相当于 i--；Dec("i", 2) 相当于 i -= 2。'''
     return CompoundAssignStep(_var_name(name), by, "-")
 
@@ -191,7 +191,7 @@ def Dec(name: Any, by: Any = 1) -> CompoundAssignStep:  # noqa: N802
 def NewVar(  # noqa: N802
     name: str,
     type: Optional[VarType] = None,  # noqa: A002 - 跟 DSL 命名保持一致
-    default: Any = MISSING,
+    default: object = MISSING,
 ) -> VarDecl:
     '''声明一个变量。
 
@@ -209,7 +209,9 @@ def NewVar(  # noqa: N802
     return VarDecl(name, var_type=type, default=default)
 
 
-def Var(name: Any = None, *, val: Any = MISSING) -> Any:  # noqa: N802
+def Var(  # noqa: N802
+    name: object = None, *, val: object = MISSING
+) -> Union[VarExpr, SetStep]:
     '''两种用法：
 
         Var("state")                    # 引用：一个惰性表达式
@@ -221,10 +223,10 @@ def Var(name: Any = None, *, val: Any = MISSING) -> Any:  # noqa: N802
         return SetStep(_var_name(name), val)
     if isinstance(name, VarExpr):
         return name
-    return VarExpr(name)
+    return VarExpr(cast(str, name))
 
 
-def Set(name: Any, value: Any) -> Any:  # noqa: N802
+def Set(name: object, value: object) -> Union[SetItemStep, SetStep]:  # noqa: N802
     '''给变量赋值。
 
         Set("state", "结束")                 # 普通变量

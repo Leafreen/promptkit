@@ -31,7 +31,7 @@ from promptkit.core import (  # noqa: E402
     Prompt,
     Verbosity,
 )
-from promptkit.default_tools import WEB_SEARCH, WriteFile  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH, WriteFile  # noqa: E402
 from promptkit.memory import KVMemory  # noqa: E402
 from promptkit.skill import SkillContext, SkillRegistry, skill  # noqa: E402
 from promptkit.skill.chat import AgentHolder  # noqa: E402
@@ -145,7 +145,7 @@ def show() -> int:
 def fake() -> int:
     from unittest import mock
 
-    from promptkit.tools import as_tools
+    from promptkit.core.tool import as_tools
 
     workflow = build().build()
     with mock.patch("builtins.input", side_effect=["这一节讲什么？", "exit"]):

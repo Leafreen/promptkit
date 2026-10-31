@@ -8,10 +8,13 @@
 所以 Read("请输入 a：") 读回来的 "12" 在赋值给 Number 变量时会变成 int 12，
 `+` 才是加法而不是字符串拼接。
 '''
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable, Union
 
 from promptkit.core._missing import MISSING
 from promptkit.core.errors import VarTypeError
+
+if TYPE_CHECKING:  # 只用于类型标注，避免与 var.py 循环导入
+    from promptkit.core.steps.logics.var import VarDecl
 
 
 class VarType:
@@ -22,17 +25,22 @@ class VarType:
         NewVar("a", type=Number)     # 等价写法
     '''
 
-    def __init__(self, name: str, coerce: Callable[[Any, str], Any], default: Any):
+    def __init__(
+        self,
+        name: str,
+        coerce: Callable[[object, str], object],
+        default: object,
+    ):
         self.name = name
         self._coerce = coerce
         self.default = default
 
-    def coerce(self, value: Any, var_name: str) -> Any:
+    def coerce(self, value: object, var_name: str) -> object:
         '''把 value 转成该类型；转不了就抛 VarTypeError。'''
-        
+
         return self._coerce(value, var_name)
 
-    def __call__(self, name: str, default: Any = MISSING):
+    def __call__(self, name: str, default: object = MISSING) -> "VarDecl":
         '''声明一个该类型的变量，等价于 NewVar(name, type=self)。'''
         # 延迟导入，避免 core.vartypes <-> core.steps.var 的循环依赖
         from promptkit.core.steps.logics.var import NewVar
@@ -43,7 +51,7 @@ class VarType:
         return self.name
 
 
-def _to_number(value: Any, var_name: str) -> Any:
+def _to_number(value: object, var_name: str) -> Union[int, float]:
     # bool 是 int 的子类，这里不特殊处理，方便当 0/1 用
     if isinstance(value, (int, float)):
         return value
@@ -62,7 +70,7 @@ def _to_number(value: Any, var_name: str) -> Any:
     )
 
 
-def _to_str(value: Any, var_name: str) -> str:
+def _to_str(value: object, var_name: str) -> str:
     if isinstance(value, str):
         return value
     if value is None or isinstance(value, (int, float, bool)):
@@ -77,6 +85,6 @@ Number = VarType("Number", _to_number, 0)
 Str = VarType("Str", _to_str, "")
 
 
-def var_type_name(var_type: Any) -> str:
+def var_type_name(var_type: object) -> str:
     '''给错误信息和 repr 用。'''
     return var_type.name if isinstance(var_type, VarType) else str(var_type)

@@ -19,7 +19,9 @@
 '''
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+import os
+
+from typing import TYPE_CHECKING, Dict, List, Optional, cast
 
 from promptkit.memory.base import Memory
 from promptkit.memory.kv import KVMemory
@@ -70,7 +72,7 @@ class LayeredMemory(Memory):
         )
 
     # ---------------- 读 ----------------
-    def read(self, key: str, default: Any = None) -> Any:
+    def read(self, key: str, default: object = None) -> object:
         if self.kv is None:
             raise NotImplementedError(
                 "LayeredMemory 没有 KV 后端，读不了键；"
@@ -79,14 +81,14 @@ class LayeredMemory(Memory):
         return self.kv.read(key, default)
 
     # ---------------- 写 ----------------
-    def write(self, key: str, value: Any) -> None:
+    def write(self, key: str, value: object) -> None:
         if self.kv is not None:
             self.kv.write(key, value)
         if self.vector is not None and self.mirror:
             self.vector.write(key, value)
 
     # ---------------- 召回 ----------------
-    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def recall(self, query: str, top_k: int = 5) -> List[Dict[str, object]]:
         if self.vector is None:
             raise NotImplementedError(
                 "LayeredMemory 没有向量后端，召回不了；"
@@ -114,7 +116,7 @@ class LayeredMemory(Memory):
     def __enter__(self) -> "LayeredMemory":
         return self
 
-    def __exit__(self, *exc_info: Any) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.close()
 
     def __repr__(self) -> str:
@@ -194,3 +196,64 @@ def long_term_memory(
             min_score=min_score,
         )
     return LayeredMemory(kv=kv, vector=vector, namespace=namespace, mirror=mirror)
+
+
+def as_memory(
+    source: object,
+    *,
+    namespace: Optional[str] = None,
+    embed_client: Optional[EmbeddingClient] = None,
+    **kwargs,
+) -> Memory:
+    '''把「Memory 对象 / 路径 / 命名空间」统一成一份长期记忆。
+
+    `MEMORY_REFERENCE(...)` / `WRITE_MEMORY(...)` / `Compact(...).To(...)`
+    都用这一套规则，所以三处的写法可以一样：
+
+        as_memory(memory)               # 已经是记忆对象 → 原样返回
+        as_memory("learner_001")        # 命名空间 → 默认数据目录
+        as_memory("data/tutor.db")      # 路径 → KV 落在这个文件，
+                                        # 向量落在同级 <路径>.vectors/
+
+    路径判定与工厂一致：含分隔符，或以 `.db` / `.sqlite` / `.db3` / `.jsonl`
+    结尾。`embed_client` 省略时用本地 `HashEmbedding`（免密钥、不联网）。
+
+    注意：同一个路径写两次会建出**两个实例**——KV（SQLite）在磁盘上互通，
+    向量索引是进程内的；要「写了立刻能召回」，请只建一份再传给各处。
+    '''
+    if source is None:
+        raise TypeError("as_memory 需要 Memory 对象 / 路径 / 命名空间，得到 None")
+    if callable(getattr(source, "write", None)) or callable(
+        getattr(source, "recall", None)
+    ):
+        return cast(Memory, source)
+
+    if isinstance(source, (str, os.PathLike)):
+        if embed_client is None:
+            from promptkit.memory.adapters import HashEmbedding
+
+            embed_client = HashEmbedding(dimension=512)
+
+        text = os.fspath(source)
+        is_path = (
+            os.sep in text
+            or (os.altsep is not None and os.altsep in text)
+            or text.endswith((".db", ".sqlite", ".db3", ".jsonl"))
+        )
+        if is_path:
+            identity = namespace or (
+                os.path.splitext(os.path.basename(text))[0] or "default"
+            )
+            return long_term_memory(
+                identity,
+                path=text,
+                vector_path=text + ".vectors",
+                embed_client=embed_client,
+                **kwargs,
+            )
+        return long_term_memory(namespace or text, embed_client=embed_client, **kwargs)
+
+    raise TypeError(
+        "as_memory 需要 Memory 对象、路径或命名空间，"
+        f"得到 {type(source).__name__}"
+    )

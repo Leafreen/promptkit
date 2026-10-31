@@ -4,6 +4,7 @@ from promptkit.core.event_sys.events import (
     EVENT_BUS_KEY,
     MESSAGE_DELTA,
     MESSAGE_END,
+    SEMANTIC_JUDGE,
     STEP_END,
     STEP_START,
     THINKING_DELTA,
@@ -42,5 +43,6 @@ __all__ = [
     "MESSAGE_END",
     "STEP_START",
     "STEP_END",
+    "SEMANTIC_JUDGE",
     "ERROR",
 ]

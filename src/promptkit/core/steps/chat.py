@@ -36,10 +36,26 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypedDict,
+    Union,
+    cast,
+)
 
 if TYPE_CHECKING:
     from promptkit.core.context import Context
+    from promptkit.core.display_sys import Verbosity
+    from promptkit.memory.budget import TokenBudget
+    from promptkit.session import Session
+    from promptkit.types import AgentLike, JSONValue, MemoryLike, ToolLike
+
+from promptkit.memory.config import MemoryConfig, RecallConfig
 
 from promptkit.core.steps.actions.chat_util import (
     CHAT_INPUT_KEY,
@@ -59,16 +75,26 @@ from promptkit.core.steps.actions.chat_util import (
     build_system_prompt,
 )
 from promptkit.core.steps.actions.memory import MemoryStep
-from promptkit.core.steps.interface import Step
+from promptkit.core.steps.interface import Step, execute_step
 from promptkit.core.steps.logics.function import FunctionStep
 from promptkit.core.steps.workflow import Workflow
-from promptkit.tools import Tool
+from promptkit.core.tool import Tool
 
 __all__ = [
     "Deliverable",
     "ChatWorkflow",
     "chat_workflow",
 ]
+
+
+class _MemoryConfigDict(TypedDict, total=False):
+    '''`memory_config=` 接受的那种等价 dict（键与 `MemoryConfig` 同名）。'''
+
+    read: List[str]
+    recall: object
+    write: List[str]
+    budget: Optional["TokenBudget"]
+    write_on: str
 
 
 @dataclass
@@ -108,6 +134,57 @@ class Deliverable:
             raise ValueError("Deliverable 必须有 name")
 
 
+class _GuardedChatLoop(Step):
+    '''`ChatLoop` 外面套一层「失败也要跑收尾」。
+
+    循环结束后的 `MemoryStep(write)` 原本只在正常退出时执行。一旦断网、
+    模型调用抛错、Ctrl+C 或 `max_turns` 用尽，循环后面的步骤全被跳过 ——
+    已经聊过的内容一条都没写进长期记忆，下次启动就像「记忆全没了」。
+
+    这里把收尾步骤放进 `finally` 语义：无论循环怎么结束，都先写一次记忆
+    再继续抛原异常。收尾自身失败时不覆盖原异常（断网时写记忆也很可能失败），
+    只在 trace 里留一条记录。
+    '''
+
+    name = "chat_loop"
+
+    def __init__(self, loop: Step, on_exit: Sequence[Step]):
+        self.loop = loop
+        self.on_exit = tuple(on_exit)
+
+    def execute(self, context: Context) -> None:
+        failure: Optional[BaseException] = None
+        try:
+            execute_step(self.loop, context)
+        except BaseException as exc:  # 控制流信号也要先收尾再往上抛
+            failure = exc
+
+        cleanup_error: Optional[BaseException] = None
+        for step in self.on_exit:
+            try:
+                execute_step(step, context)
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                context.trace.append(
+                    f"cleanup:{step.name}:error:{type(exc).__name__}"
+                )
+
+        if failure is not None:
+            raise failure
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def describe(self) -> str:
+        return f"ChatLoop(失败也会跑 {len(self.on_exit)} 步收尾)"
+
+    def children(self) -> List[Step]:
+        return [self.loop, *self.on_exit]
+
+    def __repr__(self) -> str:
+        return f"<chat_loop guarded steps={len(self.on_exit)}>"
+
+
 @dataclass
 class ChatWorkflow:
     '''聊天机器人的声明式描述。`build()` 编译成普通 `Workflow`。'''
@@ -116,21 +193,21 @@ class ChatWorkflow:
     want: str = ""
     rules: List[str] = field(default_factory=list)
     deliverables: List[Deliverable] = field(default_factory=list)
-    behavior: List[Any] = field(default_factory=list)
+    behavior: List[Step] = field(default_factory=list)
     #: 进入循环前跑**一次**的步骤（开场白：LoadMem、打招呼、读会话……）。
     #: 位置在 SystemPrompt 之后、ChatLoop 之前 —— 这样开场白里的模型调用
     #: 能带上角色设定。手写 Workflow 时直接把步骤放在 ChatLoop 前面即可，
     #: 这个字段只是给声明式写法一个等价的位置。
-    opening: List[Any] = field(default_factory=list)
+    opening: List[Step] = field(default_factory=list)
     #: 用户决定退出对话后要跑的步骤（说再见、存 session、总结等）。
     #: 在 `ChatLoop` 之后、写记忆与落盘之前执行。
-    after_end: List[Any] = field(default_factory=list)
-    tools: List[Any] = field(default_factory=list)
+    after_end: List[Step] = field(default_factory=list)
+    tools: List["ToolLike"] = field(default_factory=list)
     #: 让模型自己调用的能力：`FunctionDef`（DSL `Function`）/ `Skill` / 函数。
     #: 编译时会包成 Tool，并自动带上「这次运行用的 agent」。
-    skills: List[Any] = field(default_factory=list)
+    skills: List[object] = field(default_factory=list)
     exit_words: List[str] = field(default_factory=lambda: list(DEFAULT_EXIT_WORDS))
-    cautions: List[Any] = field(default_factory=list)
+    cautions: List[object] = field(default_factory=list)
     max_turns: Optional[int] = None
     #: 对话历史超过多少条消息时自动压缩（None = 不压缩）：
     #: 旧消息总结成一段摘要，最近 `compact_keep` 条原样保留。
@@ -144,14 +221,25 @@ class ChatWorkflow:
     name: str = "chat"
     #: 会话文件路径（或 `Session`）。给了就「开跑前 load、结束时 save」，
     #: 下次用同一个路径就接着上次聊。
-    session: Any = None
-    #: 长期记忆（`KVMemory` / `VectorMemory` / 任何 `Memory`）
-    memory: Any = None
+    session: Optional[Union[str, "Session"]] = None
+    #: 会话目录：`session.json` + `memory.db` 都放这里，一次配好短期 + 长期。
+    #: 显式给了 `session` / `memory` 时以显式值为准。
+    store: Optional[str] = None
+    #: 要跟着会话一起存的 Context 变量名（如 `["basic_info"]`），
+    #: 下次 `run()` 自动装回 Context。
+    session_variables: Sequence[str] = ()
+    #: 压缩出来的摘要是否转存长期记忆。开启后短期上下文被压掉的内容，
+    #: 仍能通过语义召回找回来；需要同时配 `compact_after` 和 `memory`。
+    promote_compaction: bool = False
+    #: 压缩摘要写进记忆时的键前缀（实际键为 `前缀:时间戳`，每次压缩追加一条）
+    compact_memory_key: str = "conversation_summary"
+    #: 长期记忆（`KVMemory` / `VectorMemory` / 任何 `Memory`），或一个落盘路径
+    memory: Optional[Union["MemoryLike", str, os.PathLike[str]]] = None
     #: 记忆配置：读什么、召回什么、写什么（`MemoryConfig` 或等价的 dict）
-    memory_config: Any = None
+    memory_config: Optional[Union[MemoryConfig, Dict[str, "JSONValue"]]] = None
     #: 知识库：目录/文件路径、`KnowledgeBase`、现成检索 `Tool`，或它们的列表。
     #: 编译成检索工具合并进 `tools`，让模型自己决定什么时候查资料。
-    knowledge: Any = None
+    knowledge: object = None
     #: 命名空间：仅当 `memory` 是路径字符串、需要现建 `KVMemory` 时生效。
     namespace: Optional[str] = None
 
@@ -164,6 +252,24 @@ class ChatWorkflow:
         例外：只配 `memory` + `skills`（聊天层不自动读写，记忆只进出 Skill）。
         那时候记忆**确实在用**，不算是「配了没生效」。
         '''
+        # 工作区：一个目录装下短期会话和长期记忆，省得手动拼两个路径。
+        if self.store:
+            root = os.path.abspath(os.path.expanduser(os.fspath(self.store)))
+            if self.session is None:
+                self.session = os.path.join(root, "session.json")
+            if self.memory is None:
+                self.memory = os.path.join(root, "memory.db")
+
+        if self.promote_compaction:
+            if self.compact_after is None:
+                raise ValueError(
+                    "promote_compaction=True 需要 compact_after：没有压缩就没有摘要可存"
+                )
+            if self.memory is None and self.store is None:
+                raise ValueError(
+                    "promote_compaction=True 需要 memory（或用 store= 自动建一个）"
+                )
+
         # 薄入口：memory 直接给路径字符串 → 现建一个持久化记忆。
         # 默认语义：KV 存结构化值 + HashEmbedding 向量做召回（免密钥、免额外依赖）。
         memory_was_path = isinstance(self.memory, (str, os.PathLike))
@@ -171,7 +277,9 @@ class ChatWorkflow:
             from promptkit.memory import long_term_memory
             from promptkit.memory.adapters import HashEmbedding
 
-            path = os.fspath(self.memory)
+            path = os.fspath(
+                cast(Union[str, os.PathLike[str]], self.memory)
+            )
             self.memory = long_term_memory(
                 self.namespace or "default",
                 path=path,
@@ -203,7 +311,9 @@ class ChatWorkflow:
 
         if isinstance(self.memory_config, dict):
             try:
-                self.memory_config = MemoryConfig(**self.memory_config)
+                self.memory_config = MemoryConfig(
+                    **cast(_MemoryConfigDict, self.memory_config)
+                )
             except TypeError as exc:
                 raise TypeError(f"memory_config 这个 dict 不对：{exc}") from None
         if not isinstance(self.memory_config, MemoryConfig):
@@ -263,26 +373,29 @@ class ChatWorkflow:
             }
             MemoryStep(write)                ← write_on="end" 时
         '''
-        if self.memory is None or self.memory_config is None:
+        memory = self.memory
+        config = self.memory_config
+        if memory is None or not isinstance(config, MemoryConfig):
+            return [], [], []
+        if isinstance(memory, (str, os.PathLike)):
             return [], [], []
 
-        config = self.memory_config
         reads: List[Step] = []
         recalls: List[Step] = []
         writes: List[Step] = []
 
         if config.read:
-            reads.append(MemoryStep(self.memory, read=config.read))
+            reads.append(MemoryStep(memory, read=config.read))
         if config.has_recall():
             recalls.append(
                 MemoryStep(
-                    self.memory,
+                    memory,
                     recall=config.recall,
                     budget=config.recall_budget(),
                 )
             )
         if config.write:
-            writes.append(MemoryStep(self.memory, write=config.write))
+            writes.append(MemoryStep(memory, write=config.write))
         return reads, recalls, writes
 
     def build(self) -> Workflow:
@@ -295,8 +408,11 @@ class ChatWorkflow:
             SystemPrompt()                                          ← 编译成 system prompt
             [opening]                                               ← 开场白：进循环前跑一次
             ChatLoop(...)                                           ← 多轮对话（含 after_end）
-            MemoryStep(write)                                       ← write_on="end"
             SaveDeliverables()                                      ← 结束时落盘
+
+        `write_on="end"` 的写记忆不再单独跟在循环后面，而是包进
+        `_GuardedChatLoop` 的收尾里：循环因断网 / 异常 / Ctrl+C 结束时
+        也会先写记忆，再抛原异常。
         '''
         declarations: List[Step] = [RoleStep(self.role)]
         if self.want:
@@ -304,7 +420,7 @@ class ChatWorkflow:
         if self.rules:
             declarations.append(RulesStep(*self.rules))
         if self.tools or self.skills:
-            skill_tools: List[Any] = []
+            skill_tools: List[Tool] = []
             skill_step: Optional[Step] = None
             skill_state_step: Optional[Step] = None
             if self.skills:
@@ -333,11 +449,11 @@ class ChatWorkflow:
         reads, recalls, writes = self.memory_parts()
 
         # 每轮收尾：记忆写在交付物之前（交付物要用到记忆里的值也不吃亏）
-        each_turn: List[Any] = list(writes) if self._writes_each_turn() else []
+        each_turn: List[Step] = list(writes) if self._writes_each_turn() else []
         each_turn.append(SaveDeliverables(when="each_turn"))
         end_writes = [] if self._writes_each_turn() else list(writes)
 
-        head: List[Any] = [*declarations, *reads]
+        head: List[Step] = [*declarations, *reads]
         if skill_step is not None:
             # 放在 ChatLoop 之前：agent 已经由 Workflow.run 写进 Context 了
             head.append(skill_step)
@@ -347,28 +463,36 @@ class ChatWorkflow:
         if skill_state_step is not None:
             per_turn.append(skill_state_step)
 
+        # `when="each_turn"` 的交付物由 `ChatLoop` 自己每轮存，这里不用管
+        loop: Step = ChatLoop(
+            read_prompt=self.read_prompt,
+            render=self.render,
+            exit_words=self.exit_words,
+            # 召回放在用户行为**之前**：behavior 里的步骤可以接着用召回结果
+            behavior=per_turn,
+            cautions=self.cautions or None,
+            max_turns=self.max_turns,
+            after_turn=each_turn,
+            after_end=self.after_end,
+            turn_template=self.turn_template(),
+            compact_after=self.compact_after,
+            compact_keep=self.compact_keep,
+            compact_prompt=self.compact_prompt,
+            # 压缩摘要转存长期记忆：短期窗口滚过去的内容，靠召回还能找回来
+            compact_memory=self.memory if self.promote_compaction else None,
+            compact_memory_key=self.compact_memory_key,
+        )
+        if end_writes:
+            # 断网 / Ctrl+C / max_turns 用尽时，循环后面的写记忆会被跳过。
+            # 套一层 finally 语义，保证已经产生的记忆先落库再抛异常。
+            loop = _GuardedChatLoop(loop, end_writes)
+
         return Workflow(
             *head,
             SystemPrompt(),
             # 开场白：进循环前跑一次（手写 DSL 里就是 ChatLoop 前面的普通步骤）
             *self.opening,
-            # `when="each_turn"` 的交付物由 `ChatLoop` 自己每轮存，这里不用管
-            ChatLoop(
-                read_prompt=self.read_prompt,
-                render=self.render,
-                exit_words=self.exit_words,
-                # 召回放在用户行为**之前**：behavior 里的步骤可以接着用召回结果
-                behavior=per_turn,
-                cautions=self.cautions or None,
-                max_turns=self.max_turns,
-                after_turn=each_turn,
-                after_end=self.after_end,
-                turn_template=self.turn_template(),
-                compact_after=self.compact_after,
-                compact_keep=self.compact_keep,
-                compact_prompt=self.compact_prompt,
-            ),
-            *end_writes,
+            loop,
             SaveDeliverables(self.end_deliverables()),
             name=self.name,
         )
@@ -387,10 +511,8 @@ class ChatWorkflow:
         `recall.raw=True`（要结构化结果）时返回 `None` —— 那种情况下
         调用方得自己组装 prompt，硬塞 `list[dict]` 的 repr 进去只会让模型困惑。
         '''
-        from promptkit.memory.config import RecallConfig
-
         config = self.memory_config
-        if config is None or not config.has_recall():
+        if not isinstance(config, MemoryConfig) or not config.has_recall():
             return None
         recall = config.recall
         if not isinstance(recall, RecallConfig) or recall.raw:
@@ -402,10 +524,8 @@ class ChatWorkflow:
         )
 
     def _writes_each_turn(self) -> bool:
-        return bool(
-            self.memory_config is not None
-            and getattr(self.memory_config, "write_on", "end") == "each_turn"
-        )
+        config = self.memory_config
+        return isinstance(config, MemoryConfig) and config.write_on == "each_turn"
 
     def each_turn_deliverables(self) -> List[Deliverable]:
         return [item for item in self.deliverables if item.when == "each_turn"]
@@ -416,13 +536,13 @@ class ChatWorkflow:
     # ---------------- 运行 ----------------
     def run(
         self,
-        agent: Any = None,
+        agent: Optional["AgentLike"] = None,
         *,
-        verbose: Any = None,
-        reset: Any = None,
-        session: Any = None,
-        variables: Any = None,
-        **kwargs: Any,
+        verbose: Optional[Union["Verbosity", int, bool]] = None,
+        reset: Optional[bool] = None,
+        session: Optional[Union[str, "Session"]] = None,
+        variables: Optional[Sequence[str]] = None,
+        **kwargs,
     ) -> "Context":
         '''编译并运行，返回 Context。
 
@@ -434,27 +554,27 @@ class ChatWorkflow:
         - `reset`：要不要清空历史。`None`（默认）= 有会话文件就保留、
           没有就清空；显式传就按你传的来。
 
-        实现上就是把编好的 workflow 交给 `session.run_with_session()` ——
+        实现上就是把编好的 workflow 交给 `Workflow.run(session=...)` ——
         和手写 `Workflow` 调 `wf.run(session=...)` 走的是**同一份代码**，
         两条路不会跑偏。
         '''
         from promptkit.core.display_sys import Verbosity
-        from promptkit.session import run_with_session
+
+        if variables is None and self.session_variables:
+            variables = list(self.session_variables)
 
         workflow = self.build()
-        return run_with_session(
-            workflow,
-            agent,
-            session if session is not None else self.session,
+        return workflow.run(
+            agent=agent,
+            session=session if session is not None else self.session,
             reset=reset,
             variables=variables,
             verbose=Verbosity.NORMAL if verbose is None else verbose,
-            agent_required="ChatWorkflow.run()",
             metadata={"role": self.role},
             **kwargs,
         )
 
 
-def chat_workflow(**kwargs: Any) -> ChatWorkflow:
+def chat_workflow(**kwargs) -> ChatWorkflow:
     '''`ChatWorkflow(...)` 的函数式写法，省得 import 两个名字。'''
     return ChatWorkflow(**kwargs)
