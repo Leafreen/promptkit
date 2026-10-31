@@ -290,7 +290,13 @@ from promptkit.core import (  # noqa: E402
     BinaryExpr,
     Break,
     Call,
+    Choose,
+    ChooseExpr,
+    Compact,
+    CompactStep,
     Condition,
+    Confirm,
+    ConfirmExpr,
     Context,
     Continue,
     Dec,
@@ -334,6 +340,20 @@ from promptkit.core import (  # noqa: E402
     VarTypeError,
     When,
     While,
+    # While 的 Hook 扩展点
+    AFTER_ITERATION,
+    BEFORE_CONDITION,
+    BEFORE_ITERATION,
+    LOOP_END,
+    LOOP_ERROR,
+    LOOP_HOOK_POINTS,
+    LOOP_LIMIT,
+    LOOP_START,
+    HookPoint,
+    LoopHookEvent,
+    LoopHookHandle,
+    LoopHooks,
+    loop_hooks,
     Workflow,
     WorkflowError,
 )
@@ -989,6 +1009,387 @@ class TestWhile(PromptkitTestCase):
             ctx.trace,
             ["new_var:n", "while:1", "set:n", "while:2", "set:n", "while:done"],
         )
+
+
+class TestWhileHooks(PromptkitTestCase):
+    '''While 的 Hook 扩展：扩展点、注册/注销、时机、返回值、错误隔离。'''
+
+    def _loop(self, condition=None, body=None, **kwargs):
+        return While(
+            Var("n") < 3 if condition is None else condition, max_iterations=10,
+            **kwargs
+        ).Do(*(body or [Set("n", Var("n") + 1)]))
+
+    def _run(self, *steps, **variables):
+        return Workflow(NewVar("n", default=0), *steps).run(**variables)
+
+    # ---------------- 扩展点齐全 ----------------
+    def test_extension_points_are_predefined(self):
+        self.assertEqual(
+            [point.value for point in LOOP_HOOK_POINTS],
+            [
+                "loop_start",
+                "before_condition",
+                "before_iteration",
+                "after_iteration",
+                "loop_limit",
+                "loop_error",
+                "loop_end",
+            ],
+        )
+        self.assertEqual(LOOP_HOOK_POINTS, tuple(HookPoint))
+        self.assertIs(LOOP_START, HookPoint.LOOP_START)
+
+    # ---------------- 执行时机与顺序 ----------------
+    def test_hooks_fire_in_order(self):
+        seen = []
+
+        def watch(point):
+            def fn(event):
+                seen.append((point.value, event.iteration))
+
+            return fn
+
+        loop = self._loop()
+        for point in LOOP_HOOK_POINTS:
+            if point in (LOOP_LIMIT, LOOP_ERROR):
+                continue
+            loop.Hook(point, watch(point))
+        self._run(loop)
+        self.assertEqual(
+            seen,
+            [
+                ("loop_start", 0),
+                ("before_condition", 1),
+                ("before_iteration", 1),
+                ("after_iteration", 1),
+                ("before_condition", 2),
+                ("before_iteration", 2),
+                ("after_iteration", 2),
+                ("before_condition", 3),
+                ("before_iteration", 3),
+                ("after_iteration", 3),
+                ("before_condition", 4),
+                ("loop_end", 3),
+            ],
+        )
+
+    def test_event_fields(self):
+        events = []
+
+        def watch(event):
+            events.append((event.point, event.iteration, event.name,
+                           event.signal, event.context["n"], event.duration_ms))
+
+        self._run(self._loop(hooks={"after_iteration": watch}))
+        point, iteration, name, signal, seen_n, duration = events[0]
+        self.assertEqual(point, HookPoint.AFTER_ITERATION)
+        self.assertEqual(iteration, 1)
+        self.assertEqual(name, "while")
+        self.assertIsNone(signal)
+        self.assertEqual(seen_n, 1)                 # 事件里是当时的 Context 值
+        self.assertGreaterEqual(duration, 0)
+
+    def test_end_reason_condition(self):
+        reasons = []
+        self._run(self._loop(hooks={"loop_end": lambda e: reasons.append(e.reason)}))
+        self.assertEqual(reasons, ["condition"])
+
+    def test_end_reason_break(self):
+        reasons = []
+        self._run(
+            self._loop(
+                condition=True,
+                body=[Set("n", Var("n") + 1), If(Var("n") >= 2).Then(Break())],
+                hooks={"loop_end": lambda e: reasons.append((e.reason, e.iteration))},
+            )
+        )
+        self.assertEqual(reasons, [("break", 2)])
+
+    def test_continue_signal_reported(self):
+        signals = []
+        self._run(
+            self._loop(
+                body=[Set("n", Var("n") + 1), Continue()],
+                hooks={"after_iteration": lambda e: signals.append(e.signal)},
+            )
+        )
+        self.assertEqual(signals, ["continue", "continue", "continue"])
+
+    # ---------------- 返回值处理 ----------------
+    def test_before_iteration_false_skips_body(self):
+        skipped = []
+        ctx = self._run(
+            self._loop(
+                hooks={
+                    "before_iteration": lambda e: e.iteration != 2,
+                    "after_iteration": lambda e: skipped.append(e.signal),
+                }
+            )
+        )
+        # 第 2 轮被跳过：条件仍然成立，所以后面还有第 3、4 轮
+        self.assertEqual(skipped, [None, "skipped", None, None])
+        self.assertEqual(ctx["n"], 3)
+
+    def test_before_condition_false_ends_loop(self):
+        reasons = []
+        ctx = self._run(
+            self._loop(
+                condition=True,
+                hooks={
+                    "before_condition": lambda e: e.iteration <= 2,
+                    "loop_end": lambda e: reasons.append(e.reason),
+                },
+            )
+        )
+        self.assertEqual(ctx["n"], 2)
+        self.assertEqual(reasons, ["hook"])
+
+    def test_veto_short_circuits_later_hooks(self):
+        ran = []
+        self._run(
+            self._loop(
+                condition=True,
+                hooks={
+                    "before_condition": [
+                        lambda e: False,
+                        lambda e: ran.append("never"),
+                    ]
+                },
+            )
+        )
+        self.assertEqual(ran, [])
+
+    def test_return_true_is_not_a_veto(self):
+        ctx = self._run(self._loop(hooks={"before_iteration": lambda e: True}))
+        self.assertEqual(ctx["n"], 3)
+
+    # ---------------- 注册 / 注销 ----------------
+    def test_register_returns_handle_and_off_works(self):
+        hits = []
+        hooks = LoopHooks()
+        handle = hooks.register(BEFORE_ITERATION, lambda e: hits.append(1))
+        self.assertIsInstance(handle, LoopHookHandle)
+        self.assertEqual(len(hooks), 1)
+        self.assertTrue(handle.off())
+        self.assertFalse(handle.off())          # 已经注销过
+        self.assertEqual(len(hooks), 0)
+        self._run(self._loop(hooks=hooks))
+        self.assertEqual(hits, [])
+
+    def test_register_rejects_non_callable(self):
+        with self.assertRaises(TypeError):
+            LoopHooks().register(BEFORE_ITERATION, "不是函数")
+
+    def test_unknown_point_rejected(self):
+        with self.assertRaises(ValueError):
+            LoopHooks().register("no_such_point", lambda e: None)
+
+    def test_string_and_enum_points_are_equivalent(self):
+        hooks = LoopHooks()
+        fn = lambda e: None                        # noqa: E731
+        hooks.register("after_iteration", fn)
+        hooks.register(HookPoint.AFTER_ITERATION, fn)
+        self.assertEqual(len(hooks), 1)            # 同一个函数只保留一次
+
+    def test_unregister_by_function_and_by_point(self):
+        hooks = LoopHooks()
+        fn = lambda e: None                        # noqa: E731
+        hooks.register(BEFORE_ITERATION, fn)
+        hooks.register(AFTER_ITERATION, fn)
+        self.assertTrue(hooks.unregister(fn, AFTER_ITERATION))
+        self.assertEqual(hooks.counts()["after_iteration"], 0)
+        self.assertEqual(hooks.counts()["before_iteration"], 1)
+        hooks.register(AFTER_ITERATION, fn)
+        self.assertTrue(hooks.unregister(fn))       # 不指定点：全删
+        self.assertFalse(hooks)
+
+    def test_unregister_by_point_name_clears_bucket(self):
+        hooks = LoopHooks({"loop_end": [lambda e: None, lambda e: None]})
+        self.assertTrue(hooks.unregister("loop_end"))
+        self.assertEqual(hooks.counts()["loop_end"], 0)
+
+    def test_clear_all(self):
+        hooks = LoopHooks({"loop_end": lambda e: None, "loop_start": lambda e: None})
+        self.assertEqual(hooks.clear(), 2)
+        self.assertEqual(len(hooks), 0)
+
+    def test_step_unhook(self):
+        loop = self._loop()
+        fn = lambda e: None                        # noqa: E731
+        loop.Hook(LOOP_END, fn)
+        self.assertEqual(len(loop.hooks), 1)
+        self.assertTrue(loop.Unhook(fn))
+        self.assertEqual(len(loop.hooks), 0)
+
+    def test_decorator_registration(self):
+        hooks = LoopHooks()
+
+        @hooks.on("after_iteration")
+        def handler(event):
+            return None
+
+        self.assertEqual(hooks.counts()["after_iteration"], 1)
+        self.assertIs(hooks._buckets[HookPoint.AFTER_ITERATION][0], handler)
+
+    # ---------------- 传入规范 ----------------
+    def test_accepts_dict_with_fn_list(self):
+        hits = []
+        self._run(
+            self._loop(hooks={"after_iteration": [lambda e: hits.append(1)] * 1})
+        )
+        self.assertEqual(len(hits), 3)
+
+    def test_accepts_pairs(self):
+        hits = []
+        self._run(self._loop(hooks=[("loop_end", lambda e: hits.append(1))]))
+        self.assertEqual(len(hits), 1)
+
+    def test_accepts_existing_registry(self):
+        hits = []
+        hooks = LoopHooks({"loop_start": lambda e: hits.append(1)})
+        self._run(self._loop(hooks=hooks))
+        self.assertEqual(len(hits), 1)
+        self.assertIs(While(True, hooks=hooks).hooks, hooks)   # 原样复用
+
+    def test_bad_hooks_type_rejected(self):
+        with self.assertRaises(TypeError):
+            While(True, hooks="不是钩子表")
+
+    # ---------------- 全局钩子（Context） ----------------
+    def test_global_hooks_from_context(self):
+        def add(ctx):
+            loop_hooks(ctx).register(AFTER_ITERATION, lambda e: None)
+
+        hits = []
+        ctx = Workflow(
+            NewVar("n", default=0),
+            FunctionStep(add, name="add_hook"),
+            While(Var("n") < 2, max_iterations=5).Hook(
+                AFTER_ITERATION, lambda e: hits.append("step")
+            ).Do(Set("n", Var("n") + 1)),
+        ).run()
+        self.assertEqual(ctx["n"], 2)
+        self.assertEqual(len(hits), 2)
+        self.assertIsNotNone(loop_hooks(ctx, create=False))
+
+    def test_step_hooks_run_before_global_ones(self):
+        order = []
+        loop = While(Var("n") < 1, max_iterations=2).Hook(
+            AFTER_ITERATION, lambda e: order.append("step")
+        ).Do(Set("n", Var("n") + 1))
+        Workflow(
+            NewVar("n", default=0),
+            FunctionStep(
+                lambda c: loop_hooks(c).register(
+                    AFTER_ITERATION, lambda e: order.append("global")
+                ),
+                name="add_hook",
+            ),
+            loop,
+        ).run()
+        self.assertEqual(order, ["step", "global"])
+
+    def test_loop_hooks_create_false(self):
+        ctx = Context()
+        self.assertIsNone(loop_hooks(ctx, create=False))
+        self.assertIsNotNone(loop_hooks(ctx))
+        self.assertIs(loop_hooks(ctx), loop_hooks(ctx, create=False))
+
+    # ---------------- 错误隔离 ----------------
+    def test_hook_exception_does_not_break_loop(self):
+        ctx = self._run(
+            self._loop(
+                hooks={"after_iteration": lambda e: 1 / 0}
+            )
+        )
+        self.assertEqual(ctx["n"], 3)              # 主循环照常跑完
+
+    def test_hook_failure_is_recorded(self):
+        hooks = LoopHooks({"loop_start": lambda e: 1 / 0})
+        self._run(self._loop(hooks=hooks))
+        self.assertEqual(len(hooks.failures), 1)
+        self.assertEqual(hooks.failures[0].point, HookPoint.LOOP_START)
+        self.assertIsInstance(hooks.failures[0].error, ZeroDivisionError)
+        self.assertIn("loop_start", str(hooks.failures[0]))
+
+    def test_failing_hook_does_not_block_others(self):
+        hits = []
+        self._run(
+            self._loop(
+                hooks={
+                    "after_iteration": [
+                        lambda e: 1 / 0,
+                        lambda e: hits.append(1),
+                    ]
+                }
+            )
+        )
+        self.assertEqual(len(hits), 3)
+
+    def test_loop_error_hook_sees_body_exception(self):
+        errors = []
+
+        def boom(event):
+            raise RuntimeError("体里的错")
+
+        with self.assertRaises(RuntimeError):
+            self._run(
+                self._loop(
+                    body=[FunctionStep(boom, name="boom")],
+                    hooks={"loop_error": lambda e: errors.append(e.error)},
+                )
+            )
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), "体里的错")
+
+    def test_loop_error_not_triggered_by_break(self):
+        errors = []
+        self._run(
+            self._loop(
+                condition=True,
+                body=[Break()],
+                hooks={"loop_error": lambda e: errors.append(e.error)},
+            )
+        )
+        self.assertEqual(errors, [])
+
+    def test_loop_limit_hook_runs_before_raising(self):
+        seen = []
+        with self.assertRaises(LoopLimitExceeded):
+            self._run(
+                While(Var("n") < 100, max_iterations=2).Do(Set("other", 1)).Hook(
+                    LOOP_LIMIT, lambda e: seen.append((e.iteration, type(e.error).__name__))
+                ),
+                NewVar("other", default=0),
+            )
+        self.assertEqual(seen, [(3, "LoopLimitExceeded")])
+
+    def test_loop_end_not_triggered_when_limit(self):
+        seen = []
+        with self.assertRaises(LoopLimitExceeded):
+            self._run(
+                While(Var("n") < 100, max_iterations=2).Do(Set("other", 1)).Hook(
+                    LOOP_END, lambda e: seen.append(1)
+                )
+            )
+        self.assertEqual(seen, [])
+
+    # ---------------- 可扩展性 ----------------
+    def test_dispatch_is_generic_over_all_points(self):
+        '''新增扩展点只用枚举声明 + 一次 trigger：注册 / 注销 / 派发无需改动。'''
+        for point in LOOP_HOOK_POINTS:
+            hooks = LoopHooks({point: lambda e: None})
+            self.assertEqual(len(hooks), 1)
+            self.assertEqual(hooks.counts()[point.value], 1)
+            self.assertTrue(hooks.unregister(point))
+
+    def test_copy_is_independent(self):
+        hooks = LoopHooks({"loop_end": lambda e: None})
+        other = hooks.copy()
+        other.clear()
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(len(other), 0)
 
 
 class TestAgentReply(PromptkitTestCase):
@@ -4219,6 +4620,14 @@ class TestKnowledgeBase(PromptkitTestCase):
     def test_search_respects_k(self):
         self.assertLessEqual(len(self.kb().search("退款 发货 发票 配送", k=2)), 2)
 
+    def test_search_k_zero_returns_empty(self):
+        self.assertEqual(self.kb().search("退款", k=0), [])
+
+    def test_search_negative_k_returns_empty(self):
+        # 负数不能被当成切片语义「切掉末尾几条」
+        self.assertEqual(self.kb().search("退款", k=-1), [])
+        self.assertEqual(self.kb().search("退款 发货 发票 配送", k=-5), [])
+
     def test_search_on_empty_kb(self):
         self.assertEqual(KnowledgeBase().search("x"), [])
 
@@ -7218,6 +7627,170 @@ class FakeChatAgent:
         return reply
 
 
+class TestConfirm(PromptkitTestCase):
+    def test_yes_and_no(self):
+        with mock.patch("builtins.input", side_effect=["y"]):
+            self.assertTrue(Workflow(Set("ok", Confirm("继续？"))).run()["ok"])
+        with mock.patch("builtins.input", side_effect=["不要"]):
+            self.assertFalse(Workflow(Set("ok", Confirm("继续？"))).run()["ok"])
+
+    def test_empty_input_falls_back_to_default(self):
+        with mock.patch("builtins.input", side_effect=[""]):
+            self.assertTrue(
+                Workflow(Set("ok", Confirm("继续？").Default(True))).run()["ok"]
+            )
+        with mock.patch("builtins.input", side_effect=[""]):
+            self.assertFalse(
+                Workflow(Set("ok", Confirm("继续？").Default(False))).run()["ok"]
+            )
+
+    def test_no_default_reasks_on_empty(self):
+        with mock.patch("builtins.input", side_effect=["", "n"]) as fake:
+            self.assertFalse(Workflow(Set("ok", Confirm("继续？"))).run()["ok"])
+        self.assertEqual(
+            fake.call_args_list,
+            [mock.call("继续？ (y/n) "), mock.call("继续？ (y/n) ")],
+        )
+
+    def test_invalid_answer_reasks_with_hint(self):
+        out = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["嗯？", "y"]):
+            ctx = Workflow(Set("ok", Confirm("继续？"))).run(out=out)
+        self.assertTrue(ctx["ok"])
+        self.assertIn("请回答 y 或 n", out.getvalue())
+
+    def test_bad_default_type(self):
+        with self.assertRaises(TypeError):
+            Confirm("继续？", default="yes")
+
+    def test_default_returns_new_instance(self):
+        original = Confirm("继续？")
+        changed = original.Default(True)
+        self.assertIsNot(original, changed)
+        self.assertIsNone(original.default)
+        self.assertIs(changed.default, True)
+
+    def test_repr(self):
+        self.assertEqual(repr(Confirm("继续？")), "Confirm('继续？')")
+        self.assertEqual(
+            repr(Confirm("继续？").Default(True)),
+            "Confirm('继续？', default=True)",
+        )
+
+
+class TestChoose(PromptkitTestCase):
+    def test_pick_by_number(self):
+        with mock.patch("builtins.input", side_effect=["2"]):
+            ctx = Workflow(Set("菜", Choose("吃什么？", "红烧肉", "清蒸鱼"))).run()
+        self.assertEqual(ctx["菜"], "清蒸鱼")
+
+    def test_menu_is_printed(self):
+        out = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["1"]):
+            Workflow(Set("菜", Choose("吃什么？", "红烧肉", "清蒸鱼"))).run(out=out)
+        self.assertIn("1. 红烧肉", out.getvalue())
+        self.assertIn("2. 清蒸鱼", out.getvalue())
+
+    def test_out_of_range_and_non_number_reask(self):
+        out = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["9", "abc", "2"]):
+            ctx = Workflow(
+                Set("菜", Choose("吃什么？", "红烧肉", "清蒸鱼"))
+            ).run(out=out)
+        self.assertEqual(ctx["菜"], "清蒸鱼")
+        self.assertIn("请输入 1-2 之间的数字", out.getvalue())
+
+    def test_empty_uses_default_index(self):
+        with mock.patch("builtins.input", side_effect=[""]):
+            ctx = Workflow(
+                Set("菜", Choose("吃什么？", "红烧肉", "清蒸鱼").Default(1))
+            ).run()
+        self.assertEqual(ctx["菜"], "红烧肉")
+
+    def test_list_form(self):
+        with mock.patch("builtins.input", side_effect=["2"]):
+            ctx = Workflow(
+                Set("菜", Choose("吃什么？", ["红烧肉", "清蒸鱼"]))
+            ).run()
+        self.assertEqual(ctx["菜"], "清蒸鱼")
+
+    def test_needs_two_options(self):
+        with self.assertRaises(ValueError):
+            Choose("只有一个", "红烧肉")
+
+    def test_default_must_be_valid_index(self):
+        with self.assertRaises(ValueError):
+            Choose("吃什么？", "红烧肉", "清蒸鱼", default=5)
+
+
+class TestCompact(PromptkitTestCase):
+    def _agent(self, turns=5):
+        '''造一个已有 `turns` 轮对话的假 agent（每轮 一问一答）。'''
+        agent = FakeChatAgent()
+        for i in range(turns):
+            agent.history.append({"role": "user", "content": f"问题{i}"})
+            agent.history.append({"role": "assistant", "content": f"回答{i}"})
+        agent.rebuild()
+        return agent
+
+    def test_compacts_old_and_keeps_recent(self):
+        agent = self._agent(5)  # 10 条历史
+        ctx = Workflow(Compact(8, keep_recent=2)).run(agent=agent)
+        history = agent.get_history()
+        self.assertEqual(len(history), 3)  # 1 条摘要 + 2 条最近
+        self.assertIn("之前对话的摘要", history[0]["content"])
+        self.assertEqual(history[1]["content"], "问题4")
+        self.assertEqual(history[2]["content"], "回答4")
+        self.assertIn("compact:8->3", ctx.trace)
+        # 旧对话文本确实进了摘要请求
+        self.assertIn("问题0", agent.prompts[0])
+
+    def test_skips_when_under_threshold(self):
+        agent = self._agent(2)  # 4 条历史
+        ctx = Workflow(Compact(8)).run(agent=agent)
+        self.assertEqual(len(agent.get_history()), 4)
+        self.assertIn("compact:skip", ctx.trace)
+        self.assertEqual(agent.prompts, [])  # 没发摘要请求
+
+    def test_summary_call_does_not_stay_in_history(self):
+        agent = self._agent(5)
+        Workflow(Compact(None, keep_recent=2)).run(agent=agent)  # None = 总是压
+        history = agent.get_history()
+        self.assertEqual(len(history), 3)
+        self.assertIn("之前对话的摘要", history[0]["content"])
+        # 摘要那次调用的「请求 / 回复」两条没有留在历史里
+        self.assertEqual(
+            [message["role"] for message in history], ["user", "user", "assistant"]
+        )
+
+    def test_requires_history_capable_agent(self):
+        with self.assertRaises(TypeError):
+            Workflow(Compact(1)).run(agent=OrchAgent(["嗯"]))
+
+    def test_max_messages_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            Compact(0)
+
+    def test_chatloop_compact_runs_mid_conversation(self):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["一", "二", "三", "exit"]):
+            ctx = Workflow(ChatLoop(compact_after=2, compact_keep=2)).run(
+                agent=agent
+            )
+        # 第三轮调模型前历史有 4 条 > 2：先压成「1 条摘要 + 2 条最近」
+        self.assertIn("compact:2->3", ctx.trace)
+        # 压完 3 条，这一轮又问了一次 -> 5 条
+        self.assertEqual(len(agent.get_history()), 5)
+
+    def test_chatworkflow_passes_compact_through(self):
+        agent = FakeChatAgent()
+        wf = ChatWorkflow(role="助手", compact_after=2, compact_keep=2).build()
+        with mock.patch("builtins.input", side_effect=["一", "二", "三", "exit"]):
+            ctx = Workflow(wf).run(agent=agent)
+        self.assertIn("compact:2->3", ctx.trace)
+        self.assertEqual(len(agent.get_history()), 5)
+
+
 class TestChatUtilSteps(PromptkitTestCase):
     '''`chat_util` 里的声明式 Step：只往 Context 里写配置。'''
 
@@ -7457,6 +8030,32 @@ class TestChatLoop(PromptkitTestCase):
         with self.assertRaises(TypeError):
             ChatLoop(after_end=["不是步骤"])
 
+    # ---------------- DSL：behavior 用位置参数 ----------------
+    def test_behavior_can_be_positional(self):
+        # ChatLoop(步骤) 等价于 ChatLoop(behavior=[...])
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["help", "exit"]):
+            ctx = Workflow(
+                ChatLoop(If(Var("usr_input") == "help").Then(Set("helped", 1)))
+            ).run(agent=agent, verbose=Verbosity.SILENT, out=io.StringIO())
+        self.assertEqual(ctx.get("helped"), 1)
+        self.assertEqual(len(agent.prompts), 1)
+
+    def test_behavior_accepts_multiple_positional_steps(self):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["hi", "exit"]):
+            ctx = Workflow(ChatLoop(Set("first", 1), Set("second", 2))).run(
+                agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        self.assertEqual((ctx.get("first"), ctx.get("second")), (1, 2))
+
+    def test_behavior_keyword_still_works(self):
+        ctx, _, _ = self.run_loop(
+            ["help", "exit"],
+            behavior=[If(Var("usr_input") == "help").Then(Set("helped", 1))],
+        )
+        self.assertEqual(ctx.get("helped"), 1)
+
 
 class TestChatWorkflow(PromptkitTestCase):
     '''`ChatWorkflow` —— 把声明编译成普通 Workflow。'''
@@ -7635,6 +8234,47 @@ class TestChatWorkflow(PromptkitTestCase):
 
     def test_chat_workflow_function_form(self):
         self.assertIsInstance(chat_workflow(role="导师"), ChatWorkflow)
+
+
+class TestChatWorkflowOpening(PromptkitTestCase):
+    '''`ChatWorkflow(opening=...)`：进循环前跑一次的开场步骤。
+
+    任务 J 的回归：把 `LoadMem()` 放进每轮的 `behavior` 里永远等不到执行
+    （behavior 在 `Read` 之后才跑），开场白必须跑在第一次读输入之前。
+    手写 DSL 里它就是 `ChatLoop` 前面的普通步骤；声明式写法没有「外面」
+    可以放步骤，所以给 `opening` 字段一个等价的位置。
+    '''
+
+    def build_recorder(self, calls):
+        class Recorder(Step):
+            name = "recorder"
+
+            def execute(self, context):
+                calls.append(context.get("usr_input", ""))
+
+            def describe(self):
+                return "Recorder()"
+
+        return Recorder()
+
+    def test_opening_runs_once_before_first_read(self):
+        calls = []
+        chat = ChatWorkflow(role="导师", opening=[self.build_recorder(calls)])
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=["你好", "exit"]):
+            chat.build().run(
+                agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        # 只跑一次，且在第一次 Read 之前 —— 那时 usr_input 还不存在
+        self.assertEqual(calls, [""])
+
+    def test_opening_sits_between_system_prompt_and_chat_loop(self):
+        chat = ChatWorkflow(role="导师", opening=[self.build_recorder([])])
+        describes = [step.describe() for step in chat.build().steps]
+        self.assertIn("Recorder()", describes)
+        self.assertLess(
+            describes.index("SystemPrompt()"), describes.index("Recorder()")
+        )
 
 
 class TestWriteFile(PromptkitTestCase):
@@ -8654,6 +9294,134 @@ class TestReadOnEOF(PromptkitTestCase):
             ).run(agent=agent, verbose=Verbosity.SILENT, out=io.StringIO())
         with open(os.path.join(desk, "选题建议.md"), encoding="utf-8") as handle:
             self.assertIn("嗯1", handle.read())
+
+
+class TestReadUntil(PromptkitTestCase):
+    '''`Read(...).Until(标记)`：多行读取，直到结束标记行。'''
+
+    def test_reads_until_empty_line(self):
+        with mock.patch("builtins.input", side_effect=["第一行", "第二行", ""]):
+            ctx = Workflow(Set("text", Read("... ").Until(""))).run()
+        self.assertEqual(ctx["text"], "第一行\n第二行")
+
+    def test_reads_until_sentinel(self):
+        with mock.patch("builtins.input", side_effect=["a", "END", "b"]):
+            ctx = Workflow(Set("text", Read("... ").Until("END"))).run()
+        self.assertEqual(ctx["text"], "a")  # END 之后的不读
+
+    def test_empty_block_returns_empty_string(self):
+        with mock.patch("builtins.input", side_effect=[""]):
+            ctx = Workflow(Set("text", Read("... ").Until(""))).run()
+        self.assertEqual(ctx["text"], "")
+
+    def test_strip_applies_to_every_line(self):
+        with mock.patch("builtins.input", side_effect=["  a  ", ""]):
+            ctx = Workflow(Set("text", Read("... ").Until(""))).run()
+        self.assertEqual(ctx["text"], "a")
+
+    def test_no_strip_compares_exactly(self):
+        # strip=False 时「只有空格的行」不算空行，按原文比较
+        with mock.patch("builtins.input", side_effect=["  a  ", "   ", "", "END"]):
+            ctx = Workflow(Set("text", Read(strip=False).Until("END"))).run()
+        self.assertEqual(ctx["text"], "  a  \n   \n")
+
+    def test_until_returns_new_instance_and_keeps_original(self):
+        base = Read("... ")
+        block = base.Until("")
+        self.assertIsNone(base.until)
+        self.assertEqual(block.until, "")
+        self.assertEqual(block.on_eof, base.on_eof)
+
+    def test_until_rejects_non_string(self):
+        with self.assertRaises(TypeError):
+            Read("... ").Until(3)
+
+    def test_on_break_flips_the_mode(self):
+        expr = Read("... ").Until("").OnBreak()
+        self.assertEqual(expr.on_eof, "break")
+        self.assertEqual(expr.until, "")
+        self.assertIn("on_eof='break'", repr(expr))
+
+    def test_eof_in_break_mode_ends_the_block(self):
+        # 多行模式下 Ctrl+D（break）= 结束标记，收下已读的部分
+        with mock.patch("builtins.input", side_effect=["a", "b", EOFError]):
+            ctx = Workflow(Set("text", Read("... ").Until("").OnBreak())).run()
+        self.assertEqual(ctx["text"], "a\nb")
+
+    def test_eof_in_raise_mode_still_raises(self):
+        with mock.patch("builtins.input", side_effect=["a", EOFError]):
+            with self.assertRaises(EOFError):
+                Workflow(Set("text", Read("... ").Until(""))).run()
+
+    def test_prompt_is_repeated_for_every_line(self):
+        with mock.patch("builtins.input", side_effect=["a", ""]) as fake:
+            Workflow(Set("text", Read("... ").Until(""))).run()
+        self.assertEqual(
+            fake.call_args_list, [mock.call("... "), mock.call("... ")]
+        )
+
+    def test_repr_shows_until(self):
+        self.assertEqual(repr(Read("... ").Until("")), "Read('... ', until='')")
+        self.assertEqual(repr(Read()), "Read('')")  # 原有行为不变
+
+
+class TestReadUntilInChatLoop(PromptkitTestCase):
+    '''多行输入接进 `ChatLoop`：敲 `ml` 进入多行模式，空行结束。'''
+
+    def multiline(self):
+        return If(Var("usr_input") == "ml").Then(
+            Set(Var("usr_input"), Read("... ").Until("").OnBreak()),
+            If(Var("usr_input") == "").Then(
+                Set(Var("usr_input"), "（用户取消了多行输入）"),
+            ),
+        )
+
+    def run_chat(self, inputs):
+        agent = FakeChatAgent()
+        with mock.patch("builtins.input", side_effect=list(inputs)):
+            ctx = Workflow(ChatLoop(self.multiline())).run(
+                agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        return ctx, agent
+
+    def test_multiline_text_reaches_the_model(self):
+        _, agent = self.run_chat(["ml", "第一行", "第二行", "", "exit"])
+        self.assertIn("第一行\n第二行", agent.prompts[0])
+
+    def test_empty_block_gets_placeholder(self):
+        # 空块会先被占位符替换；usr_input 每轮会被覆盖，所以看模型收到了什么
+        _, agent = self.run_chat(["ml", "", "exit"])
+        self.assertIn("（用户取消了多行输入）", agent.prompts[0])
+
+    def test_ctrl_c_inside_multiline_ends_the_chat(self):
+        # Ctrl+C：BreakSignal 一路传到 ChatLoop 的循环 → 和在主提示符按一样，
+        # 礼貌结束对话（已读的行丢弃）
+        agent = FakeChatAgent()
+        with mock.patch(
+            "builtins.input", side_effect=["ml", "第一行", KeyboardInterrupt]
+        ):
+            ctx = Workflow(ChatLoop(self.multiline())).run(
+                agent=agent, verbose=Verbosity.SILENT, out=io.StringIO()
+            )
+        self.assertEqual(len(agent.prompts), 0)          # 没调模型
+        self.assertEqual(ctx.get("usr_input"), "ml")     # 那块没发出去
+
+    def test_ctrl_c_still_runs_after_end(self):
+        ran = []
+        with mock.patch("builtins.input", side_effect=["ml", KeyboardInterrupt]):
+            Workflow(
+                ChatLoop(
+                    self.multiline(),
+                    after_end=[
+                        FunctionStep(lambda context: ran.append(1), name="end")
+                    ],
+                )
+            ).run(
+                agent=FakeChatAgent(),
+                verbose=Verbosity.SILENT,
+                out=io.StringIO(),
+            )
+        self.assertEqual(ran, [1])
 
 
 class TestSessionVariables(PromptkitTestCase):
@@ -13492,6 +14260,65 @@ class TestPlanSteps(PromptkitTestCase):
             )
         ).run()
         self.assertEqual(ctx["a"], "writer 写的")
+
+    def test_execute_plan_uses_agent_passed_to_run(self):
+        # Task / ExecutePlan 都没给 agent 时，应该用 Workflow.run(agent=...) 那个
+        ctx = Workflow(
+            ExecutePlan(plan=Plan.from_template([Task("a")]))
+        ).run(agent=OrchAgent(["由 run 传入的 agent 完成"]))
+        self.assertTrue(ctx["plan_result"].ok)
+        self.assertEqual(ctx["a"], "由 run 传入的 agent 完成")
+
+    def test_execute_plan_explicit_agent_beats_run_agent(self):
+        ctx = Workflow(
+            ExecutePlan(
+                plan=Plan.from_template([Task("a")]),
+                agent=OrchAgent(["步骤自己的 agent"]),
+            )
+        ).run(agent=OrchAgent(["run 的 agent"]))
+        self.assertEqual(ctx["a"], "步骤自己的 agent")
+
+    def test_execute_plan_parallel_beats_serial(self):
+        def make_plan():
+            return Plan.from_template(
+                [
+                    Task("a", agent=OrchAgent(delay=0.2)),
+                    Task("b", agent=OrchAgent(delay=0.2)),
+                    Task("c", agent=OrchAgent(delay=0.2)),
+                ]
+            )
+
+        started = time.perf_counter()
+        ctx = Workflow(ExecutePlan(plan=make_plan(), parallel=True)).run()
+        parallel_elapsed = time.perf_counter() - started
+        self.assertTrue(ctx["plan_result"].ok)
+        self.assertEqual([ctx[name] for name in ("a", "b", "c")], ["好的"] * 3)
+
+        started = time.perf_counter()
+        Workflow(ExecutePlan(plan=make_plan())).run()
+        serial_elapsed = time.perf_counter() - started
+        self.assertLess(parallel_elapsed, serial_elapsed)
+
+    def test_execute_plan_max_workers(self):
+        plan = Plan.from_template(
+            [Task("a", agent=OrchAgent(["A"])), Task("b", agent=OrchAgent(["B"]))]
+        )
+        ctx = Workflow(ExecutePlan(plan=plan, max_workers=2)).run()
+        self.assertTrue(ctx["plan_result"].ok)
+        self.assertEqual(ctx["a"], "A")
+        self.assertEqual(ctx["b"], "B")
+
+    def test_execute_plan_rejects_config_with_parallel(self):
+        plan = Plan.from_template([Task("a", agent=OrchAgent(["x"]))])
+        with self.assertRaises(ValueError):
+            Workflow(
+                ExecutePlan(plan=plan, config=OrchestratorConfig(), parallel=True)
+            ).run()
+
+    def test_execute_plan_rejects_bad_max_workers(self):
+        plan = Plan.from_template([Task("a", agent=OrchAgent(["x"]))])
+        with self.assertRaises(ValueError):
+            Workflow(ExecutePlan(plan=plan, max_workers=0)).run()
 
     def test_aggregate_step_text(self):
         agent = OrchAgent(["合并后的答复"])

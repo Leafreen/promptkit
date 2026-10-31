@@ -46,6 +46,7 @@ __all__ = [
     "CHAT_INPUT_KEY",
     "CHAT_REPLY_KEY",
     "DEFAULT_EXIT_WORDS",
+    "DEFAULT_COMPACT_PROMPT",
     "Role",
     "Want",
     "Rules",
@@ -56,6 +57,8 @@ __all__ = [
     "SystemPrompt",
     "ChatLoop",
     "ChatTurn",
+    "Compact",
+    "CompactStep",
     "MakeFile",
     "SaveDeliverables",
     "build_system_prompt",
@@ -80,6 +83,12 @@ CHAT_REPLY_KEY = "model_reply"
 
 #: 默认退出词
 DEFAULT_EXIT_WORDS = ("exit", "quit", ":q")
+
+#: 历史压缩的默认提示词：`{{messages}}` 会被换成要压缩的旧对话文本
+DEFAULT_COMPACT_PROMPT = (
+    "请把下面的对话记录压缩成一段简短的摘要：保留用户的目标、已经确定的"
+    "关键事实、还有没做完的事。直接输出摘要本身，不要客套开场白。\n\n{{messages}}"
+)
 
 
 def chat_context_vars() -> List[str]:
@@ -430,28 +439,45 @@ class ChatTurn(Step):
 
 
 def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
-    *,
+    *steps: Any,
+    behavior: Optional[Sequence[Any]] = None,
     input_key: str = CHAT_INPUT_KEY,
     output_key: str = CHAT_REPLY_KEY,
     signal_key: str = CHAT_SIGNAL_KEY,
     read_prompt: str = ">>> ",
     render: str = "markdown",
     exit_words: Optional[Sequence[str]] = None,
-    behavior: Sequence[Any] = (),
     after_turn: Optional[Sequence[Any]] = None,
     after_end: Sequence[Any] = (),
     cautions: Optional[Sequence[Any]] = None,
     max_turns: Optional[int] = None,
     turn_template: Optional[str] = None,
+    compact_after: Optional[int] = None,
+    compact_keep: int = 6,
+    compact_prompt: Optional[str] = None,
 ) -> Step:
     '''组装多轮对话循环，返回一个 `Workflow`（本身就是 Step）。
 
-    每一轮：读一行 -> 是退出词就结束 -> 跑 `behavior` -> 调模型
+    每一轮：读一行 -> 是退出词就结束 -> 跑循环体 -> 调模型
     -> 显示回答 -> 跑 `after_turn`（`Deliverable(when="each_turn")` 就挂这儿）。
 
-    用户决定退出后（退出词 / Ctrl+D），跑 `after_end` —— 说句再见、把
-    session 存掉、总结这轮对话都放这儿。它跑在循环之后、`ChatWorkflow`
-    的写记忆与落盘之前，所以 `after_end` 里仍能读到完整的 Context。
+    循环体（每轮、调模型之前跑）支持两种写法，**二选一**：
+
+        ChatLoop(MultilineInput)             # DSL：位置参数（推荐）
+        ChatLoop(If(...).Then(...), Echo(…)) # 多个位置参数也行
+        ChatLoop(behavior=[MultilineInput])  # 关键字（老写法，仍支持）
+
+    开场白和收尾**不用参数** —— 手写 Workflow 里它们就是 `ChatLoop`
+    **前面 / 后面**的普通步骤：
+
+        SystemPrompt(),
+        LoadMem(),              # 开场白：进循环前跑一次
+        ChatLoop(...),
+        Memorize(),             # 收尾：用户退出后跑一次
+
+    `after_end` 参数主要给 `ChatWorkflow` 用（声明式写法没有「外面」
+    可以放步骤）。用户决定退出后（退出词 / Ctrl+D）它跑在循环之后、
+    `ChatWorkflow` 的写记忆与落盘之前，所以仍能读到完整的 Context。
 
     `ExitWords` 写进 Context 的值会被自动读出来，所以 `exit_words`
     一般不用显式传；显式传的优先。
@@ -459,6 +485,11 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     `turn_template` 换掉「这一轮发给模型的内容」（默认就是 `{{usr_input}}`）。
     召回记忆之类的每轮上下文就靠它拼进去 —— 别塞进 system prompt：
     那是**一轮**的临时信息，塞进 system 既浪费 token 又容易让模型当成长期设定。
+
+    `compact_after=N`：历史超过 N 条消息时自动压缩 —— 旧消息让模型总结成
+    一段摘要，最近 `compact_keep` 条（默认 6）原样保留。压缩发生在每轮
+    **调模型之前**，所以本轮请求立刻用上更短的历史；摘要这次调用本身
+    不会留在历史里。`compact_prompt` 换摘要提示词（`{{messages}}` 占位）。
     '''
     from promptkit.core.steps.actions.interactive import Echo, Read
     from promptkit.core.steps.logics.if_step import If
@@ -467,6 +498,15 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     from promptkit.core.steps.logics.while_step import While
     from promptkit.core.steps.workflow import Workflow
 
+    # 循环体从哪来：位置参数（DSL 写法）或 behavior= 关键字（老写法），二选一。
+    # 两个都给的话「谁先谁后」只能靠猜，所以显式报错而不是静默合并。
+    if behavior is not None and steps:
+        raise TypeError(
+            "ChatLoop 的循环体只能给一次：用位置参数 ChatLoop(a, b)，"
+            "或者关键字 behavior=[...]，不要同时给"
+        )
+    loop_body = tuple(steps) if steps else tuple(behavior or ())
+
     # 每轮要跑的收尾步骤。没显式给就默认「把 when='each_turn' 的交付物存掉」——
     # 手写 Workflow 时 `Deliverable(when="each_turn")` 否则会**完全没效果**：
     # 循环里没人管它，循环后的 `SaveDeliverables()` 又按 when="end" 把它过滤掉了。
@@ -474,6 +514,18 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         list(after_turn)
         if after_turn is not None
         else [SaveDeliverables(when="each_turn")]
+    )
+
+    # 历史压缩：给 compact_after 就在**调模型之前**检查一次 ——
+    # 本轮请求立刻用上更短的历史（没超阈值时这一步空转，直接跳过）。
+    compact_step = (
+        Compact(
+            max_messages=compact_after,
+            keep_recent=compact_keep,
+            compact_prompt=compact_prompt or DEFAULT_COMPACT_PROMPT,
+        )
+        if compact_after is not None
+        else None
     )
 
     resolved_exit = list(exit_words) if exit_words else None
@@ -497,7 +549,9 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             Set(Var(signal_key), "end"),
             Break(),
         ),
-        *coerce_steps(*behavior),
+        *coerce_steps(*loop_body),
+        # 压缩放在调模型**之前**（没配 compact_after 就没有这一步）
+        *(() if compact_step is None else (compact_step,)),
         ChatTurn(
             prompt_content=(
                 turn_template
@@ -521,6 +575,141 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         # （`max_turns` 用尽会抛 LoopLimitExceeded，不会走到）。
         *coerce_steps(*after_end),
         name="chat_loop",
+    )
+
+
+# ============================ 历史压缩 ============================
+class CompactStep(Step):
+    '''对话历史太长时压缩：旧消息让模型总结成一段摘要，替换掉原文。
+
+    执行时做四件事：
+
+    1. 历史条数没超过 `max_messages`（None = 总是压）-> 跳过
+    2. 把「要压缩的旧消息」拼成文本，发给 agent 换回一段摘要
+       —— 这次摘要调用本身**不会**留在对话历史里，拿完就截回去
+    3. `agent.load_history([摘要] + 最近 keep_recent 条, replace=True)`
+       —— 历史换新，`messages` 缓存自动重建
+    4. 摘要文本写进 `context[output_key]`（默认 "compact_summary"）
+
+    摘要作为一条标明身份的 user 消息开头，最近的消息原样保留，
+    模型看到的上下文不突兀。需要 agent 实现 `get_history()` /
+    `load_history()`（promptkit.agent.Agent 都有）。
+
+    agent 从哪来：`self.agent` -> `context.get("agent")`，与 `LLMStep` 一致。
+    '''
+
+    name = "compact"
+
+    def __init__(
+        self,
+        max_messages: Optional[int] = None,
+        keep_recent: int = 6,
+        compact_prompt: str = DEFAULT_COMPACT_PROMPT,
+        output_key: str = "compact_summary",
+        agent: Any = None,
+    ):
+        if max_messages is not None and max_messages < 1:
+            raise ValueError(
+                f"max_messages 要 >= 1（或 None 表示总是压），得到 {max_messages!r}"
+            )
+        if keep_recent < 0:
+            raise ValueError(f"keep_recent 不能是负数，得到 {keep_recent!r}")
+        self.max_messages = max_messages
+        self.keep_recent = keep_recent
+        self.compact_prompt = compact_prompt
+        self.output_key = output_key
+        self.agent = agent
+
+    def execute(self, context: Context) -> None:
+        agent = self.agent if self.agent is not None else context.get("agent")
+        if agent is None:
+            raise ValueError(
+                "Compact 需要一个 agent：传 agent=...，或用 wf.run(agent=...) 运行。"
+            )
+        missing = [
+            attr
+            for attr in ("get_history", "load_history")
+            if not callable(getattr(agent, attr, None))
+        ]
+        if missing:
+            raise TypeError(
+                "Compact 需要 agent 实现 " + " / ".join(missing) + "，"
+                f"但 {type(agent).__name__} 没有。（promptkit.agent.Agent 有。）"
+            )
+
+        history = agent.get_history()
+        if self.max_messages is not None and len(history) <= self.max_messages:
+            context.trace.append(self.name + ":skip")
+            return
+        cut = max(len(history) - self.keep_recent, 0)
+        old, recent = history[:cut], history[cut:]
+        if not old:  # 全是「最近」的消息，没东西可压
+            context.trace.append(self.name + ":skip")
+            return
+
+        summary = self._summarize(agent, old)
+        agent.load_history(
+            [{"role": "user", "content": f"（之前对话的摘要：{summary}）"}]
+            + list(recent),
+            replace=True,
+        )
+        context[self.output_key] = summary
+        context.trace.append(f"{self.name}:{len(old)}->{1 + len(recent)}")
+
+    def _summarize(self, agent: Any, old: List[dict]) -> str:
+        '''把旧消息发给 agent 换一段摘要（摘要这次调用不留进历史）。'''
+        from promptkit.prompt import render_text
+
+        text = "\n".join(
+            f"{'用户' if message.get('role') == 'user' else '助手'}: "
+            f"{message.get('content', '')}"
+            for message in old
+        )
+        prompt = render_text(
+            self.compact_prompt,
+            {"messages": text, "count": len(old)},
+            allow_dollar=False,
+        )
+        saved = list(getattr(agent, "history", None) or [])
+        reply = agent.ask({"role": "user", "content": prompt})
+        # ask 会往历史里追加「摘要请求 / 摘要回复」，截回去 —— 紧接着
+        # load_history(replace=True) 会重建，这一步让中间态也不残留。
+        # （必须用副本：`ask` 追加的就是同一个列表对象。）
+        if getattr(agent, "history", None) is not None:
+            agent.history = saved
+        return str(reply)
+
+    def describe(self) -> str:
+        threshold = (
+            f"超过 {self.max_messages} 条时" if self.max_messages is not None else ""
+        )
+        return (
+            f"Compact({threshold}把旧消息压成摘要，保留最近 {self.keep_recent} 条)"
+        )
+
+
+def Compact(  # noqa: N802 - 跟随 DSL 命名
+    max_messages: Optional[int] = None,
+    keep_recent: int = 6,
+    compact_prompt: str = DEFAULT_COMPACT_PROMPT,
+    output_key: str = "compact_summary",
+    agent: Any = None,
+) -> CompactStep:
+    '''压缩对话历史（塞进循环体，或用 `ChatLoop(compact_after=...)` 自动挂）。
+
+        ChatLoop(compact_after=20)      # 声明式：循环里每轮自动检查
+        ChatLoop(Compact(20))           # 手写：自己塞进循环体
+        Compact(keep_recent=10)         # 总是压，保留最近 10 条
+
+    `max_messages`：历史超过多少条才压（None = 总是压）。
+    `keep_recent`：最近多少条原样保留，其余总结成一段摘要。
+    '''
+    return CompactStep(
+        max_messages=max_messages,
+        keep_recent=keep_recent,
+        compact_prompt=compact_prompt,
+        output_key=output_key,
+        agent=agent,
     )
 
 

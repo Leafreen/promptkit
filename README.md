@@ -395,6 +395,7 @@ Ask().agent_reply()      # 当表达式用：执行它，并取它的回复
 | `If(cond).Then(...).ElseIf(cond).Then(...).Else(...)` | 多路分支 |
 | `Switch(v).Case(a, b).Then(...).Default(...)` | switch-case |
 | `While(cond, max_iterations=N)` | 循环；超过上限抛 `LoopLimitExceeded` |
+| `While(...).Hook(扩展点, 函数)` | 给循环挂 Hook（7 个扩展点，见下） |
 | `DoWhile(cond, max_iterations=N)` | 先执行一次循环体再判断（C 的 do-while） |
 | `For(init, cond, step, max_iterations=N)` | C 风格计数循环 `for(init; cond; step)` |
 | `ForEach("i", iterable, max_iterations=N)` | 遍历 range / 列表 / 表达式 |
@@ -406,13 +407,59 @@ Ask().agent_reply()      # 当表达式用：执行它，并取它的回复
 | `LLMStep(prompt, output_model=None, output_key=...)` | 调用模型 |
 | `FunctionStep(func, output_key=...)` | 包装普通 Python 函数 |
 | `Read(prompt="")` | 读一行标准输入（惰性表达式） |
+| `Read(prompt).Until(标记)` | 多行读取：直到某行等于标记（该行不算内容），返回换行拼接的文本 |
+| `Read(prompt).OnBreak()` | 等价 `on_eof="break"`：Ctrl+D / Ctrl+C 不炸工作流 |
 | `ReadFile(path)` | 读整个文件（惰性表达式，UTF-8） |
+| `Confirm("继续？")` | 问是非题，返回 True/False；`.Default(True)` 给空输入兜底 |
+| `Choose("吃啥？", "A", "B")` | 编号菜单选一个，返回选项文本；`.Default(2)` 给空输入兜底 |
 | `Save(*values, file=..., format="text"\|"json")` | 把值写进文件 |
 | `SaveJSON(value, file=...)` | 写成一个 JSON 文件 |
 | `SaveHistory(file=...)` | 把对话历史 + 步骤轨迹存成 JSON |
 | `Echo(*parts, render="text"\|"markdown", title=...)` | 打印 / 渲染 |
 | `Call(func, *args)` | 调用函数 / 可调用对象，参数可以是表达式 |
 | `Len(expr)` | 长度（`len(expr)` 不行，因为它会立刻求值） |
+
+**循环的 Hook 扩展点**（`While(...)` 支持；七个点按下列顺序执行）：
+
+| 扩展点 | 执行时机 | 返回值处理 |
+| --- | --- | --- |
+| `LOOP_START` | 进入循环前，一次 | 忽略 |
+| `BEFORE_CONDITION` | 每轮判条件前 | 返回 `False` → 结束整个循环 |
+| `BEFORE_ITERATION` | 条件成立、跑循环体前 | 返回 `False` → 跳过本轮（仍触发 `AFTER_ITERATION`） |
+| `AFTER_ITERATION` | 本轮结束（含被跳过 / `Break` / `Continue`） | 忽略 |
+| `LOOP_LIMIT` | 即将超出 `max_iterations` | 忽略；随后照常抛 `LoopLimitExceeded` |
+| `LOOP_ERROR` | 条件或循环体抛异常时 | 忽略；随后照常抛 |
+| `LOOP_END` | 正常结束 / `Break` 退出 | 忽略 |
+
+钩子签名统一为 `fn(event: LoopHookEvent) -> Optional[bool]`，`event` 字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `point` | `HookPoint` | 当前扩展点（一个函数挂多个点时用它区分） |
+| `loop` | `WhileStep` | 触发它的循环步骤 |
+| `context` | `Context` | 整个工作流 Context，**可读可写** |
+| `iteration` | `int` | 轮次（1 起）；`loop_start` 为 0，`loop_end` 为已完成轮数 |
+| `condition` | `bool \| None` | 条件结果；`before_condition` 里尚未求值为 `None`，`loop_end` 里是最终结果 |
+| `signal` | `str \| None` | 仅 `after_iteration`：`None` / `"continue"` / `"break"` / `"skipped"` |
+| `reason` | `str \| None` | 仅 `loop_end`：`"condition"` / `"break"` / `"hook"` |
+| `error` | `Exception \| None` | 仅 `loop_limit` / `loop_error` 里的异常对象 |
+| `duration_ms` | `float` | 仅 `after_iteration`：本轮耗时（毫秒） |
+
+四种绑定方式，等价：
+
+```python
+from promptkit.core import While, Set, Var, loop_hooks, AFTER_ITERATION, BEFORE_ITERATION
+
+While(Var("n") < 3, max_iterations=10).Hook(BEFORE_ITERATION, log).Do(...)
+While(Var("n") < 3, hooks={"after_iteration": [log, save]}).Do(...)
+While(Var("n") < 3, hooks=[("loop_end", summary)]).Do(...)
+loop_hooks(context).register(AFTER_ITERATION, log)      # 运行时：对本 Context 所有循环生效
+```
+
+多个钩子按注册顺序串行；某钩子返回 `False` 即短路，后续钩子不再执行。
+钩子内部抛异常**不会影响主循环**：记进 `hooks.failures`（`HookFailure`：
+`point` / `fn` / `error` / `iteration`）后跳过该钩子继续。
+完整示例见 [examples/while_hooks.py](examples/while_hooks.py)。
 
 **`Call` 是表达式，不是步骤** —— 直接放进 `Workflow(...)` 会报
 `TypeError: 期望 Step 或 Step 列表，得到 CallExpr`。要让一个调用「执行」，
@@ -1868,12 +1915,19 @@ wf.run(agent=tutor)
 | `ExitWords(*words)` | 设置 `chat_exit_words`（默认 `exit` / `quit` / `:q`） |
 | `Behavior(*steps)` | 每轮里、模型调用之前执行的步骤（逃生舱） |
 | `SystemPrompt(template=None, reset=True)` | 编译成 system prompt 装到 Agent |
-| `ChatLoop(**options)` | 组装多轮循环，返回一个 `Workflow` |
+| `ChatLoop(行为...)` | 组装多轮循环，返回一个 `Workflow`；位置参数 = 每轮调模型前跑的行为 |
+| `Compact(20)` | 历史超过 20 条时压缩：旧消息总结成摘要，最近几条保留 |
 | `MakeFile(deliverable)` | 把一个交付物落盘（复用 `Save`） |
 | `SaveDeliverables(items=None)` | 批量落盘 |
 
 这几个都接受**两种写法**：一串参数 `Rules("a", "b")`，或者一个列表 `Rules(["a", "b"])`。
 （`Deliverables([...])` 传列表是最常见的写法，早期不拆开会导致交付物**静默不保存**。）
+
+长对话可以把旧历史压掉：`ChatLoop(compact_after=20)` 在历史超过 20 条消息时
+自动把旧消息总结成一段摘要（最近 6 条原样保留），摘要这次调用本身不会留在
+历史里，压缩发生在每轮**调模型之前**，所以本轮请求立刻省下 token。声明式
+写法就是 `ChatWorkflow(compact_after=20)`；想自己控制就手动把 `Compact(20)`
+塞进循环体。
 
 **多次调用会累积**，所以一行写一条是最自然的：
 
@@ -1912,8 +1966,47 @@ Workflow(
 
 `ChatWorkflow.build()` 会自动加，所以声明式写法不用操心。
 
+**开场白和收尾就是普通步骤**：手写 Workflow 里，进循环前跑一次的放 `ChatLoop`
+前面、用户退出后跑一次的放它后面 —— 不需要任何参数：
+
+```python
+Workflow(
+    Role("学习助手"),
+    SystemPrompt(),
+    LoadMem(),                  # 开场白：进循环前跑一次
+    ChatLoop(MultilineInput),   # 行为用位置参数（DSL 风格）
+    Memorize(),                 # 收尾：用户退出后跑一次
+)
+```
+
+`ChatWorkflow`（声明式）没有「外面」可以放步骤，用等价的
+`opening=[...]` / `after_end=[...]` 字段。
+
+**多行输入**用 `Read(...).Until(标记)`：一直读，直到某一行等于标记
+（该行本身不算内容），返回换行拼接的文本；配 `.OnBreak()` 后
+Ctrl+C / Ctrl+D 不会炸掉工作流（Ctrl+C 会礼貌结束对话）：
+
+```python
+MultilineInput = If(Var("usr_input") == "ml").Then(
+    Set(Var("usr_input"), Read("... ").Until("").OnBreak()),
+    If(Var("usr_input") == "").Then(
+        Set(Var("usr_input"), "（用户取消了多行输入）"),
+    ),
+)
+```
+
 `Deliverable(save_to=...)` 给**目录**也行：会按「交付物名字 + format 推的扩展名」
 补文件名，`save_to=r"C:\Users\me\Desktop"` 就写成 `Desktop/选题建议.md`。
+
+**是非题和选择题**不用自己写循环校验：`Confirm` 认 y/n/是/否，
+`Choose` 打印编号菜单，非法输入会提示并重问，空输入用 `.Default(...)` 兜底：
+
+```python
+If(Confirm("要覆盖旧文件吗？").Default(False)).Then(
+    Save(Var("正文"), file="out.txt"),
+)
+Set("难度", Choose("选个难度：", "入门", "进阶", "挑战").Default(1))
+```
 
 它们**只往 Context 里写配置**（`chat_role` / `chat_want` / …），编译发生在
 `SystemPrompt()`。这样每一步都能单独用：你可以只放 `Role(...)`，
@@ -3014,6 +3107,17 @@ workflow = Workflow(
 )
 ```
 
+同一层的任务（彼此没有 `depends_on`）默认串行。想并行不用手写
+`OrchestratorConfig`：
+
+```python
+ExecutePlan(plan=plan, parallel=True)     # 保守默认 4 个线程
+ExecutePlan(plan=plan, max_workers=8)     # 显式定线程数
+```
+
+这两个参数只是 `max_concurrency` 的语法糖；要同时设 token 上限、超时、
+失败策略就只传 `config=OrchestratorConfig(...)`（两者同时给会报 `ValueError`）。
+
 [examples/orchestrate.py](examples/orchestrate.py) 真跑一遍：
 
 ```text
@@ -3074,6 +3178,7 @@ Task("review", "……", on_failure="retry", max_retries=2)   # 默认
 | --- | --- | --- |
 | `max_tasks` | 10 | 规划器一次吐出 50 个任务 |
 | `max_concurrency` | 1 | 并发打爆 API；`>1` 时同层任务用线程池跑 |
+| `parallel` / `max_workers`（`ExecutePlan` 参数） | 关 | `max_workers<1` 报错；与 `config=` 同时给报 ValueError |
 | `max_total_tokens` | 不限 | 成本爆炸；超了后面的任务标 skipped |
 | `per_task_timeout` | 无 | 一个任务卡死整条链（超时只标记失败，不能杀线程） |
 | `max_delegations` | 5 | 委派工具被无限调用 |

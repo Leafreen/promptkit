@@ -76,49 +76,112 @@ def _write_text(path: str, text: str, *, append: bool, encoding: str) -> str:
 
 # =============================== 读 ===============================
 class ReadExpr(Expr):
-    '''从标准输入读一行。惰性求值，所以构造工作流时不会阻塞等输入。
+    '''从标准输入读一行，或一个多行块。惰性求值，所以构造工作流时不会阻塞等输入。
 
-        Set("job", Read("请输入面试的岗位："))
+        Set("job", Read("请输入面试的岗位："))      # 读一行
+        Set("正文", Read("... ").Until(""))         # 多行：空行结束
+        Set("正文", Read("... ").Until("END"))      # 多行：哨兵行结束
+        Read(">>> ").OnBreak()                      # Ctrl+D / Ctrl+C 跳出循环
 
-    `on_eof` 决定「输入结束」时怎么办：
+    `Until(标记)` 切到**多行模式**：一直读，直到某一行等于标记为止
+    （结束行本身不算内容），返回用 `\\n` 拼好的整段文本。每一行都
+    重复同一个提示符，所以提示符一般写成 `"... "` 这种续行样式。
+
+    `strip=True`（默认）时每行先去首尾空白再参与比较和拼接 ——
+    意味着「只有空格的行」也会终止 `Until("")`；想严格按原文比较，
+    用 `Read(..., strip=False)`。
+
+    `on_eof` 决定「输入结束」时怎么办（`OnBreak()` 是它的链式写法）：
 
     - `"raise"`（默认）：原样抛 `EOFError` / `KeyboardInterrupt`
-    - `"break"`：当成「对话到此为止」，跳出当前循环 —— 于是循环**后面**的
-      步骤（比如 `SaveDeliverables()`）还能正常执行
+    - `"break"`：当成「对话到此为止」。单行模式抛 `BreakSignal` 跳出
+      当前循环 —— 于是循环**后面**的步骤（比如 `SaveDeliverables()`）
+      还能正常执行；多行模式遇到 EOF 则温和收尾，返回已读到的行
+      （一行没读就是空串），Ctrl+C 仍抛 `BreakSignal`（已读的丢弃）
 
     Ctrl+D（EOF）和 Ctrl+C 在提示符处基本都是「我不想聊了」，
     默认行为会让整个工作流抛异常退出、后面的收尾步骤全部跳过 ——
     实测就是「聊完了，但交付物没写出来」。聊天循环默认用 `"break"`。
     '''
 
-    def __init__(self, prompt: str = "", strip: bool = True, on_eof: str = "raise"):
+    def __init__(
+        self,
+        prompt: str = "",
+        strip: bool = True,
+        on_eof: str = "raise",
+        until: Optional[str] = None,
+    ):
         if on_eof not in ("raise", "break"):
             raise ValueError(f"on_eof 只能是 'raise' 或 'break'，得到 {on_eof!r}")
+        if until is not None and not isinstance(until, str):
+            raise TypeError(f"until 必须是字符串，得到 {until!r}")
         self.prompt = prompt
         self.strip = strip
         self.on_eof = on_eof
+        self.until = until
+
+    # ------------- 链式 DSL（都返回新实例，不动原来那个）-------------
+    def Until(self, marker: str) -> "ReadExpr":  # noqa: N802 - 跟随 DSL 命名
+        '''多行模式：读到 `marker` 行为止（该行不算内容），返回 `\\n` 拼好的文本。
+
+            Set("正文", Read("... ").Until(""))      # 空行结束
+        '''
+        if not isinstance(marker, str):
+            raise TypeError(f"Until 需要一个字符串标记，得到 {marker!r}")
+        return ReadExpr(self.prompt, self.strip, self.on_eof, marker)
+
+    def OnBreak(self) -> "ReadExpr":  # noqa: N802 - 跟随 DSL 命名
+        '''`on_eof="break"` 的链式写法：输入结束 / Ctrl+C 当「跳出循环」。'''
+        return ReadExpr(self.prompt, self.strip, "break", self.until)
 
     def eval(self, context: Context) -> str:
+        if self.until is not None:
+            return self._read_block()
         try:
             text = input(self.prompt)
-        except (EOFError, KeyboardInterrupt):
-            if self.on_eof != "break":
-                raise
-            # 先换个行，免得 `^C` 和后面的输出粘在同一行
-            try:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
-            except Exception:  # noqa: BLE001 - 流被换掉也不该影响收尾
-                pass
-            from promptkit.core.errors import BreakSignal
-
-            raise BreakSignal() from None
+        except (EOFError, KeyboardInterrupt) as exc:
+            self._on_interrupt(exc)  # 必然抛出：原样 re-raise 或 BreakSignal
         return text.strip() if self.strip else text
 
+    def _read_block(self) -> str:
+        '''多行模式：读到 `until` 行为止，返回拼好的文本（结束行不算）。'''
+        lines: List[str] = []
+        while True:
+            try:
+                line = input(self.prompt)
+            except EOFError:
+                if self.on_eof != "break":
+                    raise
+                break  # Ctrl+D 也算结束标记，收下已读到的部分
+            except KeyboardInterrupt as exc:
+                self._on_interrupt(exc)
+            kept = line.strip() if self.strip else line
+            if kept == self.until:
+                break
+            lines.append(kept)
+        return "\n".join(lines)
+
+    def _on_interrupt(self, exc: BaseException) -> None:
+        '''单行 / 多行共用的打断处理：按 `on_eof` 分流（两个分支都会抛出）。'''
+        if self.on_eof != "break":
+            raise exc
+        # 先换个行，免得 `^C` 和后面的输出粘在同一行
+        try:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+        except Exception:  # noqa: BLE001 - 流被换掉也不该影响收尾
+            pass
+        from promptkit.core.errors import BreakSignal
+
+        raise BreakSignal() from None
+
     def __repr__(self) -> str:
+        parts = [repr(self.prompt)]
         if self.on_eof != "raise":
-            return f"Read({self.prompt!r}, on_eof={self.on_eof!r})"
-        return f"Read({self.prompt!r})"
+            parts.append(f"on_eof={self.on_eof!r}")
+        if self.until is not None:
+            parts.append(f"until={self.until!r}")
+        return f"Read({', '.join(parts)})"
 
 
 class ReadFileExpr(Expr):
@@ -150,6 +213,112 @@ class ReadFileExpr(Expr):
 
     def __repr__(self) -> str:
         return f"ReadFile({self.file!r})"
+
+
+class ConfirmExpr(Expr):
+    '''问一个「是 / 否」问题，返回布尔值。惰性求值，构造时不会等输入。
+
+        If(Confirm("要覆盖旧文件吗？")).Then(Save(Var("正文"), file="out.txt"))
+
+    认得的回答：y / yes / ok / 是 / 要 / 好 / 行（不分大小写）-> True；
+    n / no / 否 / 不 / 不要 / 不行 -> False。空输入用 `default` 兜底
+    （没给就重问）；其它回答会提示合法选项并**重新问**，直到能认出来为止。
+
+    Ctrl+D / Ctrl+C 跟 `Read` 默认行为一致：原样抛出。
+    '''
+
+    YES = ("y", "yes", "ok", "是", "要", "好", "行")
+    NO = ("n", "no", "否", "不", "不要", "不行")
+
+    def __init__(self, prompt: str = "", default: Optional[bool] = None):
+        if default is not None and not isinstance(default, bool):
+            raise TypeError(f"default 只能是 True / False / None，得到 {default!r}")
+        self.prompt = prompt
+        self.default = default
+
+    def Default(self, value: bool) -> "ConfirmExpr":  # noqa: N802 - 跟随 DSL 命名
+        '''空输入时的默认答案：`Confirm("继续？").Default(True)`。'''
+        return ConfirmExpr(self.prompt, value)
+
+    def eval(self, context: Context) -> bool:
+        label = f"{self.prompt} " if self.prompt else ""
+        hint = {None: "(y/n)", True: "(Y/n)", False: "(y/N)"}[self.default]
+        question = f"{label}{hint} "
+        while True:
+            text = input(question).strip().lower()
+            if not text:
+                if self.default is not None:
+                    return self.default
+            elif text in self.YES:
+                return True
+            elif text in self.NO:
+                return False
+            # 认不出来的回答：提示一句再问，而不是猜一个
+            stream = output_stream(context)
+            stream.write("请回答 y 或 n。\n")
+            stream.flush()
+
+    def __repr__(self) -> str:
+        if self.default is None:
+            return f"Confirm({self.prompt!r})"
+        return f"Confirm({self.prompt!r}, default={self.default!r})"
+
+
+class ChooseExpr(Expr):
+    '''打印编号菜单让用户选一个，返回**选项文本**。惰性求值。
+
+        Set("菜", Choose("今天吃什么？", "红烧肉", "清蒸鱼", "素食拼盘"))
+        #   1. 红烧肉
+        #   2. 清蒸鱼
+        #   3. 素食拼盘
+        #   今天吃什么？ (1-3)
+        # 输入 2 -> "清蒸鱼"
+
+    数字之外的回答、或者越界的编号，会提示合法范围并**重新问**；
+    空输入用 `default` 兜底（它是**序号**，从 1 起），没给就重问。
+    '''
+
+    def __init__(
+        self, prompt: str, options: List[str], default: Optional[int] = None
+    ):
+        options = list(options)
+        if len(options) < 2:
+            raise ValueError(f"Choose 至少要给两个选项，得到 {len(options)} 个")
+        if default is not None and not 1 <= default <= len(options):
+            raise ValueError(
+                f"default 是 1~{len(options)} 的序号，得到 {default!r}"
+            )
+        self.prompt = prompt
+        self.options = options
+        self.default = default
+
+    def Default(self, index: int) -> "ChooseExpr":  # noqa: N802 - 跟随 DSL 命名
+        '''空输入时默认选第 index 项（从 1 起）：`Choose(...).Default(2)`。'''
+        return ChooseExpr(self.prompt, self.options, index)
+
+    def eval(self, context: Context) -> str:
+        stream = output_stream(context)
+        stream.write(
+            "\n".join(
+                f"{index}. {option}"
+                for index, option in enumerate(self.options, 1)
+            )
+            + "\n"
+        )
+        stream.flush()
+        span = f"1-{len(self.options)}"
+        while True:
+            text = input(f"{self.prompt} ({span}) ").strip()
+            if not text and self.default is not None:
+                return self.options[self.default - 1]
+            if text.isdigit() and 1 <= int(text) <= len(self.options):
+                return self.options[int(text) - 1]
+            stream.write(f"请输入 {span} 之间的数字。\n")
+            stream.flush()
+
+    def __repr__(self) -> str:
+        inner = ", ".join(repr(option) for option in self.options)
+        return f"Choose({self.prompt!r}, {inner})"
 
 
 # =============================== 打印 ===============================
@@ -339,9 +508,17 @@ def Read(  # noqa: N802
 ) -> Union[ReadExpr, ReadFileExpr]:
     '''读输入，当表达式用。
 
-        Set("job", Read("岗位："))                    # 读一行标准输入
-        Set("文本", Read("a.txt", from_file=True))     # 读整个文件
-        Read(">>> ", on_eof="break")                  # Ctrl+D / Ctrl+C 跳出循环
+        Set("job", Read("岗位："))                     # 读一行标准输入
+        Set("文本", Read("a.txt", from_file=True))      # 读整个文件
+        Read(">>> ", on_eof="break")                   # Ctrl+D / Ctrl+C 跳出循环
+        Set("正文", Read("... ").Until(""))            # 多行：空行结束
+        Set("正文", Read("... ").Until("END").OnBreak())
+
+    返回的是惰性表达式，用链式方法配置：
+
+    - `.Until(标记)`：多行模式，读到等于标记的行为止（该行不算内容），
+      返回用换行拼好的整段文本
+    - `.OnBreak()`：等价 `on_eof="break"` —— Ctrl+D / Ctrl+C 不炸整个工作流
 
     `from_file=True` 时第一个参数是**文件路径**（不是提示语）。
     嫌这个写法别扭就直接用 `ReadFile("a.txt")`。
@@ -356,6 +533,33 @@ def ReadFile(  # noqa: N802
 ) -> ReadFileExpr:
     '''读整个文件，当表达式用：`Set("配置", ReadFile("config.json"))`。'''
     return ReadFileExpr(path, strip, encoding)
+
+
+def Confirm(  # noqa: N802
+    prompt: str = "", *, default: Optional[bool] = None
+) -> ConfirmExpr:
+    '''问是非题，当表达式用：`If(Confirm("继续？")).Then(...)`。
+
+    `default` 给空输入兜底；链式写法是 `Confirm("继续？").Default(True)`。
+    '''
+    return ConfirmExpr(prompt, default)
+
+
+def Choose(  # noqa: N802
+    prompt: str, *options: str, default: Optional[int] = None
+) -> ChooseExpr:
+    '''让用户从编号菜单里选一个，返回选项文本：
+
+        Set("菜", Choose("吃什么？", "红烧肉", "清蒸鱼", "素食拼盘"))
+
+    选项也可以用列表给：`Choose("吃什么？", ["红烧肉", "清蒸鱼"])`。
+    `default` 是空输入时默认选中的**序号**（从 1 起）；
+    链式写法是 `Choose(...).Default(2)`。
+    '''
+    flat: List[Any] = list(options)
+    if len(flat) == 1 and isinstance(flat[0], (list, tuple)):
+        flat = list(flat[0])
+    return ChooseExpr(prompt, flat, default)
 
 
 def Save(  # noqa: N802
@@ -435,6 +639,10 @@ def Echo(  # noqa: N802
 __all__ = [
     "DEFAULT_ENCODING",
     "OUTPUT_STREAM_KEY",
+    "Choose",
+    "ChooseExpr",
+    "Confirm",
+    "ConfirmExpr",
     "Echo",
     "EchoStep",
     "Read",

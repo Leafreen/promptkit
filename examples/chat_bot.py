@@ -18,8 +18,10 @@ from promptkit.core import (  # noqa: E402
     Deliverable,
     Echo,
     If,
+    Read,
     Role,
     Rules,
+    Set,
     SystemPrompt,
     Tools,
     Var,
@@ -56,7 +58,13 @@ def declarative() -> ChatWorkflow:
                 save_to=os.path.join(OUT_DIR, "选题建议.md"),
             ),
         ],
-        behavior=[If(Var("usr_input") == "help").Then(Echo("输入 exit 退出。"))],
+        behavior=[
+            If(Var("usr_input") == "help").Then(Echo("输入 exit 退出。")),
+            # 多行输入：敲 ml 进入多行模式，空行结束（详见 README）
+            If(Var("usr_input") == "ml").Then(
+                Set(Var("usr_input"), Read("... ").Until("").OnBreak()),
+            ),
+        ],
         tools=[WEB_SEARCH],
         exit_words=["exit", "quit"],
     )
@@ -72,7 +80,10 @@ def hand_written() -> Workflow:
         ExitWords("exit", "quit"),
         SystemPrompt(),
         ChatLoop(
-            behavior=[If(Var("usr_input") == "help").Then(Echo("输入 exit 退出。"))],
+            If(Var("usr_input") == "help").Then(Echo("输入 exit 退出。")),
+            If(Var("usr_input") == "ml").Then(
+                Set(Var("usr_input"), Read("... ").Until("").OnBreak()),
+            ),
         ),
         name="chat_hand_written",
     )

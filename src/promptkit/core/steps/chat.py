@@ -117,6 +117,11 @@ class ChatWorkflow:
     rules: List[str] = field(default_factory=list)
     deliverables: List[Deliverable] = field(default_factory=list)
     behavior: List[Any] = field(default_factory=list)
+    #: 进入循环前跑**一次**的步骤（开场白：LoadMem、打招呼、读会话……）。
+    #: 位置在 SystemPrompt 之后、ChatLoop 之前 —— 这样开场白里的模型调用
+    #: 能带上角色设定。手写 Workflow 时直接把步骤放在 ChatLoop 前面即可，
+    #: 这个字段只是给声明式写法一个等价的位置。
+    opening: List[Any] = field(default_factory=list)
     #: 用户决定退出对话后要跑的步骤（说再见、存 session、总结等）。
     #: 在 `ChatLoop` 之后、写记忆与落盘之前执行。
     after_end: List[Any] = field(default_factory=list)
@@ -127,6 +132,13 @@ class ChatWorkflow:
     exit_words: List[str] = field(default_factory=lambda: list(DEFAULT_EXIT_WORDS))
     cautions: List[Any] = field(default_factory=list)
     max_turns: Optional[int] = None
+    #: 对话历史超过多少条消息时自动压缩（None = 不压缩）：
+    #: 旧消息总结成一段摘要，最近 `compact_keep` 条原样保留。
+    compact_after: Optional[int] = None
+    #: 压缩时最近保留多少条消息
+    compact_keep: int = 6
+    #: 自定义压缩提示词（`{{messages}}` 会被换成旧对话文本）
+    compact_prompt: Optional[str] = None
     render: str = "markdown"
     read_prompt: str = ">>> "
     name: str = "chat"
@@ -281,6 +293,7 @@ class ChatWorkflow:
             Role / Want / Rules / Tools / Deliverables / ExitWords  ← 写进 Context
             MemoryStep(read)                                        ← 有记忆时
             SystemPrompt()                                          ← 编译成 system prompt
+            [opening]                                               ← 开场白：进循环前跑一次
             ChatLoop(...)                                           ← 多轮对话（含 after_end）
             MemoryStep(write)                                       ← write_on="end"
             SaveDeliverables()                                      ← 结束时落盘
@@ -337,6 +350,8 @@ class ChatWorkflow:
         return Workflow(
             *head,
             SystemPrompt(),
+            # 开场白：进循环前跑一次（手写 DSL 里就是 ChatLoop 前面的普通步骤）
+            *self.opening,
             # `when="each_turn"` 的交付物由 `ChatLoop` 自己每轮存，这里不用管
             ChatLoop(
                 read_prompt=self.read_prompt,
@@ -349,6 +364,9 @@ class ChatWorkflow:
                 after_turn=each_turn,
                 after_end=self.after_end,
                 turn_template=self.turn_template(),
+                compact_after=self.compact_after,
+                compact_keep=self.compact_keep,
+                compact_prompt=self.compact_prompt,
             ),
             *end_writes,
             SaveDeliverables(self.end_deliverables()),

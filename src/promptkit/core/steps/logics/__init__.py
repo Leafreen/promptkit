@@ -65,7 +65,28 @@ from promptkit.core.steps.logics.var import (
     Var,
     VarDecl,
 )
-from promptkit.core.steps.logics.while_step import While, WhileStep
+from promptkit.core.steps.logics.loop_hooks import (
+    HookFailure,
+    HookPoint,
+    LoopHookEvent,
+    LoopHookHandle,
+    LoopHooks,
+    as_hook_point,
+    loop_hooks,
+)
+from promptkit.core.steps.logics.while_step import (
+    AFTER_ITERATION,
+    BEFORE_CONDITION,
+    BEFORE_ITERATION,
+    LOOP_END,
+    LOOP_ERROR,
+    LOOP_HOOK_POINTS,
+    LOOP_HOOKS_KEY,
+    LOOP_LIMIT,
+    LOOP_START,
+    While,
+    WhileStep,
+)
 
 __all__ = [
     # conditions.py
@@ -110,6 +131,23 @@ __all__ = [
     "IfStep",
     "While",
     "WhileStep",
+    # loop_hooks.py：While 的 Hook 扩展点
+    "HookPoint",
+    "LoopHookEvent",
+    "LoopHookHandle",
+    "LoopHooks",
+    "HookFailure",
+    "loop_hooks",
+    "as_hook_point",
+    "LOOP_HOOKS_KEY",
+    "LOOP_HOOK_POINTS",
+    "LOOP_START",
+    "BEFORE_CONDITION",
+    "BEFORE_ITERATION",
+    "AFTER_ITERATION",
+    "LOOP_LIMIT",
+    "LOOP_ERROR",
+    "LOOP_END",
     "For",
     "ForStep",
     "ForEach",

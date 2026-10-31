@@ -31,6 +31,10 @@ __all__ = [
     "plan_from",
 ]
 
+#: `parallel=True` 且没给 max_workers 时用的保守默认并行度。
+#: 线程开太多反而抢锁，给个「够用」的小数字；要精细控制就传 config=。
+_DEFAULT_PARALLEL_WORKERS = 4
+
 
 # ============================ 规划 ============================
 @dataclass
@@ -143,6 +147,14 @@ class ExecutePlan(Step):
     - `task_results`：`[{"name","status","output","error","tokens","latency"}, …]`
     - `plan_result`：`PlanResult` 对象（`ok` / `summary()` / `to_context()`）
     - 每个成功任务的 `output_key`（默认任务名）-> 它的输出
+
+    agent 从哪来（按优先级）：`Task.agent` -> `agent_factory` -> `self.agent`
+    -> `Workflow.run(agent=...)` 传进来的那个 -> 默认 `Agent`。
+
+    并行：同层任务默认串行；`parallel=True` 用保守默认线程数并行跑，
+    `max_workers=N` 显式定线程数。执行引擎本来就是
+    `OrchestratorConfig.max_concurrency` + 线程池，这两个参数只是让
+    常见写法少一层包装；token 上限 / 超时 / 失败策略还是要 `config=`。
     '''
 
     plan: Any = None
@@ -153,16 +165,44 @@ class ExecutePlan(Step):
     result_key: str = "plan_result"
     #: True = 只要有任务失败就抛 `TaskError`（否则留着结果自己判断）
     strict: bool = False
+    #: True = 同一层（没有依赖关系）的任务用线程池并行跑。
+    #: 执行引擎（`OrchestratorConfig.max_concurrency` + 线程池）本来就有，
+    #: 这组参数只是省得手写 config。
+    parallel: bool = False
+    #: 并行线程数；给了就生效（显式给线程数就是想并行，不必再开 parallel）。
+    #: 与 `config=` 互斥 —— 同时给报 ValueError。
+    max_workers: Optional[int] = None
 
     name: str = "execute_plan"
 
     def execute(self, context: "Any") -> None:
         spec = PlanSpec.from_dsl(_value_of(self.plan, context))
         plan = spec.to_plan()
+        if self.config is not None and (
+            self.parallel or self.max_workers is not None
+        ):
+            raise ValueError(
+                "ExecutePlan 的 config= 和 parallel= / max_workers= 别同时给："
+                "要精细控制就只传 config，要省事就只传 parallel / max_workers"
+            )
         config = self.config or spec.to_config()
+        if self.max_workers is not None:
+            workers = int(self.max_workers)
+            if workers < 1:
+                raise ValueError(f"max_workers 要 >= 1，得到 {self.max_workers!r}")
+            config = config or OrchestratorConfig()
+            config.max_concurrency = workers
+        elif self.parallel:
+            config = config or OrchestratorConfig()
+            config.max_concurrency = max(
+                config.max_concurrency, _DEFAULT_PARALLEL_WORKERS
+            )
         factory = self.agent_factory or spec.to_factory()
+        # 没显式给 agent 就用 `Workflow.run(agent=...)` 登记在 Context 里的那个，
+        # 与 PlanWithTool / LLMStep 的取法保持一致（最后才是 Agent.default()）
+        agent = self.agent if self.agent is not None else context.get("agent")
         orchestrator = Orchestrator(
-            config, agent=self.agent, agent_factory=factory
+            config, agent=agent, agent_factory=factory
         )
         result = orchestrator.run(plan, context=context.to_dict())
 
