@@ -31,6 +31,17 @@ from promptkit.core.steps.actions.memory import (
     WriteMemory,
 )
 from promptkit.core.steps.actions.message import MessageStep
+from promptkit.core.steps.actions.multimodal import (
+    Generate,
+    ImageGen,
+    ImageUnderstand,
+    Multimodal,
+    MultimodalStep,
+    TextGen,
+    Understand,
+    VideoGen,
+    VideoUnderstand,
+)
 from promptkit.core.steps.actions.recall import RecallMemory, format_recalled
 from promptkit.core.steps.actions.chat_util import (
     CHAT_ROLE_KEY,
@@ -98,7 +109,18 @@ __all__ = [
     "RecallMemory",
     "format_recalled",
     # message.py
-    "MessageStep",    "CHAT_ROLE_KEY",
+    "MessageStep",
+    # multimodal.py
+    "MultimodalStep",
+    "Multimodal",
+    "Generate",
+    "Understand",
+    "ImageGen",
+    "ImageUnderstand",
+    "VideoGen",
+    "VideoUnderstand",
+    "TextGen",
+    "CHAT_ROLE_KEY",
     "CHAT_WANT_KEY",
     "CHAT_RULES_KEY",
     "CHAT_DELIVERABLES_KEY",

@@ -42,7 +42,7 @@ class VarDecl(VarExpr, Step):
         '''没有显式给 default 时，用类型自带的默认值。'''
         if self.default is not MISSING:
             return self.default
-        return None if self.var_type is None else self.var_type.default
+        return None if self.var_type is None else self.var_type.make_default()
 
     def execute(self, context: Context) -> None:
         if self.var_type is not None:
@@ -203,8 +203,8 @@ def NewVar(  # noqa: N802
         raise TypeError(f"变量名必须是非空字符串，得到 {name!r}")
     if type is not None and not isinstance(type, VarType):
         raise TypeError(
-            f"type 需要是 Number 或 Str，得到 {type!r}；"
-            "也可以写成 Number('x') / Str('x')"
+            f"type 需要是 VarType 实例，得到 {type!r}；"
+            "也可以写成 Number('x') / File('x') / Time('x')"
         )
     return VarDecl(name, var_type=type, default=default)
 

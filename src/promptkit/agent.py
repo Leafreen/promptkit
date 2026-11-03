@@ -15,12 +15,15 @@ Agent 自己不 print。想看过程就挂 handler：
     agent = Agent(bus=bus)
     agent.ask("你好")
 '''
+import copy
 import json
 import os
 import sys
 from contextlib import contextmanager
 from typing import (
+    Any,
     Dict,
+    Iterable,
     Iterator,
     List,
     Optional,
@@ -34,8 +37,15 @@ from pydantic import BaseModel
 
 from promptkit.client_sys import (
     BaseClient,
+    BaseMultimodalClient,
     ClientError,  # 再导出：ask() 抛的网络 / 鉴权错误就是它
+    DEFAULT_MULTIMODAL_VENDOR,
+    Media,
+    Modality,
+    MultimodalResult,
+    Operation,
     make_client,
+    make_multimodal_client,
     resolve_api_key as resolve_vendor_api_key,
     resolve_target,
     with_params,
@@ -52,6 +62,8 @@ from promptkit.config import (
     resolve_api_key,  # 再导出：老代码仍可用（只认 DeepSeek 的密钥）
 )
 from promptkit.client_sys.types import Chunk, Completion, Message as ClientMessage
+from promptkit.conversation.message import Message as ConversationMessage
+from promptkit.conversation.session import Session as ConversationSession
 from promptkit.core.display_sys.display import console_display
 from promptkit.core.event_sys import (
     Event,
@@ -193,6 +205,94 @@ class _SimpleFunction:
         self.arguments = payload["arguments"]
 
 
+class _HistoryView:
+    '''`Agent.history` 的活视图：读写都转发到内部的 `ConversationSession`。
+
+    旧接口要求 `agent.history` 长得像 list（可以 `append` / 下标 / 迭代 /
+    整体赋值），所以这里做一个薄适配器。取出来的元素始终是
+    `{role, content, ...}` 字典，和以前的形状完全一致。
+    '''
+
+    def __init__(self, agent: "Agent") -> None:
+        self._agent = agent
+
+    # ---------------- 读 ----------------
+    def __len__(self) -> int:
+        return self._agent.session.length
+
+    def __iter__(self) -> Iterator[Message]:
+        for index in range(len(self)):
+            yield cast(Message, self[index])
+
+    def __getitem__(
+        self, index: Union[int, slice]
+    ) -> Union[Message, List[Message]]:
+        stored = self._agent.session.messages
+        if isinstance(index, slice):
+            return cast(List[Message], [m.to_dict() for m in stored[index]])
+        return cast(Message, stored[index].to_dict())
+
+    def __repr__(self) -> str:
+        return repr(list(self))
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, _HistoryView):
+            return list(self) == list(other)
+        if isinstance(other, (list, tuple)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    def __contains__(self, item: object) -> bool:
+        return item in list(self)
+
+    # ---------------- 写 ----------------
+    def __setitem__(
+        self, index: Union[int, slice], value: Union[Message, Iterable[Message]]
+    ) -> None:
+        session = self._agent.session
+        if isinstance(index, slice):
+            raise TypeError("Agent.history 不支持切片赋值")
+        stored = session.messages
+        session.replace(stored[index].id, _as_conversation_message(cast(Message, value)))
+
+    def __delitem__(self, index: Union[int, slice]) -> None:
+        session = self._agent.session
+        if isinstance(index, slice):
+            raise TypeError("Agent.history 不支持切片删除")
+        session.remove(session.messages[index].id)
+
+    def insert(self, index: int, value: Message) -> None:
+        '''在指定位置插入一条消息。'''
+        self._agent.session.insert(index, _as_conversation_message(value))
+
+    def append(self, value: Message) -> None:
+        '''追加一条消息（和旧的 list.append 行为一致）。'''
+        self._agent.session.append(_as_conversation_message(value))
+
+    def extend(self, values: Iterable[Message]) -> None:
+        '''批量追加消息。'''
+        for value in values:
+            self.append(value)
+
+
+def _as_media_inputs(value: object) -> tuple:
+    '''把单个媒体 / 媒体列表统一成 tuple[Media, ...]。'''
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes, os.PathLike, Media)) or hasattr(value, "path"):
+        return (Media.from_any(value),)
+    if isinstance(value, Iterable):
+        return tuple(Media.from_any(item) for item in value)
+    return (Media.from_any(value),)
+
+
+def _as_conversation_message(value: Message) -> ConversationMessage:
+    '''把旧接口的 dict 消息转成不可变 Message。'''
+    if isinstance(value, ConversationMessage):
+        return value
+    return ConversationMessage.from_dict(cast(Dict[str, object], value))
+
+
 class Agent:
     '''模型对话客户端。`Agent()` 不带参数即可用：
 
@@ -232,6 +332,10 @@ class Agent:
         params: Optional[Dict[str, JSONValue]] = None,
         timeout: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        multimodal_provider: Optional[str] = None,
+        multimodal_api_key: Optional[str] = None,
+        multimodal_base_url: Optional[str] = None,
+        multimodal_client: Optional[BaseMultimodalClient] = None,
     ):
         # 厂商 / 模型 / 端点是一组，缺的用厂商默认值补（补不上会在这一步报错）
         self.spec, self.model, self.base_url = resolve_target(
@@ -267,7 +371,17 @@ class Agent:
             timeout=timeout,
         )
 
-        self.history: List[Message] = []  # 上下文
+        # 多模态客户端按需创建：只做对话的流程不应该因为没配 ARK_API_KEY
+        # 而在 `Agent()` 这一步就失败。
+        self.multimodal_provider = (
+            multimodal_provider or DEFAULT_MULTIMODAL_VENDOR
+        )
+        self.multimodal_api_key = multimodal_api_key
+        self.multimodal_base_url = multimodal_base_url
+        self._multimodal_client = multimodal_client
+
+        # 历史由对话状态层的 Session 管；`history` 属性只是兼容旧接口的活视图
+        self._session: ConversationSession = ConversationSession()
         self.messages: List[Message] = self._build_messages()
 
         if register_as_default:
@@ -287,9 +401,125 @@ class Agent:
     def __repr__(self) -> str:
         return f"<Agent {self.vendor} model={self.model!r}>"
 
+    # ---------------- 多模态 ----------------
+    @property
+    def multimodal_client(self) -> BaseMultimodalClient:
+        '''当前多模态客户端；第一次用到时才创建（默认豆包 / Seedance）。'''
+        if self._multimodal_client is None:
+            self._multimodal_client = make_multimodal_client(
+                self.multimodal_provider,
+                api_key=self.multimodal_api_key,
+                base_url=self.multimodal_base_url,
+                timeout=self.timeout,
+            )
+        return self._multimodal_client
+
+    @multimodal_client.setter
+    def multimodal_client(self, client: BaseMultimodalClient) -> None:
+        '''替换多模态实现（测试 / 私有部署 / 换厂商都走这个口）。'''
+        self._multimodal_client = client
+
+    def multimodal(
+        self,
+        operation: str,
+        modality: str,
+        prompt: Optional[str] = None,
+        inputs: object = None,
+        *,
+        model: Optional[str] = None,
+        save_to: Optional[str] = None,
+        timeout: Optional[float] = None,
+        **params: Any,
+    ) -> MultimodalResult:
+        '''统一多模态入口：`operation` + `modality` + 输入。
+
+            agent.multimodal("generate", "image", "一只猫", save_to="cat.png")
+            agent.multimodal("understand", "video", "demo.mp4", prompt="描述")
+        '''
+        from promptkit.client_sys.multimodal import MultimodalRequest
+
+        return self.multimodal_client.run(
+            MultimodalRequest(
+                operation=operation,
+                modality=modality,
+                prompt=prompt,
+                inputs=_as_media_inputs(inputs),
+                model=model,
+                output_path=save_to,
+                params=dict(params),
+                timeout=timeout,
+            )
+        )
+
+    def generate(
+        self,
+        modality: str = Modality.TEXT,
+        prompt: str = "",
+        inputs: object = None,
+        **kwargs: Any,
+    ) -> MultimodalResult:
+        '''生成：文本 / 图片 / 视频，参数同 `multimodal(...)`。'''
+        return self.multimodal(
+            Operation.GENERATE, modality, prompt, inputs, **kwargs
+        )
+
+    def understand(
+        self,
+        modality: str,
+        source: object = None,
+        prompt: Optional[str] = None,
+        **kwargs: Any,
+    ) -> MultimodalResult:
+        '''理解：图片 / 视频，参数同 `multimodal(...)`。'''
+        return self.multimodal(
+            Operation.UNDERSTAND, modality, prompt, source, **kwargs
+        )
+
     def on(self, handler: EventHandler) -> EventHandler:
         '''挂一个事件 handler，返回它（可以当装饰器）。'''
         return self.bus.on(handler)
+
+    # ---------------- 会话（兼容旧 history 接口） ----------------
+    @property
+    def session(self) -> ConversationSession:
+        '''内部持有的对话状态 Session（DSL 步骤从 ctx["_session"] 取它）。'''
+        return self._session
+
+    @property
+    def history(self) -> List[Message]:
+        '''旧接口：像 list 一样可读可写的历史视图，实际转发到 Session。'''
+        return cast(List[Message], _HistoryView(self))
+
+    @history.setter
+    def history(self, value: Iterable[Message]) -> None:
+        '''旧接口：整体替换历史，并重建消息缓存。'''
+        messages = [_as_conversation_message(item) for item in value]
+        self._session.replace_all(messages)
+        self.messages = self._build_messages()
+
+    def fork(self) -> "Agent":
+        '''返回一个新 Agent：共享 client，但持有独立 Session 的副本。
+
+        新建的 Agent 不会注册成默认 agent，父 / 子会话互不影响。
+        '''
+        child = object.__new__(Agent)
+        child.spec = self.spec
+        child.model = self.model
+        child.base_url = self.base_url
+        child.vendor = self.vendor
+        child.api_key = self.api_key
+        child.params = dict(self.params)
+        child.timeout = self.timeout
+        child.start_prompts = cast(List[Message], copy.deepcopy(self.start_prompts))
+        child.bus = self.bus
+        child.client = self.client
+        child.multimodal_provider = self.multimodal_provider
+        child.multimodal_api_key = self.multimodal_api_key
+        child.multimodal_base_url = self.multimodal_base_url
+        child._multimodal_client = self._multimodal_client
+        child._session = self._session.clone()
+        child.messages = child._build_messages()
+        return child
 
     def _build_messages(self) -> List[Message]:
         '''把系统提示和上下文拼成要发送给模型的消息列表。'''
@@ -328,7 +558,7 @@ class Agent:
         )
 
     def _append_message(self, message: Message) -> None:
-        self.history.append(message)
+        self._session.append(_as_conversation_message(message))
         self.messages = self._build_messages()
 
     def _append_assistant(self, assistant: object) -> Message:
@@ -473,7 +703,7 @@ class Agent:
             # 消息序列就坏了（DeepSeek/OpenAI 会直接 400）。
             # 做法：工具执行期间把 history 换成「这条 tool_calls 之前」的副本，
             # 跑完丢掉副本、只把 tool 结果写回真正的历史。
-            saved_history, saved_messages = self.history, self.messages
+            saved_history, saved_messages = self.get_history(), self.messages
             clean = list(saved_history)
             if clean and clean[-1].get("tool_calls"):
                 clean = clean[:-1]
@@ -722,7 +952,7 @@ class Agent:
 
     def reset(self) -> None:
         '''重置上下文：清空历史并重建消息列表。'''
-        self.history = []
+        self._session.clear()
         self.rebuild()
 
     def load_history(self, records: object, *, replace: bool = True) -> int:
@@ -748,7 +978,7 @@ class Agent:
 
     def get_history(self) -> List[Message]:
         '''返回上下文（副本，避免外部意外修改）。'''
-        return list(self.history)
+        return cast(List[Message], [m.to_dict() for m in self._session.messages])
 
     def export_history(self, path: str, fmt: str = "json") -> str:
         '''把对话历史导出到文件，返回写入的绝对路径。
@@ -815,7 +1045,7 @@ def run_prompt(
     output_model: Type[BaseModel],
     reset: bool = True,
     tools: Optional[Sequence[ToolLike]] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> BaseModel:
     '''运行一次「提示词 -> 结构化输出」，返回 output_model 的实例。'''
     executor = Executor(agent=agent)

@@ -23,8 +23,11 @@
     openai_client.py    OpenAI / DeepSeek / 任何 OpenAI 兼容端点（透传 SDK）
     anthropic_client.py Messages API <- 翻译 -> Chat Completions
     registry.py         厂商表 + 识别 + 密钥 + 工厂
+    multimodal.py       多模态统一接口 + 厂商表（默认豆包 / Seedance）
+    doubao_multimodal.py 豆包方舟：文本 / 图片 / 视频
 
-加新厂商见 `registry.register_vendor`。
+加新厂商见 `registry.register_vendor`；加新模态厂商见
+`multimodal.register_multimodal_provider`。
 '''
 from promptkit.client_sys.types import (
     Choice,
@@ -61,6 +64,28 @@ from promptkit.client_sys.registry import (
     vendor_names,
     with_params,
 )
+from promptkit.client_sys.multimodal import (
+    DOUBAO,
+    DEFAULT_MULTIMODAL_VENDOR,
+    MULTIMODAL_PROVIDERS,
+    BaseMultimodalClient,
+    Media,
+    Modality,
+    MultimodalError,
+    MultimodalRequest,
+    MultimodalResult,
+    MultimodalSpec,
+    Operation,
+    get_multimodal_spec,
+    make_multimodal_client,
+    multimodal_vendor_names,
+    normalize_modality,
+    normalize_operation,
+    register_multimodal_provider,
+    resolve_multimodal_api_key,
+    resolve_multimodal_target,
+)
+from promptkit.client_sys.doubao_multimodal import DoubaoMultimodalClient
 
 __all__ = [
     # 数据
@@ -94,4 +119,25 @@ __all__ = [
     "resolve_target",
     "vendor_names",
     "with_params",
+    # 多模态
+    "Modality",
+    "Operation",
+    "Media",
+    "MultimodalRequest",
+    "MultimodalResult",
+    "MultimodalSpec",
+    "MultimodalError",
+    "BaseMultimodalClient",
+    "DoubaoMultimodalClient",
+    "DOUBAO",
+    "MULTIMODAL_PROVIDERS",
+    "DEFAULT_MULTIMODAL_VENDOR",
+    "normalize_modality",
+    "normalize_operation",
+    "get_multimodal_spec",
+    "register_multimodal_provider",
+    "resolve_multimodal_api_key",
+    "resolve_multimodal_target",
+    "make_multimodal_client",
+    "multimodal_vendor_names",
 ]
