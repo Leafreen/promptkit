@@ -27,9 +27,8 @@ from typing import (
     Union,
 )
 
-from promptkit.core.event_sys import EventBus, EventHandler
-
 if TYPE_CHECKING:  # 只用于类型标注，避免 types -> core.tool 的运行时循环
+    from promptkit.core.event_sys import EventBus, EventHandler
     from promptkit.core.tool.base import Tool
 
 __all__ = [

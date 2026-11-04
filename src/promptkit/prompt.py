@@ -7,7 +7,7 @@ import re
 # 类型标注走 TYPE_CHECKING，运行时不需要真身。
 if TYPE_CHECKING:
     from promptkit.core.content import ContentPart
-    from promptkit.core.steps.logics.expr_sys.expr import VarExpr
+    from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr
 
 # 可用的提示词角色
 SUPPORTED_ROLES = ("system", "user", "assistant")
@@ -133,7 +133,10 @@ class Prompt:
     '''
 
     role: str
-    content: "Union[str, List[Union[str, ContentPart, VarExpr]]]"
+    # 注意：列表里 Expr 是宽类型（包含 VarExpr + CallExpr + 纯 Var(...) 的 SetStep 等），
+    # 方便用户写 Prompt(content=[TextPart(...), Var("x")])；
+    # 运行时 _render_part 只处理 VarExpr 和 ContentPart，其他的进来直接 TypeError。
+    content: "Union[str, List[Union[str, ContentPart, Expr]]]"
 
     def render(self, **kwargs: object) -> Dict[str, Any]:
         '''渲染该对象，返回支持的消息格式。'''
@@ -147,18 +150,20 @@ class Prompt:
         return {"role": self.role, "content": parts}
 
     def _render_part(
-        self, item: "Union[str, ContentPart, VarExpr]", kwargs: Mapping[str, object]
+        self, item: "Union[str, ContentPart, Expr]", kwargs: Mapping[str, object]
     ) -> Dict[str, Any]:
         '''渲染一个内容部件，返回 JSON 可序列化的字典。
 
         - `str` / `TextPart`：走模板替换
-        - `Var`：解析成 `ContentPart`；解析出字符串时按扩展名推断
+        - `Var(...)`（VarExpr）：解析成 `ContentPart`；解析出字符串时按扩展名推断
           （`.png` -> ImagePart，`.pdf` -> FilePart，其他 -> TextPart），
           声明了 `type=` 时校验，不匹配抛 `TypeError`
         - 其他部件：原样保留
+        - SetStep / CallExpr 等非 VarExpr 的 Expr：抛 `TypeError`（Prompt 里不该
+          出现赋值或函数调用）
         '''
         from promptkit.core.content import TextPart, part_from_any
-        from promptkit.core.steps.logics.expr_sys.expr import VarExpr
+        from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr
 
         if isinstance(item, VarExpr):
             value = resolve_variable(item.var, kwargs)
@@ -171,6 +176,11 @@ class Prompt:
             part = part_from_any(value)
             item.check_type(part)
             return part.to_dict()
+        if isinstance(item, Expr):
+            raise TypeError(
+                f"Prompt content 里只接受 str / ContentPart / Var(...)，"
+                f"不能放 {type(item).__name__}（试试把它先赋给变量再用 Var(变量名)）"
+            )
         if isinstance(item, str):
             item = TextPart(text=item)
         if isinstance(item, TextPart):

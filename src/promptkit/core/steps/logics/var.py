@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import operator
-from typing import TYPE_CHECKING, Optional, Union, cast
+from typing import TYPE_CHECKING, Optional, Union, cast, overload
 
 from promptkit.core._missing import MISSING
 from promptkit.core.errors import UndefinedVariable
@@ -113,7 +113,7 @@ class SetItemStep(Step):
                 f"不能给 {type(container).__name__} 赋下标值"
                 f"（{self.item.target!r} 求值成了 {container!r}）"
             )
-        container[self._key(context)] = self.value.eval(context)
+        container[self._key(context)] = self.value.eval(context) # type: ignore
         context.trace.append(self.name)
 
     def describe(self) -> str:
@@ -207,6 +207,21 @@ def NewVar(  # noqa: N802
             "也可以写成 Number('x') / Str('x')"
         )
     return VarDecl(name, var_type=type, default=default)
+
+
+@overload
+def Var(  # noqa: N802 - 跟随 DSL 命名
+    name: Union[str, VarExpr],
+    *,
+    type: "Optional[type]" = None,  # noqa: A002
+) -> VarExpr: ...
+
+
+@overload
+def Var(  # noqa: N802 - 跟随 DSL 命名
+    *,
+    val: object,
+) -> SetStep: ...
 
 
 def Var(  # noqa: N802

@@ -19,14 +19,13 @@ from promptkit.core.event_sys.events import bus_of
 from promptkit.core.settings import settings
 from promptkit.core.steps.interface import Step
 from promptkit.prompt import Prompt
-from promptkit.types import ToolLike
 
 if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
     from pydantic import BaseModel
 
     from promptkit.core.event_sys import EventBus
     from promptkit.core.model_action.caution_related.formatter import Formatter
-    from promptkit.types import AgentLike
+    from promptkit.types import AgentLike, ToolLike
 
 #: 输出类型参数：`LLMStep[Intent](...)`，让 IDE / mypy 知道这一步产出什么
 T = TypeVar("T", bound="BaseModel")

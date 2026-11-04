@@ -17,10 +17,10 @@ from typing import TYPE_CHECKING, List, Optional, TextIO, Union, cast
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
     from promptkit.core.display_sys.render import Verbosity
+    from promptkit.types import JSONValue
 from promptkit.core.settings import settings
 from promptkit.core.steps.interface import Step
 from promptkit.core.steps.logics.expr_sys.expr import Expr, as_expr
-from promptkit.types import JSONValue
 
 # 结果输出流挂在 Context 上的键名（Workflow.run(out=...) 会写进来）
 OUTPUT_STREAM_KEY = "_output_stream"

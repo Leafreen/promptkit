@@ -1,4 +1,6 @@
 # core/workflow.py
+from __future__ import annotations
+
 import sys
 from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, TextIO, Union
 
@@ -26,10 +28,9 @@ from promptkit.core.steps.interface import (
     coerce_steps,
     execute_step,
 )
-from promptkit.types import AgentLike, JSONValue
-
 if TYPE_CHECKING:
     from promptkit.session import Session
+    from promptkit.types import AgentLike, JSONValue
 
 
 class Workflow(Step):

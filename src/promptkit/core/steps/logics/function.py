@@ -16,6 +16,7 @@ from typing import (
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
+    from promptkit.types import ToolLike
 from promptkit.core.errors import ArgumentError, ReturnSignal
 from promptkit.core.steps.logics.expr_sys.expr import AgentReplyExpr, Expr, as_expr
 from promptkit.core.steps.interface import (
@@ -24,13 +25,9 @@ from promptkit.core.steps.interface import (
     coerce_steps,
     execute_step,
 )
-from promptkit.core.steps.actions.llm import LLMStep
-from promptkit.types import ToolLike
 
 if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
     from pydantic import BaseModel
-
-from promptkit.prompt import Prompt
 
 _MISSING = object()
 
@@ -100,6 +97,11 @@ class FunctionDef:
 
     def Do(self, *body: object) -> "FunctionDef":  # noqa: N802 - 跟随 DSL 命名
         '''设置步骤体：可以是一个 Prompt，也可以是若干步骤。'''
+        # 惰性 import：core/__init__ -> steps/__init__ -> logics/__init__ -> function
+        # 不能再反向 import actions.llm 或 prompt，否则 types -> core 会循环
+        from promptkit.core.steps.actions.llm import LLMStep
+        from promptkit.prompt import Prompt
+
         steps: List[Step] = []
         for item in body:
             if isinstance(item, Prompt):
