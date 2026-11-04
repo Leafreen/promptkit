@@ -1,6 +1,13 @@
 from dataclasses import dataclass
-from typing import Dict, List, Mapping
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Union
 import re
+
+# 注意：core.content / VarExpr 在 _render_part 里惰性 import ——
+# core/__init__.py 会 import 本模块，顶层 import 回去就成循环了。
+# 类型标注走 TYPE_CHECKING，运行时不需要真身。
+if TYPE_CHECKING:
+    from promptkit.core.content import ContentPart
+    from promptkit.core.steps.logics.expr_sys.expr import VarExpr
 
 # 可用的提示词角色
 SUPPORTED_ROLES = ("system", "user", "assistant")
@@ -106,33 +113,75 @@ def render_text(
 @dataclass(frozen=True)
 class Prompt:
     '''
-    提示词对象，支持可变提示词。
+    提示词对象，支持可变提示词和多模态内容。
 
     - 变量使用 {{key}} 表示，key 是变量名（也兼容 ${key} / $key）
     - 支持点路径：{{user.name}} / {{hits.0.text}}
     - 使用 render(**kwargs) 渲染该对象，返回 OpenAI 支持的消息格式
+    - `content` 为字符串时行为不变；为列表时按部件渲染（见 `_render_part`）
 
     示例：
         >>> Prompt(role="user", content="你好，{{name}}").render(name="小明")
         {'role': 'user', 'content': '你好，小明'}
+
+        >>> Prompt(role="user", content=[
+        ...     TextPart("描述这张图"),
+        ...     Var("photo", type=ImagePart),
+        ... ]).render(photo="cat.png")
+        {'role': 'user', 'content': [{'type': 'text', 'text': '描述这张图'},
+                                     {'type': 'image', 'source': 'cat.png', ...}]}
     '''
 
     role: str
-    content: str
+    content: "Union[str, List[Union[str, ContentPart, VarExpr]]]"
 
-    def render(self, **kwargs: object) -> Dict[str, str]:
+    def render(self, **kwargs: object) -> Dict[str, Any]:
         '''渲染该对象，返回支持的消息格式。'''
         if self.role not in SUPPORTED_ROLES:
             raise ValueError(
                 f"暂不支持该角色：{self.role!r}，可选：{', '.join(SUPPORTED_ROLES)}"
             )
-        return {"role": self.role, "content": render_text(self.content, kwargs)}
+        if isinstance(self.content, str):
+            return {"role": self.role, "content": render_text(self.content, kwargs)}
+        parts = [self._render_part(item, kwargs) for item in self.content]
+        return {"role": self.role, "content": parts}
+
+    def _render_part(
+        self, item: "Union[str, ContentPart, VarExpr]", kwargs: Mapping[str, object]
+    ) -> Dict[str, Any]:
+        '''渲染一个内容部件，返回 JSON 可序列化的字典。
+
+        - `str` / `TextPart`：走模板替换
+        - `Var`：解析成 `ContentPart`；解析出字符串时按扩展名推断
+          （`.png` -> ImagePart，`.pdf` -> FilePart，其他 -> TextPart），
+          声明了 `type=` 时校验，不匹配抛 `TypeError`
+        - 其他部件：原样保留
+        '''
+        from promptkit.core.content import TextPart, part_from_any
+        from promptkit.core.steps.logics.expr_sys.expr import VarExpr
+
+        if isinstance(item, VarExpr):
+            value = resolve_variable(item.var, kwargs)
+            if item.type is str:
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"变量 {item.var!r} 期望 str，实际是 {type(value).__name__}"
+                    )
+                return TextPart(text=value).to_dict()
+            part = part_from_any(value)
+            item.check_type(part)
+            return part.to_dict()
+        if isinstance(item, str):
+            item = TextPart(text=item)
+        if isinstance(item, TextPart):
+            return TextPart(text=render_text(item.text, kwargs)).to_dict()
+        return item.to_dict()
 
     def _render_text(self, text: str, kwargs: Mapping[str, object]) -> str:
         '''渲染文本，替换其中的变量占位符。'''
         return render_text(text, kwargs)
 
 
-def render_messages(prompts: List[Prompt], **kwargs: object) -> List[Dict[str, str]]:
+def render_messages(prompts: List[Prompt], **kwargs: object) -> List[Dict[str, Any]]:
     '''批量渲染多个 Prompt，返回消息列表。'''
     return [p.render(**kwargs) for p in prompts]

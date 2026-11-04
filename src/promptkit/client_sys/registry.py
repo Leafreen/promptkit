@@ -56,15 +56,17 @@ DEFAULT_VENDOR = "deepseek"
 FALLBACK_ENV_VAR = "PROMPTKIT_API_KEY"
 
 #: 依次尝试的厂商（`detect_vendor` 扫环境变量时按这个顺序）
-_SNIFF_ORDER: Tuple[str, ...] = ("deepseek", "anthropic", "openai")
+_SNIFF_ORDER: Tuple[str, ...] = ("deepseek", "anthropic", "openai", "doubao")
 
 #: 模型名前缀 -> 厂商（越长的前缀越先匹配）
 _MODEL_PREFIXES: Tuple[Tuple[str, str], ...] = (
     ("anthropic/", "anthropic"),
     ("openai/", "openai"),
     ("deepseek/", "deepseek"),
+    ("doubao/", "doubao"),
     ("claude", "anthropic"),
     ("deepseek", "deepseek"),
+    ("doubao", "doubao"),
     ("chatgpt", "openai"),
     ("gpt", "openai"),
     ("o1", "openai"),
@@ -79,6 +81,7 @@ _HOST_HINTS: Tuple[Tuple[str, str], ...] = (
     ("anthropic", "anthropic"),
     ("deepseek", "deepseek"),
     ("openai.com", "openai"),
+    ("volces.com", "doubao"),
 )
 
 
@@ -120,6 +123,18 @@ ANTHROPIC = ClientSpec(
     aliases=("claude",),
 )
 
+#: 豆包（火山方舟）：OpenAI 兼容协议 + 视频能力，实现见 doubao_client.py
+DOUBAO = ClientSpec(
+    name="doubao",
+    label="豆包（火山方舟）",
+    kind="openai",
+    env_vars=(config_module.DOUBAO_API_KEY_ENV, "ARK_API_KEY"),
+    default_model=config_module.DOUBAO_TEXT_MODEL,
+    default_base_url=config_module.DOUBAO_BASE_URL,
+    aliases=("ark", "volcengine", "seedance"),
+    note="文本 / 图片理解 + 视频输入与生成（Seedance）",
+)
+
 #: 只说「OpenAI 兼容」、不替用户猜端点的那种（Ollama / vLLM / 中转站 / 通义…）
 OPENAI_COMPATIBLE = ClientSpec(
     name="openai-compatible",
@@ -135,7 +150,7 @@ OPENAI_COMPATIBLE = ClientSpec(
 #: 内置厂商（按展示顺序）
 PROVIDERS: Dict[str, ClientSpec] = {
     spec.name: spec
-    for spec in (DEEPSEEK, OPENAI, ANTHROPIC, OPENAI_COMPATIBLE)
+    for spec in (DEEPSEEK, OPENAI, ANTHROPIC, DOUBAO, OPENAI_COMPATIBLE)
 }
 
 #: 名字 / 别称 -> 规格
@@ -149,6 +164,16 @@ _KINDS: Tuple[str, ...] = ("openai", "anthropic")
 
 #: 自定义厂商的工厂（`register_vendor(spec, factory=...)` 塞进来）
 _FACTORIES: Dict[str, Callable[..., BaseClient]] = {}
+
+
+def _make_doubao(**kwargs: Any) -> BaseClient:
+    '''延迟造 DoubaoClient，避免 registry 加载时拖进整个客户端链。'''
+    from promptkit.client_sys.doubao_client import DoubaoClient
+
+    return DoubaoClient(**kwargs)
+
+
+_FACTORIES[DOUBAO.name] = _make_doubao
 
 
 # ============================ 厂商 ============================

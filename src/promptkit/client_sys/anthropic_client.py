@@ -29,9 +29,15 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from promptkit.client_sys.client import BaseClient, ClientError, ClientSpec
+from promptkit.client_sys.client import (
+    BaseClient,
+    ClientError,
+    ClientSpec,
+    UnsupportedModality,
+    part_data_url,
+)
 from promptkit.client_sys.types import (
     Choice,
     Chunk,
@@ -329,6 +335,94 @@ class AnthropicClient(BaseClient):
             )
         return self._to_completion(data)
 
+    # ---------------- 多模态能力 ----------------
+    def supports(self, modality: str) -> bool:
+        '''Claude 支持文本和图片理解；音频 / 视频 / 文件不支持。'''
+        return modality in ("text", "image")
+
+    def _to_vendor_part(self, part: Mapping[str, Any]) -> Dict[str, Any]:
+        '''标准内容部件字典 -> Claude 的 content block。
+
+        图片：url 来源用 ``{"type": "url"}``，base64 / 本地文件统一读成
+        ``{"type": "base64"}``（`part_data_url` 负责读文件）。
+        '''
+        kind = part.get("type")
+        if kind != "image":
+            raise UnsupportedModality(self.vendor, str(kind))
+        source_type = part.get("source_type")
+        if source_type == "url":
+            return {
+                "type": "image",
+                "source": {"type": "url", "url": str(part.get("source") or "")},
+            }
+        if source_type in ("base64", "file"):
+            url = part_data_url(part)
+            header, _, data = url.partition(",")
+            media_type = header[5:].split(";")[0] if header.startswith("data:") else ""
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type or "image/png",
+                    "data": data,
+                },
+            }
+        raise ClientError(f"未知的内容来源类型：{source_type!r}")
+
+    def _content_blocks(self, content: Any) -> List[Dict[str, Any]]:
+        '''把 user 消息的 content 翻成 Anthropic 的 block 列表。
+
+        - 字符串 / 文本块：原样成 text block
+        - 带 ``source`` 键的标准部件（`Prompt.render()` 的输出）：走
+          `_to_vendor_part` 转换，不支持的模态抛 `UnsupportedModality`
+        - OpenAI 原生 ``image_url`` 块（历史消息里可能有）：顺手翻成
+          Claude 的 image block，免得被拍平成「[图片]」
+        '''
+        if content is None:
+            return []
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content else []
+        if not isinstance(content, (list, tuple)):
+            return [{"type": "text", "text": str(content)}]
+
+        blocks: List[Dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, str):
+                if part:
+                    blocks.append({"type": "text", "text": part})
+                continue
+            if not isinstance(part, dict):
+                blocks.append({"type": "text", "text": str(part)})
+                continue
+            if "source" in part:
+                blocks.append(self._to_vendor_part(part))
+                continue
+            kind = part.get("type")
+            if kind == "text" or part.get("text"):
+                text = str(part.get("text") or "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+            elif kind == "image_url":
+                blocks.append(self._openai_image_block(part))
+        return blocks
+
+    def _openai_image_block(self, part: Mapping[str, Any]) -> Dict[str, Any]:
+        '''OpenAI 形状的 ``image_url`` 块 -> Claude 的 image block。'''
+        image = part.get("image_url")
+        url = str(image.get("url") if isinstance(image, dict) else image or "")
+        if url.startswith("data:"):
+            header, _, data = url.partition(",")
+            media_type = header[5:].split(";")[0]
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type or "image/png",
+                    "data": data,
+                },
+            }
+        return {"type": "image", "source": {"type": "url", "url": url}}
+
     # ---------------- 请求翻译 ----------------
     def _build_body(
         self,
@@ -378,12 +472,16 @@ class AnthropicClient(BaseClient):
             )
         return body
 
-    @classmethod
-    def _translate_messages(cls, messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
+    def _translate_messages(self, messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
         '''OpenAI 消息列表 -> (system, Anthropic messages)。
 
         顺手做三件 Anthropic 要求的事：system 提到顶层、工具结果变成 user 的
         `tool_result` 块、相邻同角色消息合并成一 turn。
+
+        user 消息的 content 是列表时走 `_content_blocks`：标准部件字典
+        （带 ``source`` 键）会翻成 Claude 的 image block，不支持的模态
+        抛 `UnsupportedModality`，不再被 `_text_of` 静默拍平成「[图片]」。
+        assistant / tool / system 侧保持纯文本行为。
         '''
         system_parts: List[str] = []
         turns: List[Dict[str, Any]] = []
@@ -402,7 +500,7 @@ class AnthropicClient(BaseClient):
             if role in ("tool", "function"):
                 # 工具结果在 Anthropic 里是 user 消息里的一个块
                 call_id = raw.get("tool_call_id") or raw.get("name") or ""
-                cls._append(
+                self._append(
                     turns,
                     "user",
                     [
@@ -433,11 +531,12 @@ class AnthropicClient(BaseClient):
                     )
                 # 空的 assistant 消息会让 API 报错（text 块不能为空），直接丢
                 if blocks:
-                    cls._append(turns, "assistant", blocks)
+                    self._append(turns, "assistant", blocks)
                 continue
 
-            if text:
-                cls._append(turns, "user", [{"type": "text", "text": text}])
+            content_blocks = self._content_blocks(raw.get("content"))
+            if content_blocks:
+                self._append(turns, "user", content_blocks)
 
         return "\n\n".join(system_parts), turns
 

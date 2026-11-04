@@ -1,370 +1,182 @@
 # core/steps/actions/multimodal.py
-'''多模态步骤：生成 / 理解，统一收成一个 Step。
+'''多模态生成 / 理解步骤：文生图、文生视频、语音转文字、文字转语音。
 
-底层只有 `MultimodalStep` 一个类，上层是四个函数式 DSL 入口：
+四个步骤都是薄壳：
 
-    ImageGen("一只在月球上弹吉他的猫", save_to="cat.png", output_key="cat")
-    ImageUnderstand(Var("cat"), prompt="描述这张图", output_key="desc")
-    VideoGen("镜头缓慢推进", inputs=[Var("cat")], save_to="demo.mp4")
-    VideoUnderstand(Var("demo"), prompt="描述这段视频")
+1. 从 Context 读输入（提示词 / 音频 / 文本）
+2. 能力协商：`client.supports(modality, operation)` 不满足抛
+   `UnsupportedModality`，不静默降级
+3. 调 `BaseMultimodalClient`（统一多模态网关），Step 层不直接发 HTTP
+4. 把结果写成 `ContentPart`（或文本）放回 Context
 
-它们都能直接放进 `Workflow(...)`，因为返回的是 `Step` 实例。
-新增模态（audio / 3d……）时不用加新 Step，用
-`Generate("audio", ...)` / `Understand("audio", ...)` 即可。
+`client=None` 时在执行时 lazy 造默认多模态客户端（`make_multimodal_client()`），
+方便测试时注入 FakeClient。
 '''
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
+import base64
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, Optional, Type, TypeVar
 
-from promptkit.client_sys.multimodal import (
-    Media,
-    Modality,
-    MultimodalResult,
-    Operation,
-    normalize_modality,
-    normalize_operation,
-)
+from promptkit.client_sys.client import UnsupportedModality
+from promptkit.core.content import AudioPart, ImagePart, VideoPart
 from promptkit.core.steps.interface import Step
 
-if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 Context
+if TYPE_CHECKING:  # 只用于类型标注，运行时惰性 import
+    from promptkit.client_sys.multimodal import BaseMultimodalClient, Media
     from promptkit.core.context import Context
+
+__all__ = ["ImageGenStep", "VideoGenStep", "STTStep", "TTSStep"]
+
+#: `_part_of` 的输出部件类型：只可能是三种媒体部件
+P = TypeVar("P", ImagePart, AudioPart, VideoPart)
+
+
+def _resolve_client(client: Optional["BaseMultimodalClient"]) -> "BaseMultimodalClient":
+    '''构造传入的优先；否则造一个默认多模态客户端（通用网关）。'''
+    if client is not None:
+        return client
+    from promptkit.client_sys.multimodal import make_multimodal_client
+
+    return make_multimodal_client()
+
+
+def _require(
+    client: "BaseMultimodalClient", modality: str, operation: str
+) -> None:
+    '''能力协商：不支持的模态在发请求前抛 `UnsupportedModality`。'''
+    if not client.supports(modality, operation):
+        raise UnsupportedModality(client.vendor, f"{modality}:{operation}")
+
+
+def _part_of(media: "Media", part_cls: Type[P]) -> P:
+    '''网关返回的 Media -> 内容部件（url / 本地文件 / base64 三态映射）。'''
+    if media.url:
+        return part_cls(source=media.url, source_type="url", media_type=media.mime)
+    if media.path:
+        return part_cls(source=media.path, source_type="file", media_type=media.mime)
+    payload = base64.b64encode(media.data or b"").decode("ascii")
+    return part_cls(source=payload, source_type="base64", media_type=media.mime)
+
+
+def _media_of(value: Any) -> "Media":
+    '''Context 里的音频输入 -> Media：ContentPart 显式转换，其余交给 Media.from_any。'''
+    from promptkit.client_sys.multimodal import Media
+
+    if isinstance(value, (AudioPart, ImagePart, VideoPart)):
+        if value.source_type == "url":
+            return Media.from_url(value.source, mime=value.media_type)
+        if value.source_type == "file":
+            return Media.from_path(value.source, mime=value.media_type)
+        return Media.from_bytes(
+            base64.b64decode(value.source), mime=value.media_type
+        )
+    return Media.from_any(value)
+
+
+def _media_of_result(result: Any, what: str) -> "Media":
+    '''取生成结果的媒体；网关只回了文本 / 空结果时报错而不是静默放空。'''
+    media = getattr(result, "media", None)
+    if media is None:
+        from promptkit.client_sys.client import ClientError
+
+        raise ClientError(f"{what}没有返回媒体：{getattr(result, 'raw', result)!r}")
+    return media
 
 
 @dataclass
-class MultimodalStep(Step):
-    '''一次多模态调用。
+class ImageGenStep(Step):
+    '''文生图：`context[output_key] = ImagePart`。
 
-    三个 DSL 入口最终都落到这里：
-
-    - `Generate(modality, prompt, ...)`     生成文本 / 图片 / 视频
-    - `Understand(modality, source, ...)`   理解图片 / 视频
-    - `Multimodal(operation, modality, ...)` 最底层写法，未来新操作直接用它
-
-    结果写回 `context[output_key]`：生成结果是 `Media`，理解结果是 `str`。
-    如果给了 `save_to`，生成结果会先落盘，`Media.path` 就是本地路径。
+        ImageGenStep("prompt", "image", size="1024x1024")
     '''
 
-    operation: str
-    modality: str
-    prompt: object = None
-    sources: Sequence[object] = ()
-    output_key: str = "output"
-    save_to: object = None
-    model: Optional[str] = None
-    agent: object = None
-    params: Dict[str, object] = field(default_factory=dict)
-
-    name: str = "multimodal"
-
-    def __post_init__(self) -> None:
-        self.operation = normalize_operation(self.operation)
-        self.modality = normalize_modality(self.modality)
-        if self.sources is None:
-            self.sources = ()
-        elif not isinstance(self.sources, (list, tuple)):
-            self.sources = (self.sources,)
-        self.params = dict(self.params or {})
-
-    # ---------------- 执行 ----------------
-    def _agent(self, context: "Context") -> Any:
-        agent = self.agent if self.agent is not None else context.get("agent")
-        if agent is None:
-            try:
-                from promptkit.agent import Agent
-
-                agent = Agent.default()
-            except ImportError:
-                agent = None
-        if agent is None:
-            raise ValueError(
-                "MultimodalStep 需要一个 agent：先执行 `agent = Agent()`，"
-                "或构造时传 agent=，或 Workflow.run(agent=...)"
-            )
-        if not hasattr(agent, "multimodal"):
-            raise TypeError(
-                f"{type(agent).__name__} 没有 multimodal()："
-                "多模态步骤需要 promptkit.agent.Agent（或兼容它的实现）"
-            )
-        return agent
-
-    def _prompt_text(self, context: "Context") -> Optional[str]:
-        value = _resolve(self.prompt, context)
-        if value is None:
-            return None
-        if isinstance(value, str) and "{{" in value:
-            from promptkit.prompt import render_text
-
-            return render_text(value, context.to_dict(), allow_dollar=False)
-        return str(value)
-
-    def _save_path(self, context: "Context") -> Optional[str]:
-        value = _resolve(self.save_to, context)
-        if value is None:
-            return None
-        if isinstance(value, str) and "{{" in value:
-            from promptkit.prompt import render_text
-
-            value = render_text(value, context.to_dict(), allow_dollar=False)
-        return str(value)
+    prompt_key: str
+    output_key: str
+    client: Optional["BaseMultimodalClient"] = None
+    size: Optional[str] = None
+    name: str = "image_gen"
 
     def execute(self, context: "Context") -> None:
-        prompt = self._prompt_text(context)
-        if self.operation == Operation.GENERATE and not prompt:
-            raise ValueError(
-                f"{self.describe()} 需要 prompt（生成操作不能是空提示词）"
-            )
-
-        inputs: Tuple[Media, ...] = tuple(
-            Media.from_any(_resolve(item, context)) for item in self.sources
+        client = _resolve_client(self.client)
+        _require(client, "image", "generate")
+        params: Dict[str, Any] = {"size": self.size} if self.size else {}
+        result = client.generate("image", str(context[self.prompt_key]), **params)
+        context[self.output_key] = _part_of(
+            _media_of_result(result, "文生图"), ImagePart
         )
+        context.trace.append(self.name)
 
-        result: MultimodalResult = self._agent(context).multimodal(
-            self.operation,
-            self.modality,
-            prompt=prompt,
-            inputs=inputs,
-            model=self.model,
-            save_to=self._save_path(context),
-            **self.params,
+
+@dataclass
+class VideoGenStep(Step):
+    '''文生视频：`context[output_key] = VideoPart`。
+
+        VideoGenStep("prompt", "video", duration=5)
+    '''
+
+    prompt_key: str
+    output_key: str
+    client: Optional["BaseMultimodalClient"] = None
+    duration: Optional[float] = None
+    name: str = "video_gen"
+
+    def execute(self, context: "Context") -> None:
+        client = _resolve_client(self.client)
+        _require(client, "video", "generate")
+        params: Dict[str, Any] = (
+            {"duration": self.duration} if self.duration is not None else {}
         )
-
-        context[self.output_key] = result.content
-        context.trace.append(f"{self.name}:{self.modality}:{self.operation}")
-
-    # ---------------- 展示 ----------------
-    def describe(self) -> str:
-        from promptkit.core.display_sys.tree import short
-
-        source = ""
-        if self.sources:
-            source = f" <- {', '.join(short(item) for item in self.sources)}"
-        prompt = f"({short(self.prompt)})" if self.prompt is not None else ""
-        save = f" -> {short(self.save_to)}" if self.save_to is not None else ""
-        return (
-            f"{self.modality}:{self.operation}{prompt}{source}"
-            f" -> {self.output_key}{save}"
+        result = client.generate("video", str(context[self.prompt_key]), **params)
+        context[self.output_key] = _part_of(
+            _media_of_result(result, "文生视频"), VideoPart
         )
+        context.trace.append(self.name)
 
-    def __repr__(self) -> str:
-        return (
-            f"MultimodalStep({self.operation!r}, {self.modality!r}, "
-            f"output_key={self.output_key!r})"
+
+@dataclass
+class STTStep(Step):
+    '''语音转文字：`context[output_key] = str`。
+
+    `audio_key` 指向的值可以是 AudioPart / 路径 / URL / bytes。
+    '''
+
+    audio_key: str
+    output_key: str
+    client: Optional["BaseMultimodalClient"] = None
+    name: str = "stt"
+
+    def execute(self, context: "Context") -> None:
+        client = _resolve_client(self.client)
+        _require(client, "audio", "understand")
+        result = client.understand("audio", _media_of(context[self.audio_key]))
+        context[self.output_key] = result.text or ""
+        context.trace.append(self.name)
+
+
+@dataclass
+class TTSStep(Step):
+    '''文字转语音：`context[output_key] = AudioPart`。
+
+        TTSStep("text", "voice_over", voice="alloy")
+    '''
+
+    text_key: str
+    output_key: str
+    client: Optional["BaseMultimodalClient"] = None
+    voice: Optional[str] = None
+    name: str = "tts"
+
+    def execute(self, context: "Context") -> None:
+        client = _resolve_client(self.client)
+        _require(client, "audio", "generate")
+        params: Dict[str, Any] = {"voice": self.voice} if self.voice else {}
+        result = client.generate(
+            "audio", str(context[self.text_key]), output_modality="audio", **params
         )
+        context[self.output_key] = _part_of(
+            _media_of_result(result, "文字转语音"), AudioPart
+        )
+        context.trace.append(self.name)
 
-
-def _resolve(value: object, context: "Context") -> object:
-    '''表达式求值；普通值原样返回。'''
-    from promptkit.core.steps.logics.expr_sys.expr import Expr
-
-    return value.eval(context) if isinstance(value, Expr) else value
-
-
-def _sources(value: object) -> Tuple[object, ...]:
-    '''单个媒体 / 媒体列表 / None -> tuple。'''
-    from promptkit.core.steps.logics.expr_sys.expr import Expr
-
-    if value is None:
-        return ()
-    if isinstance(value, (str, bytes)) or hasattr(value, "path"):
-        return (value,)
-    if isinstance(value, Expr):
-        return (value,)
-    if isinstance(value, Sequence):
-        return tuple(value)
-    return (value,)
-
-
-# ---------------- 函数式 DSL ----------------
-def Multimodal(  # noqa: N802
-    operation: str,
-    modality: str,
-    *,
-    prompt: object = None,
-    sources: object = None,
-    output_key: str = "output",
-    save_to: object = None,
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''最底层的多模态步骤：操作 / 模态都自己指定。'''
-    return MultimodalStep(
-        operation=operation,
-        modality=modality,
-        prompt=prompt,
-        sources=_sources(sources),
-        output_key=output_key,
-        save_to=save_to,
-        model=model,
-        agent=agent,
-        params=dict(params),
-    )
-
-
-def Generate(  # noqa: N802
-    modality: str,
-    prompt: object,
-    *,
-    inputs: object = None,
-    output_key: str = "output",
-    save_to: object = None,
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''生成：`Generate("image", "一只猫", save_to="cat.png")`。'''
-    return Multimodal(
-        Operation.GENERATE,
-        modality,
-        prompt=prompt,
-        sources=inputs,
-        output_key=output_key,
-        save_to=save_to,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def Understand(  # noqa: N802
-    modality: str,
-    source: object = None,
-    prompt: object = None,
-    *,
-    output_key: str = "output",
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''理解：`Understand("image", Var("cat"), prompt="描述")`。'''
-    return Multimodal(
-        Operation.UNDERSTAND,
-        modality,
-        prompt=prompt,
-        sources=source,
-        output_key=output_key,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def ImageGen(  # noqa: N802
-    prompt: object,
-    *,
-    inputs: object = None,
-    output_key: str = "image",
-    save_to: object = None,
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''图片生成（默认豆包 Seedream）。'''
-    return Generate(
-        Modality.IMAGE,
-        prompt,
-        inputs=inputs,
-        output_key=output_key,
-        save_to=save_to,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def ImageUnderstand(  # noqa: N802
-    source: object,
-    prompt: object = "请描述这张图片。",
-    *,
-    output_key: str = "image_description",
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''图片理解（默认豆包 Seed 视觉模型）。'''
-    return Understand(
-        Modality.IMAGE,
-        source,
-        prompt,
-        output_key=output_key,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def VideoGen(  # noqa: N802
-    prompt: object,
-    *,
-    inputs: object = None,
-    output_key: str = "video",
-    save_to: object = None,
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''视频生成（默认豆包 Seedance）。'''
-    return Generate(
-        Modality.VIDEO,
-        prompt,
-        inputs=inputs,
-        output_key=output_key,
-        save_to=save_to,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def VideoUnderstand(  # noqa: N802
-    source: object,
-    prompt: object = "请描述这段视频。",
-    *,
-    output_key: str = "video_description",
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''视频理解（默认豆包 Seed 视觉模型）。'''
-    return Understand(
-        Modality.VIDEO,
-        source,
-        prompt,
-        output_key=output_key,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-def TextGen(  # noqa: N802
-    prompt: object,
-    *,
-    output_key: str = "text",
-    model: Optional[str] = None,
-    agent: object = None,
-    **params: object,
-) -> MultimodalStep:
-    '''文本生成：走同一套多模态入口，方便全链路只认一种客户端。'''
-    return Generate(
-        Modality.TEXT,
-        prompt,
-        output_key=output_key,
-        model=model,
-        agent=agent,
-        **params,
-    )
-
-
-__all__ = [
-    "MultimodalStep",
-    "Multimodal",
-    "Generate",
-    "Understand",
-    "ImageGen",
-    "ImageUnderstand",
-    "VideoGen",
-    "VideoUnderstand",
-    "TextGen",
-]
+# 职责：多模态生成/理解步骤（文生图、文生视频、STT、TTS），统一走 BaseMultimodalClient

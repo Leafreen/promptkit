@@ -21,7 +21,6 @@ import os
 import sys
 from contextlib import contextmanager
 from typing import (
-    Any,
     Dict,
     Iterable,
     Iterator,
@@ -34,18 +33,12 @@ from typing import (
 )
 
 from pydantic import BaseModel
+from promptkit.types import AgentLike, Message
 
 from promptkit.client_sys import (
     BaseClient,
-    BaseMultimodalClient,
     ClientError,  # 再导出：ask() 抛的网络 / 鉴权错误就是它
-    DEFAULT_MULTIMODAL_VENDOR,
-    Media,
-    Modality,
-    MultimodalResult,
-    Operation,
     make_client,
-    make_multimodal_client,
     resolve_api_key as resolve_vendor_api_key,
     resolve_target,
     with_params,
@@ -275,17 +268,6 @@ class _HistoryView:
             self.append(value)
 
 
-def _as_media_inputs(value: object) -> tuple:
-    '''把单个媒体 / 媒体列表统一成 tuple[Media, ...]。'''
-    if value is None:
-        return ()
-    if isinstance(value, (str, bytes, os.PathLike, Media)) or hasattr(value, "path"):
-        return (Media.from_any(value),)
-    if isinstance(value, Iterable):
-        return tuple(Media.from_any(item) for item in value)
-    return (Media.from_any(value),)
-
-
 def _as_conversation_message(value: Message) -> ConversationMessage:
     '''把旧接口的 dict 消息转成不可变 Message。'''
     if isinstance(value, ConversationMessage):
@@ -293,7 +275,7 @@ def _as_conversation_message(value: Message) -> ConversationMessage:
     return ConversationMessage.from_dict(cast(Dict[str, object], value))
 
 
-class Agent:
+class Agent(AgentLike):
     '''模型对话客户端。`Agent()` 不带参数即可用：
 
     - 默认还是 DeepSeek：密钥按 `api_key 参数 -> 环境变量 DEEPSEEK_API_KEY ->
@@ -332,10 +314,6 @@ class Agent:
         params: Optional[Dict[str, JSONValue]] = None,
         timeout: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        multimodal_provider: Optional[str] = None,
-        multimodal_api_key: Optional[str] = None,
-        multimodal_base_url: Optional[str] = None,
-        multimodal_client: Optional[BaseMultimodalClient] = None,
     ):
         # 厂商 / 模型 / 端点是一组，缺的用厂商默认值补（补不上会在这一步报错）
         self.spec, self.model, self.base_url = resolve_target(
@@ -371,15 +349,6 @@ class Agent:
             timeout=timeout,
         )
 
-        # 多模态客户端按需创建：只做对话的流程不应该因为没配 ARK_API_KEY
-        # 而在 `Agent()` 这一步就失败。
-        self.multimodal_provider = (
-            multimodal_provider or DEFAULT_MULTIMODAL_VENDOR
-        )
-        self.multimodal_api_key = multimodal_api_key
-        self.multimodal_base_url = multimodal_base_url
-        self._multimodal_client = multimodal_client
-
         # 历史由对话状态层的 Session 管；`history` 属性只是兼容旧接口的活视图
         self._session: ConversationSession = ConversationSession()
         self.messages: List[Message] = self._build_messages()
@@ -401,79 +370,12 @@ class Agent:
     def __repr__(self) -> str:
         return f"<Agent {self.vendor} model={self.model!r}>"
 
-    # ---------------- 多模态 ----------------
-    @property
-    def multimodal_client(self) -> BaseMultimodalClient:
-        '''当前多模态客户端；第一次用到时才创建（默认豆包 / Seedance）。'''
-        if self._multimodal_client is None:
-            self._multimodal_client = make_multimodal_client(
-                self.multimodal_provider,
-                api_key=self.multimodal_api_key,
-                base_url=self.multimodal_base_url,
-                timeout=self.timeout,
-            )
-        return self._multimodal_client
+    def supports(self, modality: str) -> bool:
+        '''客户端是否支持某模态（"text" / "image" / "audio" / "video" / "file"）。
 
-    @multimodal_client.setter
-    def multimodal_client(self, client: BaseMultimodalClient) -> None:
-        '''替换多模态实现（测试 / 私有部署 / 换厂商都走这个口）。'''
-        self._multimodal_client = client
-
-    def multimodal(
-        self,
-        operation: str,
-        modality: str,
-        prompt: Optional[str] = None,
-        inputs: object = None,
-        *,
-        model: Optional[str] = None,
-        save_to: Optional[str] = None,
-        timeout: Optional[float] = None,
-        **params: Any,
-    ) -> MultimodalResult:
-        '''统一多模态入口：`operation` + `modality` + 输入。
-
-            agent.multimodal("generate", "image", "一只猫", save_to="cat.png")
-            agent.multimodal("understand", "video", "demo.mp4", prompt="描述")
+        纯转发到 `self.client.supports()`，Agent 自己不做任何模态判断。
         '''
-        from promptkit.client_sys.multimodal import MultimodalRequest
-
-        return self.multimodal_client.run(
-            MultimodalRequest(
-                operation=operation,
-                modality=modality,
-                prompt=prompt,
-                inputs=_as_media_inputs(inputs),
-                model=model,
-                output_path=save_to,
-                params=dict(params),
-                timeout=timeout,
-            )
-        )
-
-    def generate(
-        self,
-        modality: str = Modality.TEXT,
-        prompt: str = "",
-        inputs: object = None,
-        **kwargs: Any,
-    ) -> MultimodalResult:
-        '''生成：文本 / 图片 / 视频，参数同 `multimodal(...)`。'''
-        return self.multimodal(
-            Operation.GENERATE, modality, prompt, inputs, **kwargs
-        )
-
-    def understand(
-        self,
-        modality: str,
-        source: object = None,
-        prompt: Optional[str] = None,
-        **kwargs: Any,
-    ) -> MultimodalResult:
-        '''理解：图片 / 视频，参数同 `multimodal(...)`。'''
-        return self.multimodal(
-            Operation.UNDERSTAND, modality, prompt, source, **kwargs
-        )
+        return self.client.supports(modality)
 
     def on(self, handler: EventHandler) -> EventHandler:
         '''挂一个事件 handler，返回它（可以当装饰器）。'''
@@ -513,10 +415,6 @@ class Agent:
         child.start_prompts = cast(List[Message], copy.deepcopy(self.start_prompts))
         child.bus = self.bus
         child.client = self.client
-        child.multimodal_provider = self.multimodal_provider
-        child.multimodal_api_key = self.multimodal_api_key
-        child.multimodal_base_url = self.multimodal_base_url
-        child._multimodal_client = self._multimodal_client
         child._session = self._session.clone()
         child.messages = child._build_messages()
         return child
@@ -1045,7 +943,7 @@ def run_prompt(
     output_model: Type[BaseModel],
     reset: bool = True,
     tools: Optional[Sequence[ToolLike]] = None,
-    **kwargs: Any,
+    **kwargs,
 ) -> BaseModel:
     '''运行一次「提示词 -> 结构化输出」，返回 output_model 的实例。'''
     executor = Executor(agent=agent)

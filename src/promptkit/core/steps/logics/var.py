@@ -42,7 +42,7 @@ class VarDecl(VarExpr, Step):
         '''没有显式给 default 时，用类型自带的默认值。'''
         if self.default is not MISSING:
             return self.default
-        return None if self.var_type is None else self.var_type.make_default()
+        return None if self.var_type is None else self.var_type.default
 
     def execute(self, context: Context) -> None:
         if self.var_type is not None:
@@ -203,14 +203,17 @@ def NewVar(  # noqa: N802
         raise TypeError(f"变量名必须是非空字符串，得到 {name!r}")
     if type is not None and not isinstance(type, VarType):
         raise TypeError(
-            f"type 需要是 VarType 实例，得到 {type!r}；"
-            "也可以写成 Number('x') / File('x') / Time('x')"
+            f"type 需要是 Number 或 Str，得到 {type!r}；"
+            "也可以写成 Number('x') / Str('x')"
         )
     return VarDecl(name, var_type=type, default=default)
 
 
 def Var(  # noqa: N802
-    name: object = None, *, val: object = MISSING
+    name: object = None,
+    *,
+    val: object = MISSING,
+    type: "Optional[type]" = None,  # noqa: A002 - 跟 DSL 命名保持一致
 ) -> Union[VarExpr, SetStep]:
     '''两种用法：
 
@@ -218,12 +221,19 @@ def Var(  # noqa: N802
         Var(name="state", val=expr)     # 赋值：一个步骤
 
     也可以传 NewVar(...) / Number(...) 的句柄：Var(state)。
+
+    `type=` 给引用加运行时类型标注（`Var("img", type=ImagePart)`），
+    只在 `Prompt.render()` 解析多模态内容时校验；赋值形式不支持。
     '''
     if val is not MISSING:
+        if type is not None:
+            raise TypeError("赋值形式 Var(name, val=...) 不支持 type 标注")
         return SetStep(_var_name(name), val)
     if isinstance(name, VarExpr):
+        if type is not None:
+            raise TypeError("变量句柄已经声明过，不能再加 type 标注")
         return name
-    return VarExpr(cast(str, name))
+    return VarExpr(cast(str, name), type=type)
 
 
 def Set(name: object, value: object) -> Union[SetItemStep, SetStep]:  # noqa: N802

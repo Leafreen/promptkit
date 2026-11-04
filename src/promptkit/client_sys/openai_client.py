@@ -14,9 +14,15 @@
 '''
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
-from promptkit.client_sys.client import BaseClient, ClientError, ClientSpec
+from promptkit.client_sys.client import (
+    BaseClient,
+    ClientError,
+    ClientSpec,
+    UnsupportedModality,
+    part_data_url,
+)
 
 __all__ = ["OpenAIClient"]
 
@@ -74,11 +80,51 @@ class OpenAIClient(BaseClient):
         '''发一次 Chat Completions 请求。返回值是 SDK 的原始对象。'''
         body: Dict[str, Any] = dict(params)
         body["model"] = model
-        body["messages"] = messages
+        body["messages"] = [self._translate_message(m) for m in messages]
         body["stream"] = stream
         if tools:
             body["tools"] = list(tools)
         return self.sdk.chat.completions.create(**body)
+
+    # ---------------- 多模态 ----------------
+    def supports(self, modality: str) -> bool:
+        '''OpenAI 兼容端点：文本 + 图片 + 音频 + 文件（视频不支持）。'''
+        return modality in ("text", "image", "audio", "file")
+
+    def _to_vendor_part(self, part: Mapping[str, Any]) -> Dict[str, Any]:
+        '''标准部件 -> OpenAI content part。'''
+        kind = part.get("type")
+        if kind == "image":
+            url = part_data_url(part)
+            image_url: Dict[str, Any] = {"url": url}
+            if part.get("detail"):
+                image_url["detail"] = part["detail"]
+            return {"type": "image_url", "image_url": image_url}
+        if kind == "audio":
+            if part.get("source_type") == "url":
+                raise ClientError(
+                    "OpenAI 的音频输入只支持 base64，不支持 URL；请先下载"
+                )
+            media_type = str(part.get("media_type") or "audio/mpeg")
+            fmt = media_type.split("/")[-1].replace("mpeg", "mp3")
+            return {
+                "type": "input_audio",
+                "input_audio": {"data": part_data_url(part).split(",", 1)[-1],
+                                "format": fmt},
+            }
+        if kind == "file":
+            if part.get("source_type") == "url":
+                raise ClientError(
+                    "OpenAI 的文件输入只支持 base64，不支持 URL；请先下载"
+                )
+            return {
+                "type": "file",
+                "file": {
+                    "filename": part.get("filename") or "file",
+                    "file_data": part_data_url(part),
+                },
+            }
+        raise UnsupportedModality(self.vendor, str(kind))
 
     def close(self) -> None:
         '''关掉 SDK 的 HTTP 连接池（有这个方法才关，没有就算了）。'''

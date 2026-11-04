@@ -1,20 +1,22 @@
 # client_sys/multimodal.py
-'''多模态的统一接口：三类模态、两种操作、一个请求对象。
+'''多模态的统一接口：任意模态、两种操作、一个请求对象。
 
 和 `client_sys` 的对话客户端是同一套分层思路：
 
     multimodal.py           Modality / Media / MultimodalRequest / BaseMultimodalClient
-                            + 厂商注册表（默认豆包 / Seedance）
-    doubao_multimodal.py   豆包方舟（Ark）实现：文本、图片、视频
+                            + 厂商注册表（默认通用网关）
+    generic_multimodal.py   通用网关实现：所有模态走同一个 JSON 接口
 
 调用方只认「模态 + 操作 + 输入」这一个口径：
 
-    client = make_multimodal_client()             # 默认豆包
+    client = make_multimodal_client()             # 默认通用网关
     client.generate("image", "一只猫在月球上")
     client.understand("video", "demo.mp4", prompt="描述这段视频")
 
-想加一种新模态（音频 / 3D……）不需要改这里：模态名是普通字符串，
-厂商在 `capabilities` 里声明自己支持哪些 `(modality, operation)` 组合即可。
+模态名是普通字符串：文本、图片、视频、音频、富文本，甚至未来新增的
+任意类型，都可以直接传；客户端只做统一的参数校验与格式标准化，
+不再为每种模态写分支。厂商可以在 `capabilities` 里声明支持的组合，
+但默认网关接受任意组合。
 '''
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import mimetypes
 import os
 import urllib.request
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Callable,
@@ -50,10 +52,12 @@ __all__ = [
     "MultimodalSpec",
     "BaseMultimodalClient",
     "DEFAULT_MULTIMODAL_VENDOR",
+    "GENERIC",
     "DOUBAO",
     "MULTIMODAL_PROVIDERS",
     "normalize_modality",
     "normalize_operation",
+    "normalize_format",
     "get_multimodal_spec",
     "register_multimodal_provider",
     "resolve_multimodal_api_key",
@@ -68,20 +72,21 @@ class MultimodalError(ClientError):
 
 
 class Modality:
-    '''已知模态的常量。
+    """已知模态的常量。
 
-    故意**不用 Enum**：`Modality` 的值只是普通字符串，未来新增 "audio"
-    这类模态时，providers 只要在自己的 `capabilities` 里声明即可，
-    不需要改这张表，也不会因为传了未知字符串就构造失败。
-    '''
+    故意**不用 Enum**：`Modality` 的值只是普通字符串，未来新增模态时
+    直接传字符串即可，不会因为未知值而构造失败。
+    """
 
     TEXT = "text"
     IMAGE = "image"
     VIDEO = "video"
+    AUDIO = "audio"
+    RICH_TEXT = "rich_text"
 
     @classmethod
     def known(cls) -> Tuple[str, ...]:
-        return (cls.TEXT, cls.IMAGE, cls.VIDEO)
+        return (cls.TEXT, cls.IMAGE, cls.VIDEO, cls.AUDIO, cls.RICH_TEXT)
 
 
 class Operation:
@@ -99,7 +104,7 @@ def normalize_modality(value: object) -> str:
     '''把模态名规整成小写字符串；空值拒绝，未知值放行（为扩展留口）。'''
     name = str(value or "").strip().lower()
     if not name:
-        raise ValueError("modality 不能为空（text / image / video，或自定义模态名）")
+        raise ValueError("modality 不能为空（text / image / video / audio …，或自定义模态名）")
     return name
 
 
@@ -109,6 +114,14 @@ def normalize_operation(value: object) -> str:
     if not name:
         raise ValueError("operation 不能为空（generate / understand）")
     return name
+
+
+def normalize_format(value: object) -> Optional[str]:
+    '''把输出格式规整成小写字符串；空值表示交给网关决定。'''
+    if value is None:
+        return None
+    name = str(value).strip().lower()
+    return name or None
 
 
 def _guess_mime(path: Optional[str], explicit: Optional[str]) -> Optional[str]:
@@ -151,6 +164,11 @@ class Media:
     @classmethod
     def from_bytes(cls, data: bytes, mime: Optional[str] = None) -> "Media":
         return cls(data=data, mime=mime)
+
+    @classmethod
+    def from_text(cls, text: str, mime: str = "text/plain") -> "Media":
+        '''把一段文本 / HTML 富文本包装成媒体输入。'''
+        return cls(data=text.encode("utf-8"), mime=mime)
 
     @classmethod
     def from_any(cls, value: object) -> "Media":
@@ -271,12 +289,17 @@ class MultimodalRequest:
     inputs: Tuple[Media, ...] = ()
     model: Optional[str] = None
     output_path: Optional[str] = None
+    output_modality: Optional[str] = None
+    output_format: Optional[str] = None
     params: Dict[str, Any] = field(default_factory=dict)
     timeout: Optional[float] = None
 
     def __post_init__(self) -> None:
         self.operation = normalize_operation(self.operation)
         self.modality = normalize_modality(self.modality)
+        if self.output_modality is not None:
+            self.output_modality = normalize_modality(self.output_modality)
+        self.output_format = normalize_format(self.output_format)
         self.inputs = tuple(
             item if isinstance(item, Media) else Media.from_any(item)
             for item in self.inputs
@@ -288,6 +311,15 @@ class MultimodalRequest:
     @property
     def supports_inputs(self) -> bool:
         return bool(self.inputs)
+
+    @property
+    def desired_output_modality(self) -> str:
+        '''生成默认输出输入模态；理解默认输出文本。显式指定优先。'''
+        if self.output_modality:
+            return self.output_modality
+        if self.operation == Operation.UNDERSTAND:
+            return Modality.TEXT
+        return self.modality
 
 
 @dataclass
@@ -305,8 +337,12 @@ class MultimodalResult:
 
     @property
     def content(self) -> object:
-        '''一步取值：有媒体给媒体，否则给文本。'''
-        return self.media if self.media is not None else self.text
+        '''一步取值：有媒体给媒体，有文本给文本，否则原样透传网关响应。'''
+        if self.media is not None:
+            return self.media
+        if self.text is not None:
+            return self.text
+        return self.raw
 
 
 @dataclass(frozen=True)
@@ -389,10 +425,12 @@ class BaseMultimodalClient(ABC):
         *,
         model: Optional[str] = None,
         save_to: Optional[str] = None,
+        output_modality: Optional[str] = None,
+        output_format: Optional[str] = None,
         timeout: Optional[float] = None,
         **params: Any,
     ) -> MultimodalResult:
-        '''生成：文本 / 图片 / 视频。'''
+        '''生成：任意模态，输出类型 / 格式可由调用方指定。'''
         return self.run(
             MultimodalRequest(
                 operation=Operation.GENERATE,
@@ -401,6 +439,8 @@ class BaseMultimodalClient(ABC):
                 inputs=_as_inputs(inputs),
                 model=model,
                 output_path=save_to,
+                output_modality=output_modality,
+                output_format=output_format,
                 params=params,
                 timeout=timeout,
             )
@@ -414,10 +454,12 @@ class BaseMultimodalClient(ABC):
         *,
         model: Optional[str] = None,
         save_to: Optional[str] = None,
+        output_modality: Optional[str] = None,
+        output_format: Optional[str] = None,
         timeout: Optional[float] = None,
         **params: Any,
     ) -> MultimodalResult:
-        '''理解：图片 / 视频（文本也能走，但对齐的是同一个入口）。'''
+        '''理解：任意模态输入，默认输出文本。'''
         return self.run(
             MultimodalRequest(
                 operation=Operation.UNDERSTAND,
@@ -426,6 +468,8 @@ class BaseMultimodalClient(ABC):
                 inputs=_as_inputs(source),
                 model=model,
                 output_path=save_to,
+                output_modality=output_modality,
+                output_format=output_format,
                 params=params,
                 timeout=timeout,
             )
@@ -455,37 +499,30 @@ def _as_inputs(value: Union[object, Sequence[object], None]) -> Tuple[Media, ...
 
 
 # ============================ 厂商注册表 ============================
-#: 默认多模态实现：豆包方舟（Seedance 负责视频）
-DEFAULT_MULTIMODAL_VENDOR = "doubao"
+#: 默认多模态实现：通用网关（所有模态一个端点）
+DEFAULT_MULTIMODAL_VENDOR = "generic"
 
-DOUBAO = MultimodalSpec(
-    name="doubao",
-    label="豆包方舟（Seedance）",
-    kind="doubao",
-    env_vars=("ARK_API_KEY", "DOUBAO_API_KEY", "VOLCENGINE_API_KEY"),
-    default_base_url=config_module.DOUBAO_BASE_URL,
-    models={
-        Modality.TEXT: config_module.DOUBAO_TEXT_MODEL,
-        Modality.IMAGE: config_module.DOUBAO_IMAGE_MODEL,
-        Modality.VIDEO: config_module.DOUBAO_VIDEO_MODEL,
-    },
+GENERIC = MultimodalSpec(
+    name="generic",
+    label="通用多模态网关",
+    kind="generic",
+    env_vars=("PROMPTKIT_MULTIMODAL_API_KEY", "MULTIMODAL_API_KEY"),
+    default_base_url=config_module.MULTIMODAL_BASE_URL,
+    models={},
     capabilities=frozenset(
-        {
-            (Modality.TEXT, Operation.GENERATE),
-            (Modality.TEXT, Operation.UNDERSTAND),
-            (Modality.IMAGE, Operation.GENERATE),
-            (Modality.IMAGE, Operation.UNDERSTAND),
-            (Modality.VIDEO, Operation.GENERATE),
-            (Modality.VIDEO, Operation.UNDERSTAND),
-        }
+        (modality, operation)
+        for modality in Modality.known()
+        for operation in Operation.known()
     ),
-    aliases=("seedance", "ark", "volcengine"),
-    note="文本 / 图片理解走方舟 Chat Completions，图片生成走 Seedream，"
-    "视频生成走 Seedance 任务接口",
+    aliases=("gateway", "universal", "doubao", "seedance", "ark", "volcengine"),
+    note="所有模态统一 POST 到同一个 JSON 端点；模型与输出格式由请求参数指定",
 )
 
+#: 兼容旧名字：现在指的就是通用网关
+DOUBAO = GENERIC
+
 #: 内置多模态厂商（按展示顺序）
-MULTIMODAL_PROVIDERS: Dict[str, MultimodalSpec] = {DOUBAO.name: DOUBAO}
+MULTIMODAL_PROVIDERS: Dict[str, MultimodalSpec] = {GENERIC.name: GENERIC}
 
 _ALIASES: Dict[str, MultimodalSpec] = {}
 for _spec in MULTIMODAL_PROVIDERS.values():
@@ -495,7 +532,7 @@ for _spec in MULTIMODAL_PROVIDERS.values():
 _FACTORIES: Dict[str, Callable[..., BaseMultimodalClient]] = {}
 
 #: 内置实现认的 `kind`
-_KINDS: Tuple[str, ...] = ("doubao",)
+_KINDS: Tuple[str, ...] = ("generic",)
 
 
 def multimodal_vendor_names() -> list[str]:
@@ -568,16 +605,16 @@ def make_multimodal_client(
     timeout: Optional[float] = None,
     **kwargs: Any,
 ) -> BaseMultimodalClient:
-    '''按厂商造一个多模态客户端，默认豆包（Seedance）。'''
+    '''按厂商造一个多模态客户端，默认通用网关。'''
     spec, target = resolve_multimodal_target(vendor, base_url=base_url)
     key = resolve_multimodal_api_key(spec, api_key)
 
     factory = _FACTORIES.get(spec.name)
     if factory is None:
-        if spec.kind == "doubao":
-            from promptkit.client_sys.doubao_multimodal import DoubaoMultimodalClient
+        if spec.kind == "generic":
+            from promptkit.client_sys.generic_multimodal import GenericMultimodalClient
 
-            factory = DoubaoMultimodalClient
+            factory = GenericMultimodalClient
         else:
             raise MultimodalError(
                 f"厂商 {spec.name!r} 的 kind={spec.kind!r} 没有对应实现；"
@@ -591,8 +628,3 @@ def make_multimodal_client(
         timeout=timeout,
         **kwargs,
     )
-
-
-def clone_with_model(request: MultimodalRequest, model: str) -> MultimodalRequest:
-    '''复制请求并替换模型（provider 实现里解析默认模型时用）。'''
-    return replace(request, model=model)

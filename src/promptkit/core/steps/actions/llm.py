@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, List, Optional, Sequence, Type, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, List, Mapping, Optional, Sequence, Type, TypeVar, cast
+
+from promptkit.core.content import TextPart
 
 from promptkit.core.model_action.caution_related.caution import (
     Caution,
@@ -107,10 +109,14 @@ class LLMStep(Step, Generic[T]):
         text = join_cautions(cautions)
         if not text:
             return self.prompt
-        return Prompt(
-            role=self.prompt.role,
-            content=f"{self.prompt.content}\n\n{text}",
-        )
+        if isinstance(self.prompt.content, str):
+            return Prompt(
+                role=self.prompt.role,
+                content=f"{self.prompt.content}\n\n{text}",
+            )
+        # 多模态内容：约束作为一个文本部件追加到末尾
+        parts: List[Any] = [*self.prompt.content, TextPart(text=f"\n\n{text}")]
+        return Prompt(role=self.prompt.role, content=parts)
 
     # 旧名字，保留可用
     _build_prompt = build_prompt
@@ -161,10 +167,12 @@ class LLMStep(Step, Generic[T]):
         bus: Optional["EventBus"] = bus_of(context)
 
         prompt = self.build_prompt(context)
+        rendered = prompt.render(**variables)
+        self._check_modalities(agent, rendered)
 
         if self.output_model is None:
             value: object = getattr(agent, "ask")(
-                prompt.render(**variables), tools=self.tools, bus=bus
+                rendered, tools=self.tools, bus=bus
             )
         else:
             value = Executor(
@@ -175,6 +183,33 @@ class LLMStep(Step, Generic[T]):
 
         context[self.output_key] = value
         context.trace.append(self.name)
+
+    # ---------------- 能力协商 ----------------
+    @staticmethod
+    def _check_modalities(agent: object, rendered: Mapping[str, Any]) -> None:
+        '''多模态协商：消息里每个内容部件都要求 client 支持对应模态。
+
+        不支持就抛 `UnsupportedModality`，不静默降级成文本。
+        content 是纯字符串（老用法）时什么都不做。
+        '''
+        content = rendered.get("content")
+        if not isinstance(content, list):
+            return
+        client = getattr(agent, "client", None)
+        supports = getattr(client, "supports", None)
+        if not callable(supports):
+            # 老式假客户端（SimpleNamespace 之类）没有 supports，不拦；
+            # 真实客户端都继承 BaseClient，默认只声明 text
+            return
+        from promptkit.client_sys.client import UnsupportedModality
+
+        for part in content:
+            if not (isinstance(part, dict) and "source" in part):
+                continue
+            modality = str(part.get("type") or "")
+            if modality and not supports(modality):
+                vendor = getattr(client, "vendor", None) or type(client).__name__
+                raise UnsupportedModality(str(vendor), modality)
 
     # ---------------- 展示 ----------------
     def describe(self) -> str:
@@ -201,9 +236,8 @@ class LLMStep(Step, Generic[T]):
             bits.append(get_formatter(self.formatter).name)
         extra = f" [{' + '.join(bits)}]" if bits else ""
 
-        return (
-            f"LLM({short(self.prompt.content)}){model}{tools}{extra}"
-            f" -> {self.output_key}"
-        )
+        content = self.prompt.content
+        summary = content if isinstance(content, str) else f"[多模态 {len(content)} 部件]"
+        return f"LLM({short(summary)}){model}{tools}{extra} -> {self.output_key}"
 
 __all__ = ["LLMStep", "T"]

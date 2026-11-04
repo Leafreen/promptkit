@@ -9,7 +9,7 @@
     wf = Workflow()
     wf.add(
         NewVar("state"),
-        Number("count"),          # 指定类型的变量：Number / Str / File / PyObj / Bool / Time
+        Number("count"),          # 指定类型的变量：Number / Str
         Set("count", Read("请输入数量：")),   # "12" 自动变成 12
         While(Var("state") != "结束", max_iterations=20).Do(
             Set("state", "结束"),
@@ -19,6 +19,17 @@
 '''
 from promptkit.prompt import Prompt
 
+from promptkit.core.content import (
+    AudioPart,
+    ContentPart,
+    FilePart,
+    ImagePart,
+    TextPart,
+    VideoPart,
+    part_from_any,
+    part_from_dict,
+    part_from_string,
+)
 from promptkit.core.context import Context
 from promptkit.core.model_action.caution_related.caution import (
     Caution,
@@ -140,7 +151,6 @@ from promptkit.core.steps.actions.chat_util import (
 from promptkit.core.steps.chat import Deliverable, ChatWorkflow, chat_workflow
 from promptkit.core.steps import (
     BoundStep,
-    Bool,
     Break,
     Case,
     Classify,
@@ -178,8 +188,6 @@ from promptkit.core.steps import (
     DoWhileStep,
     Echo,
     EchoStep,
-    File,
-    FileRef,
     For,
     ForEach,
     ForEachStep,
@@ -188,30 +196,23 @@ from promptkit.core.steps import (
     Function,
     FunctionDef,
     FunctionStep,
-    Generate,
     Goto,
     GotoStep,
     If,
     IfStep,
-    ImageGen,
-    ImageUnderstand,
     Inc,
     Label,
     LabelStep,
     LLMStep,
+    ImageGenStep,
+    VideoGenStep,
+    STTStep,
+    TTSStep,
     MemoryStep,
     MessageStep,
-    Multimodal,
-    MultimodalStep,
-    TextGen,
-    Understand,
     UseMemory,
-    VideoGen,
-    VideoUnderstand,
     NewVar,
     Number,
-    Or,
-    PyObj,
     Read,
     ReadExpr,
     ReadFile,
@@ -233,7 +234,6 @@ from promptkit.core.steps import (
     Str,
     Switch,
     SwitchStep,
-    Time,
     Var,
     VarDecl,
     VarType,
@@ -271,6 +271,16 @@ __all__ = [
     "coerce_steps",
     # 提示词（从 prompt 模块再导出，方便 `from core import *`）
     "Prompt",
+    # 多模态内容部件
+    "ContentPart",
+    "TextPart",
+    "ImagePart",
+    "AudioPart",
+    "VideoPart",
+    "FilePart",
+    "part_from_string",
+    "part_from_dict",
+    "part_from_any",
     # 控制流
     "If",
     "IfStep",
@@ -350,13 +360,8 @@ __all__ = [
     "Dec",
     "CompoundAssignStep",
     "VarType",
-    "FileRef",
     "Number",
     "Str",
-    "File",
-    "PyObj",
-    "Bool",
-    "Time",
     "Expr",
     "as_expr",
     "Const",
@@ -372,16 +377,11 @@ __all__ = [
     "Len",
     # 步骤
     "LLMStep",
+    "ImageGenStep",
+    "VideoGenStep",
+    "STTStep",
+    "TTSStep",
     "MessageStep",
-    "MultimodalStep",
-    "Multimodal",
-    "Generate",
-    "Understand",
-    "ImageGen",
-    "ImageUnderstand",
-    "VideoGen",
-    "VideoUnderstand",
-    "TextGen",
     "FunctionStep",
     # 长期记忆（读 / 写 / 忘 / 召回 / 组合）
     "ReadMemory",

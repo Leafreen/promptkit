@@ -42,13 +42,19 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_EXTRA_BODY: Dict[str, object] = {"thinking": {"type": "enabled"}}
 
-# ---------------- 多模态：豆包方舟（默认实现） ----------------
-# 视频生成用 Seedance，图片生成用 Seedream，文本 / 图片 / 视频理解走方舟
-# Chat Completions。端点与模型名都可以在 Agent(..., multimodal_*) 里覆盖。
+# ---------------- 豆包（火山方舟） ----------------
+# 对话 / 多模态理解走 Ark 的 OpenAI 兼容端点；视频生成走 Seedance
+DOUBAO_API_KEY_ENV = "DOUBAO_API_KEY"
 DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DOUBAO_TEXT_MODEL = "doubao-seed-1-6-250615"
 DOUBAO_IMAGE_MODEL = "doubao-seedream-3-0-t2i-250415"
 DOUBAO_VIDEO_MODEL = "doubao-seedance-1-0-pro-250528"
+
+# ---------------- 通用多模态网关 ----------------
+# 所有模态的生成 / 理解统一走这一个 HTTP 接口（见 client_sys/multimodal.py）
+MULTIMODAL_BASE_URL = ""
+MULTIMODAL_ENDPOINT = "/v1/media/generate"
+MULTIMODAL_TIMEOUT = 600.0
 
 
 def load_env_file(path: str = ENV_FILE) -> None:

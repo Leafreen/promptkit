@@ -10,7 +10,7 @@ Python 不能重载 `and` / `or` / `not`，所以用 `&` / `|` / `~` 代替。
 from __future__ import annotations
 
 import operator
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, Protocol, cast
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, Optional, Protocol, cast
 
 from promptkit.core.errors import UndefinedVariable
 
@@ -209,12 +209,25 @@ class VarExpr(Expr):
 
     支持点路径：`Var("intent.label")`、`Var("hits.0.text")`。
     精确同名优先——真的有个变量叫 "a.b" 也不会被拆开。
+
+    `type` 是可选的运行时类型标注（`Var("img", type=ImagePart)`）：
+    只在 `Prompt.render()` 解析多模态内容时校验，不匹配抛 `TypeError`；
+    普通求值不看它（字符串路径会在渲染时按扩展名推断成部件再校验）。
     '''
 
-    def __init__(self, var: str):
+    def __init__(self, var: str, type: "Optional[type]" = None):  # noqa: A002
         if not isinstance(var, str) or not var:
             raise TypeError(f"变量名必须是非空字符串，得到 {var!r}")
         self.var = var
+        self.type = type
+
+    def check_type(self, value: object) -> None:
+        '''声明了 `type` 时校验值的类型，不匹配抛 `TypeError`。'''
+        if self.type is not None and not isinstance(value, self.type):
+            raise TypeError(
+                f"变量 {self.var!r} 期望 {self.type.__name__}，"
+                f"实际是 {type(value).__name__}"
+            )
 
     def eval(self, context: Context) -> object:
         if self.var not in context and "." not in self.var:
