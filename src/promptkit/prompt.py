@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Union
 import re
 
 # 注意：core.content / VarExpr 在 _render_part 里惰性 import ——
@@ -8,6 +8,9 @@ import re
 if TYPE_CHECKING:
     from promptkit.core.content import ContentPart
     from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr
+
+#: 没传 content 的哨兵（不能 import core._missing：那会触发 core/__init__ 循环）
+_UNSET = object()
 
 # 可用的提示词角色
 SUPPORTED_ROLES = ("system", "user", "assistant")
@@ -110,7 +113,7 @@ def render_text(
     return pattern.sub(replace, text)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Prompt:
     '''
     提示词对象，支持可变提示词和多模态内容。
@@ -119,6 +122,14 @@ class Prompt:
     - 支持点路径：{{user.name}} / {{hits.0.text}}
     - 使用 render(**kwargs) 渲染该对象，返回 OpenAI 支持的消息格式
     - `content` 为字符串时行为不变；为列表时按部件渲染（见 `_render_part`）
+
+    构造方式（role 省略时默认 "user"）：
+
+        Prompt(role="user", content="你好，{{name}}")
+        Prompt("user", "你好，{{name}}")          # 角色在前，兼容位置参数
+        Prompt(content=ImagePart(Var("img")))     # 单个部件
+        Prompt(TextPart("描述这张图"), ImagePart(Var("img")))   # 多个部件
+        Prompt(ImagePart(Var("img")))             # 只有一个图片部件
 
     示例：
         >>> Prompt(role="user", content="你好，{{name}}").render(name="小明")
@@ -130,6 +141,9 @@ class Prompt:
         ... ]).render(photo="cat.png")
         {'role': 'user', 'content': [{'type': 'text', 'text': '描述这张图'},
                                      {'type': 'image', 'source': 'cat.png', ...}]}
+
+        >>> Prompt(ImagePart(Var("img"))).render(img="cat.png")
+        {'role': 'user', 'content': [{'type': 'image', 'source': 'cat.png', ...}]}
     '''
 
     role: str
@@ -137,6 +151,46 @@ class Prompt:
     # 方便用户写 Prompt(content=[TextPart(...), Var("x")])；
     # 运行时 _render_part 只处理 VarExpr 和 ContentPart，其他的进来直接 TypeError。
     content: "Union[str, List[Union[str, ContentPart, Expr]]]"
+
+    def __init__(
+        self,
+        *args: object,
+        role: Optional[str] = None,
+        content: object = _UNSET,
+    ) -> None:
+        '''支持三种写法：`(role, content)` 位置参数、`role=/content=`、
+        以及直接传入若干内容部件（role 默认 "user"）。
+        '''
+        rest = list(args)
+        resolved_role = "user" if role is None else role
+        if (
+            role is None
+            and rest
+            and isinstance(rest[0], str)
+            and rest[0] in SUPPORTED_ROLES
+        ):
+            resolved_role = rest[0]
+            rest.pop(0)
+
+        if content is _UNSET:
+            if not rest:
+                content = ""
+            elif len(rest) == 1:
+                content = rest[0]
+            else:
+                content = rest
+        elif rest:
+            raise TypeError("Prompt 的 content 不能同时用位置参数和关键字参数传入")
+
+        # 统一成「字符串 or 列表」，下游（LLMStep.build_prompt 等）可以直接展开
+        # （不能对 content 用 != 比较：Expr 重载了 __ne__，会返回表达式而不是 bool）
+        if isinstance(content, tuple):
+            content = list(content)
+        elif not isinstance(content, (str, list)):
+            content = [content]
+
+        object.__setattr__(self, "role", resolved_role)
+        object.__setattr__(self, "content", content)
 
     def render(self, **kwargs: object) -> Dict[str, Any]:
         '''渲染该对象，返回支持的消息格式。'''
@@ -146,8 +200,16 @@ class Prompt:
             )
         if isinstance(self.content, str):
             return {"role": self.role, "content": render_text(self.content, kwargs)}
-        parts = [self._render_part(item, kwargs) for item in self.content]
+        parts = [self._render_part(item, kwargs) for item in self._items()]
         return {"role": self.role, "content": parts}
+
+    def _items(self) -> List[Any]:
+        '''把 content 统一成部件列表（单个部件也包成列表）。'''
+        if isinstance(self.content, list):
+            return list(self.content)
+        if isinstance(self.content, tuple):
+            return list(self.content)
+        return [self.content]
 
     def _render_part(
         self, item: "Union[str, ContentPart, Expr]", kwargs: Mapping[str, object]
@@ -158,6 +220,7 @@ class Prompt:
         - `Var(...)`（VarExpr）：解析成 `ContentPart`；解析出字符串时按扩展名推断
           （`.png` -> ImagePart，`.pdf` -> FilePart，其他 -> TextPart），
           声明了 `type=` 时校验，不匹配抛 `TypeError`
+        - `ImagePart(Var("img"))` 这类部件：解析内部的 Var，再渲染
         - 其他部件：原样保留
         - SetStep / CallExpr 等非 VarExpr 的 Expr：抛 `TypeError`（Prompt 里不该
           出现赋值或函数调用）
@@ -185,7 +248,69 @@ class Prompt:
             item = TextPart(text=item)
         if isinstance(item, TextPart):
             return TextPart(text=render_text(item.text, kwargs)).to_dict()
-        return item.to_dict()
+        return self._resolve_part(item, kwargs).to_dict()
+
+    def _resolve_part(
+        self, item: "ContentPart", kwargs: Mapping[str, object]
+    ) -> "ContentPart":
+        '''解析部件内部的 `Var(...)`（目前支持媒体部件的 `source`）。
+
+        `ImagePart(Var("img"))`：变量是字符串时按 URL / 本地路径处理；
+        是同类部件（ImagePart）时直接取它的来源字段。详细原因见测试。
+        '''
+        from dataclasses import replace
+        import mimetypes
+
+        from promptkit.core.content import TextPart
+        from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr
+
+        if isinstance(item, TextPart):
+            return item
+
+        # content 的字段类型标注是 str，但运行时允许 Var(...)，这里按 Any 处理
+        source: Any = getattr(item, "source", None)
+        if not isinstance(source, VarExpr):
+            if isinstance(source, Expr):
+                raise TypeError(
+                    f"{type(item).__name__} 的 source 只接受字符串或 Var(...)，"
+                    f"不能放 {type(source).__name__}"
+                )
+            return item
+
+        value = resolve_variable(source.var, kwargs)
+        if isinstance(value, TextPart):
+            raise TypeError(
+                f"变量 {source.var!r} 是文本部件，不能当作 {type(item).__name__} 的来源"
+            )
+        if hasattr(value, "source"):
+            if not isinstance(value, type(item)):
+                raise TypeError(
+                    f"变量 {source.var!r} 期望 {type(item).__name__}，"
+                    f"实际是 {type(value).__name__}"
+                )
+            return replace(
+                item,
+                source=value.source,
+                source_type=value.source_type,
+                media_type=item.media_type or value.media_type,
+            )
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise ValueError(
+                    f"变量 {source.var!r} 是空字符串，不能当作 {type(item).__name__} 的来源"
+                )
+            guessed, _ = mimetypes.guess_type(text.split("?")[0])
+            return replace(
+                item,
+                source=value,
+                source_type="url" if text.startswith(("http://", "https://")) else "file",
+                media_type=item.media_type or guessed,
+            )
+        raise TypeError(
+            f"变量 {source.var!r} 的类型是 {type(value).__name__}，"
+            f"不能当作 {type(item).__name__} 的来源"
+        )
 
     def _render_text(self, text: str, kwargs: Mapping[str, object]) -> str:
         '''渲染文本，替换其中的变量占位符。'''

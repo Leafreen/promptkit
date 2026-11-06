@@ -3,7 +3,7 @@ import pytest
 
 from promptkit.client_sys.client import UnsupportedModality
 from promptkit.client_sys.multimodal import Media
-from promptkit.core.content import AudioPart, ImagePart, VideoPart
+from promptkit.core.content import AudioPart, ImagePart, TextPart, VideoPart
 from promptkit.core.context import Context
 from promptkit.core.steps.actions.multimodal import (
     ImageGenStep,
@@ -11,6 +11,8 @@ from promptkit.core.steps.actions.multimodal import (
     TTSStep,
     VideoGenStep,
 )
+from promptkit.core.steps.logics.var import Var
+from promptkit.prompt import Prompt
 
 from .conftest import FakeMultimodalClient
 
@@ -47,6 +49,39 @@ def test_image_gen_step_requires_capability():
         ImageGenStep("prompt", "image", client=client).execute(context)
 
 
+def test_image_gen_step_accepts_prompt_with_image_input():
+    '''以图生图：Prompt 的文本当提示词，图片部件当参考输入。'''
+    client = FakeMultimodalClient({("image", "generate")})
+    context = Context(data={"ref": "https://example.com/ref.png"})
+    step = ImageGenStep(
+        Prompt(TextPart(text="把这只猫变成水彩画"), ImagePart(Var("ref"))),
+        "image",
+        client=client,
+    )
+    step.execute(context)
+
+    _, modality, prompt, params = client.requests[0]
+    assert (modality, prompt) == ("image", "把这只猫变成水彩画")
+    assert isinstance(params["inputs"], tuple)
+    assert params["inputs"][0].url == "https://example.com/ref.png"
+
+
+def test_image_gen_step_accepts_prompt_in_context():
+    '''prompt_key 指向 Context 里的 Prompt 也可以。'''
+    client = FakeMultimodalClient({("image", "generate")})
+    context = Context(
+        data={
+            "ref": "https://example.com/ref.png",
+            "spec": Prompt(ImagePart(Var("ref")), TextPart(text="改成油画风格")),
+        }
+    )
+    ImageGenStep("spec", "out", client=client).execute(context)
+
+    _, _, prompt, params = client.requests[0]
+    assert prompt == "改成油画风格"
+    assert params["inputs"][0].url == "https://example.com/ref.png"
+
+
 def test_video_gen_step_writes_video_part():
     client = FakeMultimodalClient(
         {("video", "generate")},
@@ -60,6 +95,26 @@ def test_video_gen_step_writes_video_part():
     assert video.source == "https://example.com/cat.mp4"
     _, _, _, params = client.requests[0]
     assert params["duration"] == 5
+
+
+def test_video_gen_step_accepts_prompt_with_image_input():
+    '''以图生视频：图片部件作为首帧 / 参考图。'''
+    client = FakeMultimodalClient(
+        {("video", "generate")},
+        generate_media=Media.from_url("https://example.com/cat.mp4"),
+    )
+    context = Context(data={"ref": "https://example.com/ref.png"})
+    VideoGenStep(
+        Prompt(TextPart(text="让猫动起来"), ImagePart(Var("ref"))),
+        "video",
+        client=client,
+        duration=5,
+    ).execute(context)
+
+    _, modality, prompt, params = client.requests[0]
+    assert (modality, prompt) == ("video", "让猫动起来")
+    assert params["duration"] == 5
+    assert params["inputs"][0].url == "https://example.com/ref.png"
 
 
 def test_stt_step_writes_text():

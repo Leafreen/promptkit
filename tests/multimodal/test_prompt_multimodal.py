@@ -82,3 +82,51 @@ def test_part_from_any_string_pdf_becomes_file_part():
     part = part_from_any("report.pdf")
     assert part.type == "file"
     assert part.source_type == "file"
+
+
+def test_image_part_can_wrap_var():
+    '''`Prompt(ImagePart(Var("img")))`：变量在 render 时才解析。'''
+    prompt = Prompt(ImagePart(Var("img")))
+    rendered = prompt.render(img="https://example.com/cat.png")
+
+    assert rendered["role"] == "user"
+    assert rendered["content"] == [
+        {
+            "type": "image",
+            "source": "https://example.com/cat.png",
+            "source_type": "url",
+            "media_type": "image/png",
+        }
+    ]
+
+
+def test_image_part_wrapping_local_path_var():
+    prompt = Prompt(ImagePart(Var("img")))
+    rendered = prompt.render(img="cat.png")
+    assert rendered["content"][0]["source_type"] == "file"
+
+
+def test_image_part_wrapping_image_part_var():
+    '''变量本身已经是 ImagePart 时，沿用它的来源字段。'''
+    image = ImagePart(source="aGk=", source_type="base64", media_type="image/png")
+    prompt = Prompt(ImagePart(Var("img")))
+    assert prompt.render(img=image)["content"] == [image.to_dict()]
+
+
+def test_prompt_with_multiple_parts_and_no_role():
+    '''`Prompt(TextPart(...), ImagePart(...))`：role 默认 user。'''
+    prompt = Prompt(
+        TextPart(text="把这只猫变成水彩画"),
+        ImagePart(Var("ref")),
+    )
+    rendered = prompt.render(ref="https://example.com/ref.png")
+
+    assert rendered["role"] == "user"
+    assert rendered["content"][0] == {"type": "text", "text": "把这只猫变成水彩画"}
+    assert rendered["content"][1]["source"] == "https://example.com/ref.png"
+
+
+def test_prompt_accepts_single_part_as_content_kwarg():
+    prompt = Prompt(content=ImagePart(Var("img")))
+    assert isinstance(prompt.content, list)
+    assert prompt.render(img="a.png")["content"][0]["type"] == "image"

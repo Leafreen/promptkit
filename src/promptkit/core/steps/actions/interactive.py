@@ -379,10 +379,18 @@ class SaveStep(Step):
         Save(Var("报告"), file="report.md", append=True)
         Save(Var("info"), file="info.json", format="json")
 
+        # 媒体部件（ImagePart / AudioPart / VideoPart / FilePart）直接落盘：
+        Save(Var("cat_image"), file="cat.png")
+
+        # 路径支持 {{变量}}，循环里可以每轮写不同文件：
+        Save(Var("cat_image"), file="cats/cat_{{i}}.png")
+
     几个约定：
 
     - `format="text"`（默认）一行一个值，会被 `str()` 转一遍
     - `format="json"` 只接受**一个**值，用 `json.dumps` 写（dict / Pydantic 都行）
+    - 只有一个值且它是媒体部件时，按**二进制**写入该媒体，不再当文本
+    - `file` 里的 `{{i}}` 在保存时按上下文展开
     - 写的是 **UTF-8**
     - 父目录不存在会**自动创建**
     - 文本模式末尾补一个换行（除非本来就是空字符串）
@@ -412,15 +420,44 @@ class SaveStep(Step):
         text = "\n".join(str(value.eval(context)) for value in self.values)
         return text + "\n" if text else ""
 
+    def _media_value(self, context: Context) -> object | None:
+        '''只有一个值、且它是媒体部件 / Media 时，返回它用于二进制保存。'''
+        if self.format != "text" or len(self.values) != 1:
+            return None
+        from promptkit.client_sys.multimodal import Media
+        from promptkit.core.content import AudioPart, FilePart, ImagePart, VideoPart
+
+        value = self.values[0].eval(context)
+        if isinstance(value, (ImagePart, AudioPart, VideoPart, FilePart, Media)):
+            return value
+        return None
+
+    def _file_path(self, context: Context) -> str:
+        '''把文件路径里的 `{{var}}` 按当前上下文展开。'''
+        from promptkit.prompt import render_text
+
+        return render_text(self.file, context.to_dict(), allow_dollar=False)
+
     def execute(self, context: Context) -> None:
+        path = self._file_path(context)
+        media = self._media_value(context)
+        if media is not None:
+            if self.append:
+                raise ValueError("append=True 不能用于媒体文件，二进制无法按行追加")
+            from promptkit.core.steps.actions.multimodal import _media_of
+
+            _media_of(media).save(path)
+            context.trace.append(f"{self.name}:{path}")
+            return
+
         text = self._as_text(context)
         _write_text(
-            self.file,
+            path,
             text,
             append=self.append,
             encoding=current_encoding(self.encoding),
         )
-        context.trace.append(f"{self.name}:{self.file}")
+        context.trace.append(f"{self.name}:{path}")
 
     def describe(self) -> str:
         parts = ", ".join(repr(value) for value in self.values)

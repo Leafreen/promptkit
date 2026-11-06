@@ -328,6 +328,7 @@ from promptkit.core import (  # noqa: E402
     Step,
     Read,
     ReadFile,
+    RecursionLimitExceeded,
     Save,
     SaveHistory,
     SaveJSON,
@@ -335,6 +336,7 @@ from promptkit.core import (  # noqa: E402
     SaveStep,
     Str,
     Switch,
+    ThisFunc,
     UndefinedVariable,
     UnknownLabel,
     Var,
@@ -3664,6 +3666,59 @@ class TestFunctionReturn(PromptkitTestCase):
         ctx = Workflow(Number("n"), F()).run()
         self.assertEqual(ctx["n"], 42)
 
+    # ---------------- 位置参数 / ThisFunc 递归 ----------------
+    def test_positional_arguments(self):
+        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        self.assertEqual(Workflow(Set("s", Add(1, 2).result)).run()["s"], 3)
+        self.assertEqual(Workflow(Set("s", Add(a=1, b=2).result)).run()["s"], 3)
+
+    def test_positional_and_keyword_conflict_raises(self):
+        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        with self.assertRaises(ArgumentError):
+            Add(1, a=2)
+
+    def test_too_many_positional_arguments_raises(self):
+        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        with self.assertRaises(ArgumentError):
+            Add(1, 2, 3)
+
+    def test_this_func_recursion(self):
+        Factorial = Function(args=("n",), name="factorial").Do(
+            If(Var("n") == 0).Then(Return(1)).Else(
+                Return(Var("n") * ThisFunc(Var("n") - 1).result)
+            )
+        )
+        self.assertEqual(Workflow(Set("r", Factorial(5).result)).run()["r"], 120)
+        self.assertEqual(Workflow(Set("r", Factorial(0).result)).run()["r"], 1)
+
+    def test_this_func_resolves_the_innermost_function(self):
+        Inner = Function(args=("n",), name="inner").Do(
+            If(Var("n") == 0).Then(Return(0)).Else(
+                Return(1 + ThisFunc(Var("n") - 1).result)
+            )
+        )
+        Outer = Function(args=("n",), name="outer").Do(
+            If(Var("n") <= 0).Then(Return(0)).Else(
+                Return(ThisFunc(Var("n") - 1).result)
+            )
+        )
+        # ThisFunc 在 Outer 里指 Outer，在 Inner 里指 Inner
+        self.assertEqual(Workflow(Set("r", Outer(2).result)).run()["r"], 0)
+        self.assertEqual(Workflow(Set("r", Inner(3).result)).run()["r"], 3)
+
+    def test_this_func_outside_a_function_raises(self):
+        with self.assertRaises(ArgumentError) as cm:
+            Workflow(Set("r", ThisFunc(1).result)).run()
+        self.assertIn("Function", str(cm.exception))
+
+    def test_recursion_depth_limit(self):
+        Boom = Function(args=("n",), name="boom").Do(
+            Return(ThisFunc(Var("n") + 1).result)
+        )
+        with using_settings(max_recursion_depth=5):
+            with self.assertRaises(RecursionLimitExceeded):
+                Workflow(Set("r", Boom(0).result)).run()
+
 
 def fake_message(**kwargs):
     '''造一个假的 ChatCompletion 响应。'''
@@ -6360,6 +6415,72 @@ class TestFileIO(PromptkitTestCase):
         ctx = Workflow(Save("x", file=target)).run()
         self.assertIn(target, " ".join(ctx.trace))
 
+    # ---------------- Save：媒体直接落盘 ----------------
+    def test_save_writes_media_file_bytes(self):
+        '''ImagePart(file) 直接按二进制复制到目标路径。'''
+        from promptkit.core.content import ImagePart
+
+        payload = b"\x89PNG\r\n\x1a\nhello"
+        source = self.path("source.png")
+        with open(source, "wb") as handle:
+            handle.write(payload)
+        target = self.path("cat.png")
+
+        Workflow(
+            Save(
+                ImagePart(source=source, source_type="file", media_type="image/png"),
+                file=target,
+            )
+        ).run()
+
+        with open(target, "rb") as handle:
+            self.assertEqual(handle.read(), payload)
+
+    def test_save_writes_media_base64_bytes(self):
+        '''ImagePart(base64) 解码后写入目标文件。'''
+        import base64 as b64
+
+        from promptkit.core.content import ImagePart
+
+        payload = b"image-bytes"
+        target = self.path("cat.png")
+        part = ImagePart(
+            source=b64.b64encode(payload).decode("ascii"),
+            source_type="base64",
+            media_type="image/png",
+        )
+
+        Workflow(Save(part, file=target)).run()
+
+        with open(target, "rb") as handle:
+            self.assertEqual(handle.read(), payload)
+
+    def test_save_media_rejects_append(self):
+        from promptkit.core.content import ImagePart
+
+        target = self.path("cat.png")
+        with self.assertRaises(ValueError):
+            Workflow(
+                Save(
+                    ImagePart(source="aGk=", source_type="base64"),
+                    file=target,
+                    append=True,
+                )
+            ).run()
+
+    def test_save_renders_file_template_in_loop(self):
+        '''循环里 file="{{i}}" 每轮展开成不同路径，而不是一直覆盖同一个文件。'''
+        target = self.path("cat_{{i}}.txt")
+        Workflow(
+            For(NewVar("i", default=0), Var("i") < 3, Inc("i")).Do(
+                Save("v", file=target)
+            )
+        ).run()
+
+        for index in range(3):
+            expected = self.path(f"cat_{index}.txt")
+            self.assertTrue(os.path.isfile(expected), expected)
+
     # ---------------- ReadFile ----------------
     def test_read_file_strips_by_default(self):
         target = self.path("a.txt")
@@ -6533,6 +6654,7 @@ class TestGlobalSettings(PromptkitTestCase):
     def test_defaults(self):
         self.assertEqual(settings.max_iterations, 100)
         self.assertEqual(settings.max_for_iterations, 10000)
+        self.assertEqual(settings.max_recursion_depth, 100)
         self.assertEqual(settings.max_steps, 50)
         self.assertEqual(settings.max_jumps, 10000)
         self.assertEqual(settings.max_retries, 2)

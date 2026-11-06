@@ -17,6 +17,10 @@ class LoopLimitExceeded(WorkflowError):
     '''While 循环超过了 max_iterations，通常意味着循环变量没被更新。'''
 
 
+class RecursionLimitExceeded(WorkflowError):
+    '''函数递归超过了 max_recursion_depth，通常意味着缺少终止条件。'''
+
+
 class ArgumentError(WorkflowError, TypeError):
     '''Function 定义/调用时的参数不匹配。'''
 

@@ -17,7 +17,13 @@ from typing import (
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
     from promptkit.types import ToolLike
-from promptkit.core.errors import ArgumentError, ReturnSignal
+from promptkit.core.errors import (
+    ArgumentError,
+    RecursionLimitExceeded,
+    ReturnSignal,
+    UndefinedVariable,
+)
+from promptkit.core.settings import settings
 from promptkit.core.steps.logics.expr_sys.expr import AgentReplyExpr, Expr, as_expr
 from promptkit.core.steps.interface import (
     Step,
@@ -121,21 +127,38 @@ class FunctionDef:
         self.body = steps
         return self
 
-    def __call__(self, **kwargs: object) -> "BoundStep":
-        '''绑定参数，得到一个可执行 / 可当表达式用的步骤。'''
-        unknown = sorted(set(kwargs) - set(self.args))
+    def __call__(self, *args: object, **kwargs: object) -> "BoundStep":
+        '''绑定参数，得到一个可执行 / 可当表达式用的步骤。
+
+        参数可以按 `args` 声明的顺序位置传入，也可以用关键字：
+        `Add(1, 2)` 等价于 `Add(a=1, b=2)`。位置参数和关键字不能重复。
+        '''
+        if len(args) > len(self.args):
+            raise ArgumentError(
+                f"{self.name}() 最多接受 {len(self.args)} 个位置参数，"
+                f"收到 {len(args)} 个；它声明的参数是 {list(self.args)}"
+            )
+        bound = dict(zip(self.args, args))
+        duplicated = sorted(set(bound) & set(kwargs))
+        if duplicated:
+            raise ArgumentError(
+                f"{self.name}() 的参数 {duplicated} 同时按位置和关键字传入"
+            )
+        bound.update(kwargs)
+
+        unknown = sorted(set(bound) - set(self.args))
         if unknown:
             raise ArgumentError(
                 f"{self.name}() 不接受的参数 {unknown}；"
                 f"它声明的参数是 {list(self.args)}"
             )
-        missing = [a for a in self.args if a not in kwargs]
+        missing = [a for a in self.args if a not in bound]
         if missing:
             raise ArgumentError(
                 f"{self.name}() 缺少参数 {missing}；"
                 f"它声明的参数是 {list(self.args)}"
             )
-        return BoundStep(self, dict(kwargs))
+        return BoundStep(self, bound)
 
     def __repr__(self) -> str:
         return f"<Function {self.name}({', '.join(self.args)})>"
@@ -189,6 +212,14 @@ class BoundStep(Step):
         self.output_key = definition.output_key
 
     def execute(self, context: Context) -> None:
+        limit = settings.max_recursion_depth
+        if len(context.function_stack) >= limit:
+            raise RecursionLimitExceeded(
+                f"函数 {self.name} 的调用层数超过 {limit}；"
+                "请检查递归的终止条件，或用 "
+                "using_settings(max_recursion_depth=...) 调整上限"
+            )
+
         # 参数只在函数体内部可见（词法作用域），执行完恢复原值
         saved: Dict[str, object] = {}
         for key, raw in self.kwargs.items():
@@ -199,12 +230,14 @@ class BoundStep(Step):
             context[key] = value
 
         returned: object = _MISSING
+        context.function_stack.append(self.definition)
         try:
             for step in self.definition.body:
                 execute_step(step, context)
         except ReturnSignal as signal:
             returned = signal.value
         finally:
+            context.function_stack.pop()
             for key, old in saved.items():
                 if old is _MISSING:
                     context.data.pop(key, None)
@@ -235,6 +268,85 @@ class BoundStep(Step):
 
     def __repr__(self) -> str:
         return self.describe()
+
+
+def _current_function(context: Context) -> FunctionDef:
+    '''取当前正在执行的函数定义；ThisFunc 只能在 Function 体内用。'''
+    if not context.function_stack:
+        raise ArgumentError(
+            "ThisFunc 只能在 Function(...).Do(...) 的函数体里使用"
+        )
+    return cast(FunctionDef, context.function_stack[-1])
+
+
+class ThisFuncCall(Step):
+    '''对「当前正在执行的函数」的递归调用。
+
+        Factorial = Function(args=("n",), name="factorial").Do(
+            If(Var("n") == 0).Then(Return(1)).Else(
+                Return(Var("n") * ThisFunc(Var("n") - 1).result)
+            )
+        )
+
+    显式使用 `.result` 时它当表达式用（执行递归并取返回值）；
+    不加 `.result` 时它就是一个普通步骤，执行后把结果写进 output_key。
+    '''
+
+    name = "this_func"
+
+    def __init__(self, *args: object, **kwargs: object):
+        self.args = args
+        self.kwargs = kwargs
+
+    def _bound(self, context: Context) -> "BoundStep":
+        return _current_function(context)(*self.args, **self.kwargs)
+
+    def execute(self, context: Context) -> None:
+        self._bound(context).execute(context)
+
+    @property
+    def result(self) -> "ThisFuncExpr":
+        '''作为表达式使用：先递归执行，再取返回值。'''
+        return ThisFuncExpr(self.args, self.kwargs)
+
+    def describe(self) -> str:
+        positional = ", ".join(repr(arg) for arg in self.args)
+        keywords = ", ".join(f"{key}={value!r}" for key, value in self.kwargs.items())
+        joined = ", ".join(part for part in (positional, keywords) if part)
+        return f"ThisFunc({joined})"
+
+    def __repr__(self) -> str:
+        return self.describe()
+
+
+class ThisFuncExpr(Expr):
+    '''`ThisFunc(...).result`：运行时解析当前函数并执行递归调用。'''
+
+    def __init__(self, args: tuple, kwargs: Dict[str, object]):
+        self.args = args
+        self.kwargs = kwargs
+
+    def eval(self, context: Context) -> object:
+        bound = _current_function(context)(*self.args, **self.kwargs)
+        definition = bound.definition
+        bound.execute(context)
+        if definition.output_key not in context:
+            raise UndefinedVariable(
+                f"ThisFunc 调用 {definition.name}() 后没有返回值；"
+                "递归函数里请用 Return(...) 明确返回值"
+            )
+        return context[definition.output_key]
+
+    def __repr__(self) -> str:
+        positional = ", ".join(repr(arg) for arg in self.args)
+        keywords = ", ".join(f"{key}={value!r}" for key, value in self.kwargs.items())
+        joined = ", ".join(part for part in (positional, keywords) if part)
+        return f"ThisFunc({joined}).result"
+
+
+def ThisFunc(*args: object, **kwargs: object) -> ThisFuncCall:  # noqa: N802
+    '''递归调用当前函数：`ThisFunc(...)` / `ThisFunc(...).result`。'''
+    return ThisFuncCall(*args, **kwargs)
 
 
 def Function(  # noqa: N802 - 跟随 DSL 命名

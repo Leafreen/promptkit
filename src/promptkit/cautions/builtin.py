@@ -35,6 +35,9 @@ __all__ = [
     "SchemaHint",
     "JsonSchemaHint",
     "Role",
+    "Style",
+    "NoText",
+    "Quality",
     "Custom",
 ]
 
@@ -167,6 +170,49 @@ class Role(Caution):
 
     def to_text(self) -> str:
         return f"你现在扮演：{self.role}。"
+
+
+class Style(Caution):
+    '''指定画面 / 作品风格，适合生图、生视频、文生文创作。
+
+        Style("水彩画")            -> 风格：水彩画。
+        Style("吉卜力动画", lang="中文")
+    '''
+
+    def __init__(self, style: str, lang: str = ""):
+        self.style = style
+        self.lang = lang
+
+    def to_text(self) -> str:
+        text = f"风格要求：{self.style}"
+        if self.lang:
+            text += f"，文案使用{self.lang}"
+        return text + "。"
+
+
+class NoText(Caution):
+    '''画面里不要出现文字（生图 / 生视频场景特别常用）。'''
+
+    def to_text(self) -> str:
+        return "画面中不要出现任何文字、水印、字母或数字。"
+
+
+class Quality(Caution):
+    '''画质 / 质量要求。
+
+        Quality()            -> 画质要求：高清。
+        Quality("4K 超高清", "细节丰富")
+    '''
+
+    def __init__(self, level: str = "高清", extra: str = ""):
+        self.level = level
+        self.extra = extra
+
+    def to_text(self) -> str:
+        text = f"画质要求：{self.level}"
+        if self.extra:
+            text += f"，{self.extra}"
+        return text + "。"
 
 
 class SchemaHint(Caution):

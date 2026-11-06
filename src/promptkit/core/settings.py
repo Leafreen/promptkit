@@ -42,6 +42,8 @@ class Settings:
     max_iterations: int = 100
     #: For / ForEach 的迭代上限。遍历通常由数据量决定，给宽一点。
     max_for_iterations: int = 10000
+    #: 函数递归上限。递归最容易缺少终止条件，早点报错比撞 Python 栈上限清晰。
+    max_recursion_depth: int = 100
 
     # ---- 工作流保护 ----
     #: 一个 Workflow 最多几个步骤（构造时检查）
@@ -79,6 +81,7 @@ settings = Settings()
 _POSITIVE_INTS = (
     "max_iterations",
     "max_for_iterations",
+    "max_recursion_depth",
     "max_steps",
     "max_jumps",
     "max_tool_rounds",

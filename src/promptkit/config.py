@@ -15,14 +15,22 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def _default_env_file() -> str:
-    '''默认 .env 查找位置：优先当前工作目录，其次包目录。
+    '''默认 .env 查找位置：当前工作目录 -> src 布局的项目根目录 -> 包目录。
 
-    src 布局下 `.env` 通常放在项目根目录（脚本的 CWD），
-    不再和包代码放在一起；安装后兜底退回包目录。
+    src 布局下 `.env` 通常放在项目根目录（如 `d:\\projects\\promptkit\\.env`），
+    而不是包代码目录；从 IDE 或别的目录运行脚本时 CWD 不一定是项目根目录，
+    所以额外向上找一层 `src/` 的父目录。安装到 site-packages 后不启用这一步。
     '''
     cwd_env = os.path.join(os.getcwd(), ".env")
     if os.path.isfile(cwd_env):
         return cwd_env
+
+    parent = os.path.dirname(PROJECT_ROOT)
+    if os.path.basename(parent) == "src":
+        repo_env = os.path.join(os.path.dirname(parent), ".env")
+        if os.path.isfile(repo_env):
+            return repo_env
+
     return os.path.join(PROJECT_ROOT, ".env")
 
 
@@ -46,9 +54,9 @@ DEFAULT_EXTRA_BODY: Dict[str, object] = {"thinking": {"type": "enabled"}}
 # 对话 / 多模态理解走 Ark 的 OpenAI 兼容端点；视频生成走 Seedance
 DOUBAO_API_KEY_ENV = "DOUBAO_API_KEY"
 DOUBAO_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-DOUBAO_TEXT_MODEL = "doubao-seed-1-6-250615"
-DOUBAO_IMAGE_MODEL = "doubao-seedream-3-0-t2i-250415"
-DOUBAO_VIDEO_MODEL = "doubao-seedance-1-0-pro-250528"
+DOUBAO_TEXT_MODEL = "doubao-seed-2-1-pro-260915"
+DOUBAO_IMAGE_MODEL = "doubao-seedream-5-0-flash-260915"  # flash 版，最低 960x960 像素
+DOUBAO_VIDEO_MODEL = "doubao-seedance-2-5-260628"
 
 # ---------------- 通用多模态网关 ----------------
 # 所有模态的生成 / 理解统一走这一个 HTTP 接口（见 client_sys/multimodal.py）

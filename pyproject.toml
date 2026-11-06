@@ -40,6 +40,7 @@ render = ["rich>=13", "sympy>=1.12"]
 
 # YamlFormatter 需要 pyyaml，其余地方零依赖
 yaml = ["pyyaml>=6"]
+mcp = ["mcp>=1.0"]
 dev = ["pytest>=8", "mypy>=1.10"]
 
 # src 布局：包位于 src/promptkit/，用 packages.find 自动发现全部子包

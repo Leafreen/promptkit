@@ -514,15 +514,43 @@ GENERIC = MultimodalSpec(
         for modality in Modality.known()
         for operation in Operation.known()
     ),
-    aliases=("gateway", "universal", "doubao", "seedance", "ark", "volcengine"),
+    aliases=("gateway", "universal"),
     note="所有模态统一 POST 到同一个 JSON 端点；模型与输出格式由请求参数指定",
 )
 
-#: 兼容旧名字：现在指的就是通用网关
-DOUBAO = GENERIC
+#: 豆包（火山方舟）多模态 —— OpenAI 兼容的方舟端点
+DOUBAO = MultimodalSpec(
+    name="doubao",
+    label="豆包（火山方舟）",
+    kind="doubao",
+    env_vars=(config_module.DOUBAO_API_KEY_ENV, "ARK_API_KEY"),
+    default_base_url=config_module.DOUBAO_BASE_URL,
+    models={
+        "image": config_module.DOUBAO_IMAGE_MODEL,
+        "text": config_module.DOUBAO_TEXT_MODEL,
+        "video": config_module.DOUBAO_VIDEO_MODEL,
+    },
+    capabilities=frozenset(
+        {
+            ("image", "generate"),     # Seedream 文生图
+            ("image", "understand"),   # Chat Completions + vision
+            ("text", "generate"),      # Chat Completions
+            ("text", "understand"),    # Chat Completions
+            ("audio", "generate"),     # TTS
+            ("audio", "understand"),   # STT
+            ("video", "understand"),   # Chat Completions + video_url
+            # ("video", "generate") — Seedance 异步任务格式待确认，暂时不挂
+        }
+    ),
+    aliases=("ark", "volcengine", "seedance"),
+    note="豆包方舟统一端点 /api/v3，文生图走 /images/generations（OpenAI 兼容），视频生成格式待确认",
+)
 
 #: 内置多模态厂商（按展示顺序）
-MULTIMODAL_PROVIDERS: Dict[str, MultimodalSpec] = {GENERIC.name: GENERIC}
+MULTIMODAL_PROVIDERS: Dict[str, MultimodalSpec] = {
+    GENERIC.name: GENERIC,
+    DOUBAO.name: DOUBAO,
+}
 
 _ALIASES: Dict[str, MultimodalSpec] = {}
 for _spec in MULTIMODAL_PROVIDERS.values():
@@ -532,7 +560,17 @@ for _spec in MULTIMODAL_PROVIDERS.values():
 _FACTORIES: Dict[str, Callable[..., BaseMultimodalClient]] = {}
 
 #: 内置实现认的 `kind`
-_KINDS: Tuple[str, ...] = ("generic",)
+_KINDS: Tuple[str, ...] = ("generic", "doubao")
+
+# ---- 注册 factory ----
+_FACTORIES["doubao"] = lambda **kw: _make_doubao_client(**kw)
+
+
+def _make_doubao_client(**kw: Any) -> "BaseMultimodalClient":
+    '''DoubaoMultimodalClient 工厂（惰性 import，避免 openai 包缺失时炸）。'''
+    from promptkit.client_sys.doubao_multimodal import DoubaoMultimodalClient
+
+    return DoubaoMultimodalClient(**kw)
 
 
 def multimodal_vendor_names() -> list[str]:
@@ -572,16 +610,41 @@ def register_multimodal_provider(
 def resolve_multimodal_api_key(
     vendor: Union[str, MultimodalSpec], api_key: Optional[str] = None
 ) -> str:
-    '''按 `参数 -> 厂商环境变量 -> PROMPTKIT_API_KEY -> .env` 找密钥。'''
+    '''按 `参数 -> 厂商环境变量 -> 豆包/通用 fallback -> PROMPTKIT_API_KEY -> .env` 找密钥。
+
+    豆包是 GENERIC 的 alias，但豆包用户配的是 `DOUBAO_API_KEY`（不是 generic 的
+    `PROMPTKIT_MULTIMODAL_API_KEY`）—— 所以当 vendor 是豆包 alias 时，在
+    generic env_vars 基础上追加豆包的环境变量。
+    '''
     spec = get_multimodal_spec(vendor)
     config_module.load_env_file()
     if api_key:
         return api_key
-    for name in (*spec.env_vars, "PROMPTKIT_API_KEY"):
+
+    names = list(spec.env_vars)
+
+    # 豆包 alias 特殊处理：追加豆包自己的 env vars
+    vendor_str = str(vendor).lower().strip().replace("_", "-")
+    if vendor_str in ("doubao", "ark", "volcengine", "seedance") or spec.name == "doubao":
+        for extra in (config_module.DOUBAO_API_KEY_ENV, "ARK_API_KEY"):
+            if extra not in names:
+                names.append(extra)
+
+    names.append("PROMPTKIT_API_KEY")
+
+    for name in names:
         value = os.environ.get(name)
         if value:
             return value
-    want = " 或 ".join((*spec.env_vars, "PROMPTKIT_API_KEY"))
+
+    # 组装错误消息（只列 spec 的 env_vars + PROMPTKIT_API_KEY，简洁）
+    want_parts = list(spec.env_vars)
+    if spec.name != "generic":
+        want_parts.append("PROMPTKIT_API_KEY")
+    else:
+        want_parts.extend(["DOUBAO_API_KEY", "PROMPTKIT_API_KEY"])
+    want = " 或 ".join(want_parts)
+
     raise ValueError(
         f"没有找到 {spec.label} 的多模态 API Key：请设置环境变量 {want}，"
         f"或在 {config_module.ENV_FILE} 里写一行 {spec.env_vars[0]}=..."
@@ -593,8 +656,40 @@ def resolve_multimodal_target(
     *,
     base_url: Optional[str] = None,
 ) -> Tuple[MultimodalSpec, Optional[str]]:
+    '''按 `参数 -> 环境变量 -> 厂商默认` 找 base_url。
+
+    豆包 alias（doubao / ark / volcengine / seedance）特殊处理：
+    GENERIC.default_base_url 是空（通用网关端点没固定在 config），
+    但豆包 Seedance 和 Chat Completions 共享同一个端点
+    `https://ark.cn-beijing.volces.com/api/v3`，所以把 DOUBAO_BASE_URL
+    当 fallback。
+    '''
     spec = get_multimodal_spec(vendor or DEFAULT_MULTIMODAL_VENDOR)
-    return spec, base_url or spec.default_base_url
+
+    if base_url:
+        return spec, base_url
+
+    # 1. 环境变量优先
+    config_module.load_env_file()
+    env_name = f"PROMPTKIT_MULTIMODAL_BASE_URL_{spec.name.upper()}"
+    from_env = os.environ.get(env_name)
+    if from_env:
+        return spec, from_env
+
+    # 2. 豆包 alias 特判 —— 豆包 Seedance 和 Chat Completions 共享同一端点
+    vendor_str = str(vendor or spec.name).lower().strip().replace("_", "-")
+    if vendor_str in ("doubao", "ark", "volcengine", "seedance"):
+        doubao_base = os.environ.get("DOUBAO_BASE_URL") or config_module.DOUBAO_BASE_URL
+        if doubao_base:
+            return spec, doubao_base
+
+    # 3. Generic fallback —— 用户可能直接设 MULTIMODAL_BASE_URL
+    from_env_generic = os.environ.get("PROMPTKIT_MULTIMODAL_BASE_URL")
+    if from_env_generic:
+        return spec, from_env_generic
+
+    # 4. Spec 默认（可能是空字符串）
+    return spec, spec.default_base_url or None
 
 
 def make_multimodal_client(

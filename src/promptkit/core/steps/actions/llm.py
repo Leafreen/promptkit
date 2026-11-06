@@ -5,12 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, List, Mapping, Optional, Sequence, Type, TypeVar, cast
 
-from promptkit.core.content import TextPart
-
 from promptkit.core.model_action.caution_related.caution import (
     Caution,
     WORKFLOW_CAUTIONS_KEY,
-    join_cautions,
+    apply_cautions,
     resolve_cautions,
 )
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
@@ -94,28 +92,18 @@ class LLMStep(Step, Generic[T]):
         workflow_cautions = (
             context.get(WORKFLOW_CAUTIONS_KEY) if context is not None else None
         )
-        cautions = resolve_cautions(
-            self.cautions,
-            workflow_cautions,
-            use_defaults=self.use_default_cautions,
-        )
-
+        extra: List[object] = []
         if self.auto_schema_enabled() and self.output_model is not None:
             from promptkit.cautions.builtin import JsonSchemaHint
 
-            cautions = [*cautions, JsonSchemaHint(self.output_model)]
-
-        text = join_cautions(cautions)
-        if not text:
-            return self.prompt
-        if isinstance(self.prompt.content, str):
-            return Prompt(
-                role=self.prompt.role,
-                content=f"{self.prompt.content}\n\n{text}",
-            )
-        # 多模态内容：约束作为一个文本部件追加到末尾
-        parts: List[Any] = [*self.prompt.content, TextPart(text=f"\n\n{text}")]
-        return Prompt(role=self.prompt.role, content=parts)
+            extra.append(JsonSchemaHint(self.output_model))
+        return apply_cautions(
+            self.prompt,
+            self.cautions,
+            workflow_cautions,
+            use_defaults=self.use_default_cautions,
+            extra=extra,
+        )
 
     # 旧名字，保留可用
     _build_prompt = build_prompt

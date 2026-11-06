@@ -162,6 +162,47 @@ def resolve_cautions(
     return result
 
 
+def apply_cautions(
+    prompt: Any,
+    step: Any = (),
+    workflow: Any = (),
+    *,
+    use_defaults: bool = True,
+    extra: Any = (),
+) -> Any:
+    '''把约束拼到 `Prompt` 末尾，返回一个新的 `Prompt`（原对象不变）。
+
+    所有「带提示词」的步骤共用这一段逻辑（LLMStep / ImageGenStep /
+    VideoGenStep ...），保证三层合并与拼接方式完全一致：
+
+    - 文本 prompt：约束接在内容末尾，空行隔开
+    - 多模态 prompt（部件列表）：约束作为一个 TextPart 追加到末尾
+
+    `extra` 是 Step 内部临时补的约束（比如 LLMStep 的 auto_schema），
+    排在 Step 自己的约束之后。
+    '''
+    from promptkit.prompt import Prompt
+
+    if not isinstance(prompt, Prompt):
+        raise TypeError(f"apply_cautions 需要 Prompt，得到 {type(prompt).__name__}")
+
+    cautions = resolve_cautions(step, workflow, use_defaults=use_defaults)
+    cautions = [*cautions, *flatten_cautions(extra)]
+
+    text = join_cautions(cautions)
+    if not text:
+        return prompt
+    if isinstance(prompt.content, str):
+        return Prompt(
+            role=prompt.role,
+            content=f"{prompt.content}\n\n{text}",
+        )
+    from promptkit.core.content import TextPart
+
+    parts: List[Any] = [*prompt.content, TextPart(text=f"\n\n{text}")]
+    return Prompt(role=prompt.role, content=parts)
+
+
 __all__ = [
     "Caution",
     "CautionGroup",
@@ -171,4 +212,5 @@ __all__ = [
     "flatten_cautions",
     "join_cautions",
     "resolve_cautions",
+    "apply_cautions",
 ]

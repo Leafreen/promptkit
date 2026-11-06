@@ -27,10 +27,13 @@ from promptkit.cautions.builtin import (
     NoExtraText,
     NoFabrication,
     NoMarkdown,
+    NoText,
     OutputFormat,
+    Quality,
     Role,
     SchemaHint,
     StepByStep,
+    Style,
     Tone,
 )
 from promptkit.cautions.presets import (
@@ -74,6 +77,10 @@ __all__ = [
     # 语气 / 角色
     "Tone",
     "Role",
+    # 生图 / 生视频
+    "Style",
+    "NoText",
+    "Quality",
     # 结构
     "SchemaHint",
     "JsonSchemaHint",

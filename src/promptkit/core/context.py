@@ -21,6 +21,8 @@ class Context:
     data: dict = field(default_factory=dict)
     trace: list = field(default_factory=list)  # 跟踪步骤的执行过程
     types: Dict[str, VarType] = field(default_factory=dict)  # 变量名 -> 类型
+    #: 当前正在执行的函数定义栈，供 ThisFunc 在运行时找到「当前函数」
+    function_stack: list = field(default_factory=list)
 
     # ---------------- 类型转换 ----------------
     def _coerce(self, key: str, value: Any) -> Any:

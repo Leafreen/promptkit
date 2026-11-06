@@ -40,6 +40,9 @@ from promptkit.core.steps.logics.function import (
     FunctionStep,
     Return,
     ReturnStep,
+    ThisFunc,
+    ThisFuncCall,
+    ThisFuncExpr,
 )
 from promptkit.core.steps.logics.goto import Goto, GotoStep, Label, LabelStep
 from promptkit.core.steps.logics.if_step import If, IfStep
@@ -221,4 +224,7 @@ __all__ = [
     "FunctionStep",
     "Return",
     "ReturnStep",
+    "ThisFunc",
+    "ThisFuncCall",
+    "ThisFuncExpr",
 ]
