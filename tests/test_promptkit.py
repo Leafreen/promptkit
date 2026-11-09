@@ -8308,6 +8308,34 @@ class TestCompact(PromptkitTestCase):
         Workflow(Compact(8, keep_recent=2, memory=memory)).run(agent=agent)
         self.assertEqual(memory.values, {})
 
+    def test_compaction_never_leaves_orphan_tool_messages(self):
+        '''切点落在 assistant(tool_calls) 与 tool 之间时要把切点往前挪。
+
+        否则保留段会以孤儿 `role="tool"` 开头，OpenAI 直接 400：
+        tool must be a response to a preceding message with tool_calls。
+        '''
+        agent = FakeChatAgent()
+        agent.history = [
+            {"role": "user", "content": "问题0"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "f"}}
+                ],
+            },
+            {"role": "tool", "content": "结果0", "tool_call_id": "call_1"},
+        ]
+        agent.rebuild()
+        Workflow(Compact(2, keep_recent=1)).run(agent=agent)
+        history = agent.get_history()
+        self.assertEqual(
+            [message["role"] for message in history], ["user", "assistant", "tool"]
+        )
+        self.assertIn("之前对话的摘要", history[0]["content"])
+        self.assertEqual(history[1]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(history[2]["tool_call_id"], "call_1")
+
     def test_compact_dsl_chains_keep_and_to(self):
         memory = RecordingMemory()
         step = Compact(8).Keep(2).To(memory)
@@ -9114,10 +9142,17 @@ class TestHistoryRoundTrip(PromptkitTestCase):
     def test_load_history_keeps_tool_fields(self):
         agent = Agent(api_key="k")
         agent.load_history([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "search"}}
+                ],
+            },
             {"role": "tool", "content": "结果", "tool_call_id": "c1", "name": "search"},
         ])
-        self.assertEqual(agent.history[0]["tool_call_id"], "c1")
-        self.assertEqual(agent.history[0]["name"], "search")
+        self.assertEqual(agent.history[1]["tool_call_id"], "c1")
+        self.assertEqual(agent.history[1]["name"], "search")
 
     def test_load_history_rebuilds_messages(self):
         agent = Agent(api_key="k")
@@ -9168,6 +9203,27 @@ class TestHistoryRoundTrip(PromptkitTestCase):
     def test_normalize_history_rejects_junk(self):
         self.assertEqual(normalize_history(None), [])
         self.assertEqual(normalize_history(42), [])
+
+    def test_normalize_history_drops_orphan_tool_messages(self):
+        '''前面没有 assistant(tool_calls) 的 tool 消息会 400，装历史时丢掉。'''
+        cleaned = normalize_history(
+            [
+                {"role": "user", "content": "查一下"},
+                {"role": "tool", "content": "12", "tool_call_id": "call_1"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_2", "type": "function", "function": {"name": "f"}}
+                    ],
+                },
+                {"role": "tool", "content": "34", "tool_call_id": "call_2"},
+            ]
+        )
+        self.assertEqual(
+            [message["role"] for message in cleaned], ["user", "assistant", "tool"]
+        )
+        self.assertEqual(cleaned[-1]["tool_call_id"], "call_2")
 
 
 class TestSession(PromptkitTestCase):

@@ -711,6 +711,32 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
 
 
 # ============================ 历史压缩 ============================
+#: 这些角色的消息必须紧跟在带 `tool_calls` 的 assistant 消息之后
+_TOOL_ROLES = frozenset({"tool", "function"})
+
+#: 拼摘要时给各种角色用的标签
+_SUMMARY_LABELS = {
+    "user": "用户",
+    "assistant": "助手",
+    "tool": "工具结果",
+    "function": "函数结果",
+}
+
+
+def _safe_cut(history: Sequence[Mapping[str, object]], cut: int) -> int:
+    '''把切点往前挪，别让「保留段」以孤儿 tool 消息开头。
+
+    切点正好落在 `assistant(tool_calls)` 和它的 `tool` 结果之间时，保留段
+    第一条就是 `role="tool"`，而对应的 `tool_calls` 已经进了摘要 ——
+    OpenAI 兼容接口会直接 400（tool must be a response to a preceding
+    message with tool_calls）。往后退到那条 assistant 之前即可，代价只是
+    多保留几条原消息。
+    '''
+    while 0 < cut < len(history) and history[cut].get("role") in _TOOL_ROLES:
+        cut -= 1
+    return cut
+
+
 class CompactStep(Step):
     '''对话历史太长时压缩：旧消息让模型总结成一段摘要，替换掉原文。
 
@@ -800,6 +826,8 @@ class CompactStep(Step):
             context.trace.append(self.name + ":skip")
             return
         cut = max(len(history) - self.keep_recent, 0)
+        # 别把 tool_calls 压掉、却把它的 tool 结果留在保留段里（会 400）
+        cut = _safe_cut(history, cut)
         old, recent = history[:cut], history[cut:]
         if not old:  # 全是「最近」的消息，没东西可压
             context.trace.append(self.name + ":skip")
@@ -826,7 +854,7 @@ class CompactStep(Step):
         from promptkit.prompt import render_text
 
         text = "\n".join(
-            f"{'用户' if message.get('role') == 'user' else '助手'}: "
+            f"{_SUMMARY_LABELS.get(str(message.get('role')), '助手')}: "
             f"{message.get('content', '')}"
             for message in old
         )

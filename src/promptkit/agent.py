@@ -126,11 +126,18 @@ def normalize_history(records: object) -> List[Message]:
         return []
 
     cleaned: List[Message] = []
+    #: 上一条 assistant 的 tool_calls id；`tool` 消息必须能对上它
+    pending_calls: set[str] = set()
     for item in raw:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role", "")).strip()
         if role not in _HISTORY_ROLES:
+            continue
+        if role in ("tool", "function") and not pending_calls:
+            # 孤儿 tool 消息：前面的 assistant(tool_calls) 已经被丢掉/压掉了。
+            # OpenAI 兼容接口会直接 400（tool must be a response to a preceding
+            # message with tool_calls），宁可丢掉这条，也别让整段对话开不起来。
             continue
         content: MessageContent = item.get("content")
         message: Message = {"role": cast(MessageRole, role), "content": content}
@@ -142,6 +149,19 @@ def normalize_history(records: object) -> List[Message]:
         if item.get("name"):
             message["name"] = item["name"]
         cleaned.append(message)
+        if role == "assistant":
+            pending_calls = {
+                str(call.get("id"))
+                for call in (item.get("tool_calls") or ())
+                if isinstance(call, dict) and call.get("id")
+            }
+        elif role == "user":
+            # 新的用户消息打断了工具调用链，后面的 tool 也算孤儿
+            pending_calls = set()
+        else:
+            call_id = message.get("tool_call_id")
+            if call_id:
+                pending_calls.discard(str(call_id))
     return cleaned
 
 
