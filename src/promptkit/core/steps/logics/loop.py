@@ -17,7 +17,7 @@ from promptkit.core.steps.logics.conditions import ConditionLike, as_condition
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
 from promptkit.core.errors import BreakSignal, ContinueSignal, LoopLimitExceeded
-from promptkit.core.settings import settings
+from promptkit.core.settings import current
 from promptkit.core.steps.logics.expr_sys.expr import Expr, VarExpr, as_expr
 from promptkit.core.steps.interface import Step, StepLike, coerce_steps, execute_step
 
@@ -139,7 +139,7 @@ class ForEachStep(Step):
         return replace(self, body=tuple(coerce_steps(*steps)))
 
     def execute(self, context: Context) -> None:
-        limit = _limit(self.max_iterations, settings.max_for_iterations)
+        limit = _limit(self.max_iterations, current(context, "max_for_iterations"))
         values = self.iterable.eval(context)
         try:
             iterator = iter(cast(Iterable[object], values))
@@ -217,7 +217,7 @@ class ForStep(Step):
         return replace(self, body=tuple(coerce_steps(*steps)))
 
     def execute(self, context: Context) -> None:
-        limit = _limit(self.max_iterations, settings.max_for_iterations)
+        limit = _limit(self.max_iterations, current(context, "max_for_iterations"))
         for step in self.init:
             execute_step(step, context)
 
@@ -299,7 +299,7 @@ class DoWhileStep(Step):
         return replace(self, body=tuple(coerce_steps(*steps)))
 
     def execute(self, context: Context) -> None:
-        limit = _limit(self.max_iterations, settings.max_iterations)
+        limit = _limit(self.max_iterations, current(context, "max_iterations"))
         iterations = 0
         while True:
             if iterations >= limit:

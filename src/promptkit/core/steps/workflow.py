@@ -2,7 +2,17 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, TextIO, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    TextIO,
+    Union,
+)
 
 from promptkit.core.model_action.caution_related.caution import WORKFLOW_CAUTIONS_KEY, flatten_cautions
 from promptkit.core.context import Context
@@ -18,7 +28,12 @@ from promptkit.core.errors import (
 )
 from promptkit.core.event_sys import EVENT_BUS_KEY, EventBus, EventHandler
 from promptkit.core.display_sys.render import Verbosity, as_verbosity
-from promptkit.core.settings import settings
+from promptkit.core.settings import (
+    SETTINGS_RUN_KEY,
+    scoped,
+    settings,
+    validate_settings,
+)
 from promptkit.core.steps.actions.interactive import OUTPUT_STREAM_KEY, VERBOSITY_KEY
 from promptkit.core.steps.logics.goto import collect_labels
 from promptkit.core.steps.interface import (
@@ -53,6 +68,8 @@ class Workflow(Step):
         *steps: StepLike,
         max_steps: Optional[int] = None,
         max_jumps: Optional[int] = None,
+        max_iterations: Optional[int] = None,
+        overrides: Optional[Mapping[str, Any]] = None,
         name: str = "workflow",
         cautions: object = None,
     ):
@@ -62,6 +79,12 @@ class Workflow(Step):
         self.max_steps = max_steps
         self.max_jumps = max_jumps
         self.name = name
+        # 本工作流级的设置覆盖：构造时定，执行时注入 Context。
+        # 循环 / 函数递归用 `current(context, ...)` 读，所以已经建好的步骤树也生效。
+        self._overrides: Dict[str, Any] = dict(overrides or {})
+        if max_iterations is not None:
+            self._overrides["max_iterations"] = max_iterations
+        validate_settings(self._overrides)
         # Workflow 级约束：挂在 context 上，里面的 LLMStep 共享
         self.cautions = list(flatten_cautions(cautions))
 
@@ -99,9 +122,13 @@ class Workflow(Step):
     def execute(self, context: Context) -> None:
         '''在已有的 Context 上执行所有步骤（用于嵌套）。
 
-        Label / Goto 按「词法作用域」解析：本工作流认识这个标签就跳，
-        不认识就继续往外抛，让外层工作流处理。
+        构造时给的设置覆盖在本次执行期间生效，退出时还原 ——
+        嵌套 Workflow 不会把覆盖泄漏给外层。
         '''
+        with scoped(context, self._overrides):
+            self._execute(context)
+
+    def _execute(self, context: Context) -> None:
         context.setdefault("messages", [])
         labels = self.labels()
 
@@ -150,6 +177,7 @@ class Workflow(Step):
         hooks: object = None,
         judge: object = None,
         metadata: Optional[Dict[str, JSONValue]] = None,
+        max_iterations: Optional[int] = None,
         **kwargs,
     ) -> Context:
         '''新建一个 Context 并执行，返回它。
@@ -211,10 +239,20 @@ class Workflow(Step):
                 hooks=hooks,
                 judge=judge,
                 metadata=metadata,
+                max_iterations=max_iterations,
                 **kwargs,
             )
 
+        run_overrides = dict(self._overrides)
+        if max_iterations is not None:
+            validate_settings({"max_iterations": max_iterations})
+            run_overrides["max_iterations"] = max_iterations
+
         context = Context(data=dict(kwargs))
+        if run_overrides:
+            # 运行级覆盖单独放一个键：优先级高于构造覆盖，
+            # 且对整个步骤树（含嵌套 Workflow）生效
+            context[SETTINGS_RUN_KEY] = run_overrides
         if agent is not None:
             context["agent"] = agent
         if judge is not None:
@@ -300,6 +338,7 @@ class Workflow(Step):
         hooks: object,
         judge: object,
         metadata: Optional[Dict[str, JSONValue]],
+        max_iterations: Optional[int] = None,
         **kwargs,
     ) -> Context:
         '''`run(session=...)` 的实现：load -> 跑 -> 存（异常也存）。
@@ -351,6 +390,7 @@ class Workflow(Step):
                 out=out,
                 hooks=hooks,
                 judge=judge,
+                max_iterations=max_iterations,
                 **{**seeded, **kwargs},
             )
             return context

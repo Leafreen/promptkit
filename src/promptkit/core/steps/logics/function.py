@@ -23,7 +23,7 @@ from promptkit.core.errors import (
     ReturnSignal,
     UndefinedVariable,
 )
-from promptkit.core.settings import settings
+from promptkit.core.settings import current
 from promptkit.core.steps.logics.expr_sys.expr import AgentReplyExpr, Expr, as_expr
 from promptkit.core.steps.interface import (
     Step,
@@ -212,7 +212,7 @@ class BoundStep(Step):
         self.output_key = definition.output_key
 
     def execute(self, context: Context) -> None:
-        limit = settings.max_recursion_depth
+        limit = current(context, "max_recursion_depth")
         if len(context.function_stack) >= limit:
             raise RecursionLimitExceeded(
                 f"函数 {self.name} 的调用层数超过 {limit}；"

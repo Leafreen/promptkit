@@ -26,7 +26,7 @@ from promptkit.core.errors import (
     LoopLimitExceeded,
     ReturnSignal,
 )
-from promptkit.core.settings import settings
+from promptkit.core.settings import current
 from promptkit.core.steps.interface import Step, StepLike, coerce_steps
 from promptkit.core.steps.logics.loop import _limit, run_loop_body
 from promptkit.core.steps.logics.loop_hooks import (
@@ -204,7 +204,7 @@ class WhileStep(Step):
             循环体或条件里的任何异常都会原样向上抛（触发 `LOOP_ERROR` 之后）；
             `Break` / `Continue` / `Return` / `Goto` 是控制流，不算错误。
         '''
-        limit = _limit(self.max_iterations, settings.max_iterations)
+        limit = _limit(self.max_iterations, current(context, "max_iterations"))
         hooks = self._hooks(context)
         iterations = 0
         reason = "condition"
