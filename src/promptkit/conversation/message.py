@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import copy
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -36,6 +37,7 @@ class Message:
     - `role`：`system` / `user` / `assistant` / `tool` / `function`
     - `content`：字符串，或多模态 `[{...}, ...]`
     - `id`：自动生成的 uuid4().hex；也可以在反序列化时显式传入
+    - `created_at`：创建时间（epoch 秒），用于排序 / 审计
     - `metadata`：其余键（`tool_calls` / `tool_call_id` / `name` /
       `reasoning_content` 等）都放在这里，原样透传给调用方
 
@@ -49,6 +51,7 @@ class Message:
     content: MessageContent
     id: str = field(default_factory=new_message_id)
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
         if isinstance(self.content, list):

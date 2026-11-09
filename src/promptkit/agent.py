@@ -256,11 +256,11 @@ class _HistoryView:
 
     def insert(self, index: int, value: Message) -> None:
         '''在指定位置插入一条消息。'''
-        self._agent.session.insert(index, _as_conversation_message(value))
+        self._agent.session.insert_message(index, _as_conversation_message(value))
 
     def append(self, value: Message) -> None:
         '''追加一条消息（和旧的 list.append 行为一致）。'''
-        self._agent.session.append(_as_conversation_message(value))
+        self._agent.session.append_message(_as_conversation_message(value))
 
     def extend(self, values: Iterable[Message]) -> None:
         '''批量追加消息。'''
@@ -456,7 +456,7 @@ class Agent(AgentLike):
         )
 
     def _append_message(self, message: Message) -> None:
-        self._session.append(_as_conversation_message(message))
+        self._session.append_message(_as_conversation_message(message))
         self.messages = self._build_messages()
 
     def _append_assistant(self, assistant: object) -> Message:

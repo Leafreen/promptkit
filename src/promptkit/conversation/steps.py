@@ -6,13 +6,13 @@
 '''
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from promptkit.conversation.exceptions import SessionError
 from promptkit.conversation.message import (
     JSONValue,
-    Message,
     MessageContent,
     MessageRole,
 )
@@ -27,6 +27,7 @@ __all__ = [
     "SessionInsert",
     "SessionPop",
     "SessionRemove",
+    "SessionRollback",
     "SessionTruncate",
     "SessionUpdate",
     "session_from_context",
@@ -64,11 +65,10 @@ class SessionAppend(Step):
     def execute(self, context: Context) -> None:
         '''追加消息，并把新消息 id 写进 trace。'''
         session = session_from_context(context)
-        message = Message(
-            role=self.role, content=self.content, metadata=dict(self.metadata)
+        message_id = session.append(
+            self.role, self.content, metadata=dict(self.metadata)
         )
-        session.append(message)
-        _trace(context, step=self.name, message_id=message.id, length=session.length)
+        _trace(context, step=self.name, message_id=message_id, length=session.length)
 
     def describe(self) -> str:
         return f"SessionAppend({self.role!r}, {self.content!r})"
@@ -87,14 +87,13 @@ class SessionInsert(Step):
     def execute(self, context: Context) -> None:
         '''插入消息，并把下标 / 新 id 写进 trace。'''
         session = session_from_context(context)
-        message = Message(
-            role=self.role, content=self.content, metadata=dict(self.metadata)
+        message_id = session.insert(
+            self.index, self.role, self.content, metadata=dict(self.metadata)
         )
-        session.insert(self.index, message)
         _trace(
             context,
             step=self.name,
-            message_id=message.id,
+            message_id=message_id,
             index=self.index,
             length=session.length,
         )
@@ -113,12 +112,14 @@ class SessionRemove(Step):
     def execute(self, context: Context) -> None:
         '''删除消息，并把被删消息的 id / 角色写进 trace。'''
         session = session_from_context(context)
-        removed = session.remove(self.message_id)
+        index = session.index_of(self.message_id)
+        removed = session.at(index)
+        session.remove(self.message_id)
         _trace(
             context,
             step=self.name,
-            message_id=removed.id,
-            role=removed.role,
+            message_id=self.message_id,
+            role=(removed.role if removed is not None else None),
             length=session.length,
         )
 
@@ -126,17 +127,121 @@ class SessionRemove(Step):
         return f"SessionRemove({self.message_id!r})"
 
 
+def _content_text(content: MessageContent) -> str:
+    '''把消息内容压成回滚 Step 返回的字符串。'''
+    return content if isinstance(content, str) else str(content)
+
+
+@dataclass
+class SessionRollback(Step):
+    '''回滚最近若干轮对话（一轮 = 一条 user + 其后到下一轮之前的消息）。
+
+    用法：
+
+        SessionRollback(turns=1)               # 删 1 轮的 assistant，保留 user
+        SessionRollback(turns=1, keep="user")  # 同上（默认）
+        SessionRollback(turns=2, keep="both")  # 连 user 一起删掉 2 轮
+
+    语义：
+
+    - `keep="user"`：保留所有 user 消息，只删本轮之后的 assistant / tool /
+      system 消息 —— 适合"让用户重新说一遍"。
+    - `keep="both"`：从最早被回滚的 user 开始，整段删掉。
+
+    返回值（写进 `context[output_key]`）是被回滚的 user 消息内容 `str`；
+    会话里没有 user 消息时写 `None`。同时往 `session.trace` 记一条
+    `{"step": ..., "message_ids": [...], ...}`。
+    '''
+
+    turns: int = 1
+    keep: str = "user"
+    output_key: str | None = None
+    raise_if_empty: bool = False
+    name: str = "session.rollback"
+
+    def __post_init__(self) -> None:
+        if self.turns < 1:
+            raise ValueError(f"turns 必须 >= 1，得到 {self.turns}")
+        if self.keep not in ("user", "both"):
+            raise ValueError(f"keep 只能是 'user' 或 'both'，得到 {self.keep!r}")
+
+    def execute(self, context: Context) -> None:
+        '''按轮回滚，并把被回滚的 user 内容写进 context / trace。'''
+        session = session_from_context(context)
+        user_indices = [
+            index
+            for index, message in enumerate(session.messages)
+            if message.role == "user"
+        ]
+        if not user_indices:
+            if self.raise_if_empty:
+                raise SessionError("SessionRollback：会话里没有 user 消息可回滚")
+            if self.output_key is not None:
+                context[self.output_key] = None
+            _trace(context, step=self.name, turns=self.turns, keep=self.keep, length=0)
+            return
+
+        # 最近 turns 条 user 里的最早那条，就是回滚边界
+        boundary = user_indices[-self.turns]
+        boundary_message = session.at(boundary)
+        content = (
+            _content_text(boundary_message.content)
+            if boundary_message is not None
+            else ""
+        )
+
+        # 先记下将要删掉的 id（删完就取不到了）
+        if self.keep == "both":
+            doomed = [
+                message
+                for message in session.slice(boundary)
+                if message.role != "system"
+            ]
+        else:
+            doomed = [
+                message
+                for message in session.slice(boundary + 1)
+                if message.role != "user" and message.role != "system"
+            ]
+
+        for message in doomed:
+            session.remove(message.id)
+
+        removed_ids = [message.id for message in doomed]
+        session.record_trace(
+            {
+                "step": self.name,
+                "turns": self.turns,
+                "keep": self.keep,
+                "message_ids": removed_ids,
+                "user_content": content,
+            }
+        )
+        _trace(
+            context,
+            step=self.name,
+            turns=self.turns,
+            keep=self.keep,
+            message_ids=removed_ids,
+            user_content=content,
+            length=session.length,
+        )
+        if self.output_key is not None:
+            context[self.output_key] = content
+
+    def describe(self) -> str:
+        suffix = f", keep={self.keep!r}" if self.keep != "user" else ""
+        out = f" -> {self.output_key}" if self.output_key is not None else ""
+        return f"SessionRollback(turns={self.turns}{suffix}){out}"
+
+
 @dataclass
 class SessionPop(Step):
-    '''弹出会话末尾的一条消息。
+    '''【已弃用】弹出会话末尾的一条消息。
 
-    `output_key` 有值时，被弹掉的消息（`{role, content, ...}` dict，不含
-    内部 id）会写进 `context[output_key]`，方便后续 Step 直接引用；
-    会话为空时写 `None`。
-
-    会话为空时默认什么都不做、只在 trace 里记一条 `popped=None`；
-    传 `raise_if_empty=True` 可以让空会话直接抛 `SessionError` —— 适合你
-    明确知道会话里应该有东西、为空就是 bug 的场景。
+    阶段 2 起请改用 `SessionRollback(turns=1, keep="user")`：
+    旧 `SessionPop` 的语义（"弹一条"）看不清到底弹 user 还是 assistant，
+    现在统一按"回滚一轮、保留 user"处理，并发出 `DeprecationWarning`。
     '''
 
     output_key: str | None = None
@@ -144,44 +249,23 @@ class SessionPop(Step):
     name: str = "session.pop"
 
     def execute(self, context: Context) -> None:
-        '''弹掉最后一条消息，并把被弹消息写进 context / trace。'''
-        session = session_from_context(context)
-        if session.length == 0:
-            if self.raise_if_empty:
-                raise SessionError("SessionPop：会话是空的，没东西可弹")
-            if self.output_key is not None:
-                context[self.output_key] = None
-            popped_extra: dict[str, object] = {"popped": None}
-            if self.output_key is not None:
-                popped_extra["output_key"] = self.output_key
-            _trace(context, step=self.name, length=0, **popped_extra)
-            return
-        removed = session.remove_last()
-        # remove_last 在 length>0 时一定返回非 None，这里只是类型收窄
-        assert removed is not None
-        payload: dict[str, JSONValue] = removed.to_dict()
-        if self.output_key is not None:
-            context[self.output_key] = payload
-        trace_extra: dict[str, object] = {}
-        if self.output_key is not None:
-            trace_extra["output_key"] = self.output_key
-        _trace(
-            context,
-            step=self.name,
-            message_id=removed.id,
-            role=removed.role,
-            length=session.length,
-            **trace_extra,
+        '''转发给 `SessionRollback(turns=1, keep="user")`，并发出弃用警告。'''
+        warnings.warn(
+            "SessionPop 已弃用（阶段 2）：请改用 "
+            'SessionRollback(turns=1, keep="user")',
+            DeprecationWarning,
+            stacklevel=2,
         )
+        SessionRollback(
+            turns=1,
+            keep="user",
+            output_key=self.output_key,
+            raise_if_empty=self.raise_if_empty,
+            name=self.name,
+        ).execute(context)
 
     def describe(self) -> str:
-        parts: list[str] = []
-        if self.output_key is not None:
-            parts.append(f"-> {self.output_key}")
-        if self.raise_if_empty:
-            parts.append("raise_if_empty=True")
-        suffix = (" " + " ".join(parts)) if parts else ""
-        return f"SessionPop({suffix.strip()})"
+        return "SessionPop(...)【已弃用：改用 SessionRollback】"
 
 
 @dataclass
@@ -194,7 +278,8 @@ class SessionTruncate(Step):
     def execute(self, context: Context) -> None:
         '''截断会话，并把被移除的消息 id 列表写进 trace。'''
         session = session_from_context(context)
-        removed = session.truncate(self.length)
+        removed = session.slice(self.length)
+        session.truncate(self.length)
         _trace(
             context,
             step=self.name,
@@ -224,15 +309,13 @@ class SessionUpdate(Step):
         if self.content is None and self.metadata is None:
             raise ValueError("SessionUpdate 至少要提供 content 或 metadata 之一")
         session = session_from_context(context)
-        message = session.get(self.message_id)
-        if self.content is not None:
-            message = session.update_content(self.message_id, self.content)
-        if self.metadata is not None:
-            message = session.update_metadata(self.message_id, **dict(self.metadata))
+        session.update(
+            self.message_id, content=self.content, metadata=self.metadata
+        )
         _trace(
             context,
             step=self.name,
-            message_id=message.id,
+            message_id=self.message_id,
             changed=_changed_fields(self.content, self.metadata),
         )
 

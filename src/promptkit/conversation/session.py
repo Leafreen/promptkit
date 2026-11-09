@@ -14,7 +14,7 @@ import copy
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from promptkit.conversation.exceptions import SessionError
 from promptkit.conversation.message import (
@@ -66,6 +66,8 @@ class Session:
         self._compressed_upto: int = compressed_upto
         self._validate_compressed(self._compressed_upto)
         self._store = store
+        #: 会话级操作痕迹（回滚 / 分支等），由上层 Step 写入
+        self._trace: list[dict[str, object]] = []
         if store is not None:
             try:
                 state = store.load(self._session_id)
@@ -105,6 +107,15 @@ class Session:
         '''是否绑定了 store。'''
         return self._store is not None
 
+    @property
+    def trace(self) -> list[dict[str, object]]:
+        '''会话级操作痕迹的副本（回滚 / 分支会往里写）。'''
+        return [dict(event) for event in self._trace]
+
+    def record_trace(self, event: Mapping[str, object]) -> None:
+        '''追加一条会话级痕迹；不触发持久化（痕迹不是对话内容）。'''
+        self._trace.append(dict(event))
+
     def __len__(self) -> int:
         return len(self._messages)
 
@@ -114,16 +125,30 @@ class Session:
             f" compressed_upto={self._compressed_upto}>"
         )
 
-    # ---------------- 20 个 CRUD ----------------
-    def append(self, message: Message) -> Message:
-        '''在末尾追加一条消息，返回它。'''
+    # ---------------- CRUD ----------------
+    def append(
+        self,
+        role: MessageRole,
+        content: MessageContent,
+        metadata: Mapping[str, JSONValue] | None = None,
+    ) -> str:
+        '''在末尾追加一条消息，返回新消息的 id。
+
+        这是主入口（阶段 2 起）：id 由会话层生成，调用方不必自己造 `Message`。
+        '''
+        message = Message(role=role, content=content, metadata=metadata or {})
+        self.append_message(message)
+        return message.id
+
+    def append_message(self, message: Message) -> Message:
+        '''追加一条现成的 `Message`，返回它（兼容旧写法）。'''
         self._messages.append(message)
         self._touch()
         return message
 
     def append_user(self, content: MessageContent, *, name: str | None = None) -> Message:
         '''追加一条 user 消息。'''
-        return self.append(self._build("user", content, name=name))
+        return self.append_message(self._build("user", content, name=name))
 
     def append_assistant(
         self,
@@ -134,7 +159,7 @@ class Session:
         name: str | None = None,
     ) -> Message:
         '''追加一条 assistant 消息（可带 tool_calls / reasoning_content）。'''
-        return self.append(
+        return self.append_message(
             self._build(
                 "assistant",
                 content,
@@ -146,7 +171,7 @@ class Session:
 
     def append_system(self, content: MessageContent, *, name: str | None = None) -> Message:
         '''追加一条 system 消息。'''
-        return self.append(self._build("system", content, name=name))
+        return self.append_message(self._build("system", content, name=name))
 
     def append_tool(
         self,
@@ -156,7 +181,7 @@ class Session:
         name: str | None = None,
     ) -> Message:
         '''追加一条 tool 消息（必须带 tool_call_id）。'''
-        return self.append(
+        return self.append_message(
             Message(
                 role="tool",
                 content=content,
@@ -166,8 +191,20 @@ class Session:
             )
         )
 
-    def insert(self, index: int, message: Message) -> Message:
-        '''在指定下标插入一条消息（`0 <= index <= length`）。'''
+    def insert(
+        self,
+        index: int,
+        role: MessageRole,
+        content: MessageContent,
+        metadata: Mapping[str, JSONValue] | None = None,
+    ) -> str:
+        '''在指定下标插入一条消息（`0 <= index <= length`），返回新消息 id。'''
+        message = Message(role=role, content=content, metadata=metadata or {})
+        self.insert_message(index, message)
+        return message.id
+
+    def insert_message(self, index: int, message: Message) -> Message:
+        '''插入一条现成的 `Message`，返回它（兼容旧写法）。'''
         if index < 0 or index > len(self._messages):
             raise IndexError(f"插入位置越界：{index}，当前长度 {len(self._messages)}")
         self._messages.insert(index, message)
@@ -176,18 +213,17 @@ class Session:
 
     def insert_before(self, message_id: str, message: Message) -> Message:
         '''按 id 找到目标消息，插在它前面。'''
-        return self.insert(self.index_of(message_id), message)
+        return self.insert_message(self.index_of(message_id), message)
 
     def insert_after(self, message_id: str, message: Message) -> Message:
         '''按 id 找到目标消息，插在它后面。'''
-        return self.insert(self.index_of(message_id) + 1, message)
+        return self.insert_message(self.index_of(message_id) + 1, message)
 
-    def remove(self, message_id: str) -> Message:
-        '''按 id 删除一条消息，返回被删掉的那条。'''
+    def remove(self, message_id: str) -> None:
+        '''按 id 删除一条消息；不存在时抛 SessionError。'''
         index = self.index_of(message_id)
-        message = self._messages.pop(index)
+        self._messages.pop(index)
         self._touch()
-        return message
 
     def remove_last(self) -> Message | None:
         '''删除最后一条消息；会话为空时返回 None。'''
@@ -204,19 +240,47 @@ class Session:
         self._touch()
         return message
 
+    def update(
+        self,
+        message_id: str,
+        content: MessageContent | None = None,
+        metadata: Mapping[str, JSONValue] | None = None,
+    ) -> None:
+        '''按 id 更新内容 / 元信息；为 None 的项表示「这一项不改」。
+
+        两者都为 None 视为无效操作，直接抛 ValueError。
+        '''
+        if content is None and metadata is None:
+            raise ValueError("update 至少要提供 content 或 metadata 之一")
+        current = self.get(message_id)
+        if current is None:
+            raise SessionError(f"没有 id 为 {message_id!r} 的消息")
+        updated = current
+        if content is not None:
+            updated = updated.with_content(content)
+        if metadata is not None:
+            updated = updated.with_metadata(**dict(metadata))
+        self.replace(message_id, updated)
+
     def update_content(
         self, message_id: str, content: MessageContent
     ) -> Message:
         '''按 id 替换消息内容（id / metadata 保持不变）。'''
-        return self.replace(message_id, self.get(message_id).with_content(content))
+        current = self.get(message_id)
+        if current is None:
+            raise SessionError(f"没有 id 为 {message_id!r} 的消息")
+        return self.replace(message_id, current.with_content(content))
 
     def update_metadata(self, message_id: str, **values: JSONValue) -> Message:
         '''按 id 合并元信息（内容 / id 保持不变）。'''
-        return self.replace(message_id, self.get(message_id).with_metadata(**values))
+        current = self.get(message_id)
+        if current is None:
+            raise SessionError(f"没有 id 为 {message_id!r} 的消息")
+        return self.replace(message_id, current.with_metadata(**values))
 
-    def get(self, message_id: str) -> Message:
-        '''按 id 取消息；不存在时抛 SessionError。'''
-        return self._messages[self.index_of(message_id)]
+    def get(self, message_id: str) -> Message | None:
+        '''按 id 取消息；不存在时返回 None（要报错请用 `index_of`）。'''
+        return self.find(message_id)
 
     def find(self, message_id: str) -> Message | None:
         '''按 id 取消息；不存在时返回 None。'''
@@ -232,9 +296,34 @@ class Session:
                 return index
         raise SessionError(f"没有 id 为 {message_id!r} 的消息")
 
+    def at(self, index: int) -> Message | None:
+        '''按下标取消息；越界返回 None（支持负下标）。'''
+        try:
+            return self._messages[index]
+        except IndexError:
+            return None
+
     def slice(self, start: int = 0, end: int | None = None) -> list[Message]:
         '''按下标切片，返回消息列表的副本。'''
         return list(self._messages[start:end])
+
+    def list(self, start: int = 0, end: int | None = None) -> list[Message]:
+        '''`slice` 的别名（对齐阶段 2 的接口命名）。'''
+        return self.slice(start, end)
+
+    def last(self, n: int = 1) -> list[Message]:
+        '''取末尾 n 条消息（按原顺序）；n<=0 返回空列表。'''
+        if n <= 0:
+            return []
+        return list(self._messages[-n:])
+
+    def count(self) -> int:
+        '''消息条数（与 `length` 属性等价）。'''
+        return len(self._messages)
+
+    def to_list(self) -> list[dict[str, JSONValue]]:
+        '''转成老接口使用的消息字典列表（不含内部 id）。'''
+        return [message.to_dict() for message in self._messages]
 
     def replace_all(self, messages: Sequence[Message]) -> None:
         '''用一批消息整体替换当前内容（保留 session_id / metadata / 压缩边界）。'''
@@ -242,16 +331,14 @@ class Session:
         self._compressed_upto = min(self._compressed_upto, len(self._messages))
         self._touch()
 
-    def truncate(self, length: int) -> list[Message]:
-        '''只保留前 `length` 条，返回被截掉的消息。'''
-        if length < 0:
-            raise ValueError(f"truncate 长度不能为负：{length}")
-        removed = self._messages[length:]
-        if removed:
-            self._messages = self._messages[:length]
+    def truncate(self, index: int) -> None:
+        '''只保留前 `index` 条；被截掉的消息不再返回（需要的话先 `slice`）。'''
+        if index < 0:
+            raise ValueError(f"truncate 长度不能为负：{index}")
+        if index < len(self._messages):
+            self._messages = self._messages[:index]
             self._compressed_upto = min(self._compressed_upto, len(self._messages))
             self._touch()
-        return list(removed)
 
     def clear(self) -> None:
         '''清空全部消息（压缩边界同步归零，并触发一次持久化）。'''
@@ -283,6 +370,74 @@ class Session:
         cloned._store = None
         cloned._session_id = uuid.uuid4().hex
         return cloned
+
+    def snapshot(self) -> dict[str, Any]:
+        '''导出可 JSON 序列化的完整快照（含消息 id / created_at 与痕迹）。'''
+        return {
+            "session_id": self._session_id,
+            "messages": [
+                {
+                    "id": message.id,
+                    "role": message.role,
+                    "content": copy.deepcopy(message.content),
+                    "metadata": copy.deepcopy(dict(message.metadata)),
+                    "created_at": message.created_at,
+                }
+                for message in self._messages
+            ],
+            "metadata": copy.deepcopy(dict(self._metadata)),
+            "compressed_upto": self._compressed_upto,
+            "trace": [dict(event) for event in self._trace],
+        }
+
+    @classmethod
+    def from_snapshot(
+        cls, snapshot: Mapping[str, Any], store: SessionStore | None = None
+    ) -> Session:
+        '''从 `snapshot()` 的结果恢复会话；坏数据给出明确的 TypeError。'''
+        if not isinstance(snapshot, Mapping):
+            raise TypeError(f"snapshot 必须是 dict，得到 {type(snapshot).__name__}")
+
+        raw_messages = snapshot.get("messages", [])
+        if not isinstance(raw_messages, Sequence) or isinstance(
+            raw_messages, (str, bytes)
+        ):
+            raise TypeError("snapshot['messages'] 必须是消息列表")
+
+        messages: list[Message] = []
+        for item in raw_messages:
+            if not isinstance(item, Mapping):
+                raise TypeError(f"消息必须是 dict，得到 {type(item).__name__}")
+            role = item.get("role", "user")
+            if not isinstance(role, str):
+                raise TypeError(f"role 必须是字符串，得到 {role!r}")
+            messages.append(
+                Message(
+                    role=cast(MessageRole, role),
+                    content=cast(MessageContent, item.get("content", "")),
+                    id=cast(str, item.get("id") or uuid.uuid4().hex),
+                    metadata=cast(Mapping[str, JSONValue], item.get("metadata") or {}),
+                    created_at=float(item.get("created_at") or 0.0),
+                )
+            )
+
+        session = cls(
+            messages,
+            session_id=cast(str, snapshot.get("session_id") or uuid.uuid4().hex),
+            metadata=cast(Mapping[str, JSONValue], snapshot.get("metadata") or {}),
+            compressed_upto=int(snapshot.get("compressed_upto") or 0),
+        )
+        if store is not None:
+            # 先按快照恢复，再绑定 store 并写回去 —— 不能走构造函数的
+            # 「有 store 就 load」路径，否则快照会被旧数据覆盖
+            session._store = store
+            session._touch()
+        raw_trace = snapshot.get("trace", [])
+        if isinstance(raw_trace, Sequence) and not isinstance(raw_trace, (str, bytes)):
+            session._trace = [
+                dict(event) for event in raw_trace if isinstance(event, Mapping)
+            ]
+        return session
 
     # ---------------- 内部 ----------------
     def _apply_state(self, state: SessionState) -> None:

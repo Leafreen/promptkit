@@ -47,22 +47,23 @@ def test_insert_and_id_based_insert_before_after():
 def test_insert_bounds():
     session = Session()
     with pytest.raises(IndexError):
-        session.insert(1, Message(role="user", content="x"))
+        session.insert_message(1, Message(role="user", content="x"))
     with pytest.raises(IndexError):
-        session.insert(-1, Message(role="user", content="x"))
+        session.insert_message(-1, Message(role="user", content="x"))
 
 
 def test_get_find_index_of_and_remove_by_id_not_position():
     session = Session()
     first = session.append_user("a")
     second = session.append_user("b")
-    session.insert(0, Message(role="user", content="x"))
+    session.insert_message(0, Message(role="user", content="x"))
     # second 的位置变了，但按 id 仍然找得到
     assert session.index_of(second.id) == 2
     assert session.get(second.id) is second
     assert session.find(first.id) is first
     assert session.find("missing") is None
-    assert session.remove(first.id).content == "a"
+    session.remove(first.id)
+    assert first.content == "a"
     assert [m.content for m in session.messages] == ["x", "b"]
 
 
@@ -73,12 +74,14 @@ def test_remove_last_replace_update_content_and_metadata():
     session.update_content(target.id, "B")
     session.update_metadata(target.id, reasoning_content="想了想")
     updated = session.get(target.id)
+    assert updated is not None
     assert updated.content == "B"
     assert updated.metadata["reasoning_content"] == "想了想"
 
     replacement = Message(role="assistant", content="c")
     session.replace(target.id, replacement)
-    assert session.get(replacement.id).content == "c"
+    found = session.get(replacement.id)
+    assert found is not None and found.content == "c"
 
     assert session.remove_last() is replacement
     assert session.length == 1
@@ -89,7 +92,9 @@ def test_slice_replace_all_truncate_and_clear():
     for text in ("a", "b", "c", "d"):
         session.append_user(text)
     assert [m.content for m in session.slice(1, 3)] == ["b", "c"]
-    assert [m.content for m in session.truncate(2)] == ["c", "d"]
+    removed = session.slice(2)
+    session.truncate(2)
+    assert [m.content for m in removed] == ["c", "d"]
     assert [m.content for m in session.messages] == ["a", "b"]
 
     session.replace_all([Message(role="user", content="z")])
@@ -119,6 +124,43 @@ def test_clone_is_deepcopy_and_completely_isolated():
     assert cloned.is_persistent is False
 
 
+def test_snapshot_round_trip():
+    '''snapshot() → from_snapshot() 能原样恢复消息 id / 内容 / 元信息。'''
+    session = Session(metadata={"owner": "snap"})
+    user = session.append_user("问题1")
+    assistant = session.append_assistant("答案1")
+    session.record_trace({"step": "demo", "message_ids": [user.id]})
+
+    snap = session.snapshot()
+    restored = Session.from_snapshot(snap)
+
+    assert restored.session_id == session.session_id
+    assert restored.count() == 2
+    assert restored.at(0).id == user.id  # type: ignore[union-attr]
+    assert restored.at(1).content == "答案1"  # type: ignore[union-attr]
+    assert restored.metadata == {"owner": "snap"}
+    assert restored.trace == session.trace
+    assert session.trace[-1]["message_ids"] == [user.id]
+    assert assistant.created_at > 0
+
+
+def test_from_snapshot_rejects_bad_data():
+    with pytest.raises(TypeError):
+        Session.from_snapshot({"messages": "not-a-list"})  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        Session.from_snapshot({"messages": [42]})  # type: ignore[list-item]
+
+
+def test_to_list_and_last_count():
+    session = Session()
+    for text in ("a", "b", "c"):
+        session.append_user(text)
+    assert session.count() == 3
+    assert [m.content for m in session.last(2)] == ["b", "c"]
+    assert session.last(0) == []
+    assert [item["content"] for item in session.to_list()] == ["a", "b", "c"]
+
+
 def test_compressed_boundary_is_validated():
     session = Session()
     session.append_user("a")
@@ -129,10 +171,10 @@ def test_compressed_boundary_is_validated():
     assert session.compressed_upto == 0
 
 
-def test_missing_message_raises_session_error():
+def test_missing_message_returns_none_or_raises():
     session = Session()
-    with pytest.raises(SessionError):
-        session.get("missing")
+    assert session.get("missing") is None
+    assert session.at(99) is None
     with pytest.raises(SessionError):
         session.remove("missing")
 

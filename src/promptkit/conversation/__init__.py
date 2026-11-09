@@ -29,6 +29,7 @@ from promptkit.conversation.steps import (
     SessionInsert,
     SessionPop,
     SessionRemove,
+    SessionRollback,
     SessionTruncate,
     SessionUpdate,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "SessionInsert",
     "SessionPop",
     "SessionRemove",
+    "SessionRollback",
     "SessionState",
     "SessionStore",
     "SessionTruncate",
