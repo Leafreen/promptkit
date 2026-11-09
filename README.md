@@ -301,6 +301,7 @@ LLMStep(Prompt(role="user", content="判断意图：{{text}}"),
 | `For(init, cond, step).Do(...)` | C 风格 `for(init; cond; step)`，如 `For(Set("i",0), Var("i")<5, Inc("i"))` |
 | `ForEach("x", iterable).Do(...)` | 遍历 range / 列表 / 表达式 |
 | `Break()` / `Continue()` | 跳出 / 跳过本轮（作用于最内层循环；`Switch` 不吞 `Break`） |
+| `OnError(*steps, handler=..., fallback=..., output_key="error")` | 兜底一组步骤的异常：默认吞掉并写 `output_key`，`reraise=True` 处理完再抛 |
 | `Label("x")` / `Goto("x")` | 跳到**顶层**标签（重试循环、跳出深层嵌套）；上限 `max_jumps` |
 | `Read(prompt="")` | 读一行标准输入（惰性表达式）；`.Until(标记)` 多行读取；`.OnBreak()` Ctrl+C/D 不炸工作流 |
 | `ReadFile(path)` | 读整个文件（惰性，UTF-8） |
@@ -799,6 +800,10 @@ ctx = wf.run(agent=agent, bus=bus)             # ④ 工作流级别（on_event=
 `verbose` 分级用 `Verbosity.SILENT / NORMAL / VERBOSE / DEBUG`（`True` 等价
 `VERBOSE`）。日志落盘：`wf.run(..., on_event=log_display("logs/run.log"))`；
 `json_display(stream=...)` 输出一行一条 JSON 适合日志 / WebSocket。
+需要**结构化步骤 trace**时给 `wf.run(..., _trace_steps=True)`：每个 Step 前后
+往 `ctx.trace` 追加 `{phase, step, type, duration_ms, status, error}`；
+`_dump_trace=True` 会额外把它写成 `logs/trace_<时间>.jsonl`（路径回填到
+`ctx["_trace_file"]`）。默认关闭，所以原有 `ctx.trace` 的字符串标记不受影响。
 
 完整示例见 [examples/streaming_events.py](examples/streaming_events.py)、
 [examples/console_output.py](examples/console_output.py)。

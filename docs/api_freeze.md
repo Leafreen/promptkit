@@ -37,6 +37,7 @@
 | --- | --- |
 | `Step` / `coerce_steps` / `execute_step` | stable |
 | `Workflow` / `Context` | stable |
+| `ctx.trace` + `_trace_steps` / `_dump_trace` | **新增（阶段 5）** — 结构化步骤记录（默认关闭，不改变旧 `trace` 语义） |
 | `FunctionStep` / `MessageStep` | stable |
 
 ### 逻辑与表达式
@@ -52,6 +53,7 @@
 | `Len` / `ItemExpr` / `AttrExpr` | stable |
 | `Intent` / `Similar` / `Classify` / `Judge` / `LLMJudge` | stable |
 | `LoopHooks` / `loop_hooks` | stable |
+| `OnError` | **新增（阶段 5）** — 异常兜底（handler / fallback / reraise） |
 
 ### 函数
 
@@ -174,7 +176,7 @@ Session.from_snapshot(snap, store=None) -> Session
 | 2 | Session 新签名、`SessionPop` → `SessionRollback` | `SessionPop`、旧 `Session` 位置参数写法 |
 | 3 | `Call` → `Transform` | `Call`（lambda / 闭包直接报错） |
 | 4 | `Function` 改位置形参（`$a` 标记），`name` 变可选 | 旧 `Function(args=...)` 不再接受（TypeError） |
-| 5 | `OnError`、Trace 增强 | 无 |
+| 5 | `OnError`、`_trace_steps` / `_dump_trace` 结构化 trace | 无 |
 
 **基线测试**：`tests/baseline/`。每个阶段结束必须全绿，且
 `examples/course_assistant.py --fake`（课程学习助手，tutor 场景）仍可跑通。

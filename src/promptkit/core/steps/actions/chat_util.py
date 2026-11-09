@@ -30,6 +30,7 @@ import time
 
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Dict,
     List,
     Mapping,
@@ -46,8 +47,17 @@ if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 m
 
 T = TypeVar("T")
 
+from promptkit.core.errors import (
+    BreakSignal,
+    ContinueSignal,
+    GotoSignal,
+    ReturnSignal,
+)
 from promptkit.core.steps.interface import Step, StepLike, coerce_steps, execute_step
 from promptkit.core.steps.logics.expr_sys.expr import VarExpr
+
+#: 控制流信号不是「这一轮出错」，不能被 ChatTurn 的兜底吞掉
+_CONTROL_FLOW = (BreakSignal, ContinueSignal, ReturnSignal, GotoSignal)
 
 __all__ = [
     "CHAT_ROLE_KEY",
@@ -59,6 +69,7 @@ __all__ = [
     "CHAT_SIGNAL_KEY",
     "CHAT_INPUT_KEY",
     "CHAT_REPLY_KEY",
+    "CHAT_ERROR_KEY",
     "DEFAULT_EXIT_WORDS",
     "DEFAULT_COMPACT_PROMPT",
     "Role",
@@ -94,6 +105,8 @@ CHAT_EXIT_KEY = "chat_exit_words"
 CHAT_SIGNAL_KEY = "chat_signal"
 CHAT_INPUT_KEY = "usr_input"
 CHAT_REPLY_KEY = "model_reply"
+#: 最近一轮模型调用失败时的异常对象
+CHAT_ERROR_KEY = "chat_error"
 
 #: 默认退出词
 DEFAULT_EXIT_WORDS = ("exit", "quit", ":q")
@@ -117,6 +130,7 @@ def chat_context_vars() -> List[str]:
         CHAT_SIGNAL_KEY,
         CHAT_INPUT_KEY,
         CHAT_REPLY_KEY,
+        CHAT_ERROR_KEY,
     ]
 
 
@@ -450,11 +464,15 @@ class ChatTurn(Step):
         prompt_content: str = "{{usr_input}}",
         output_key: str = CHAT_REPLY_KEY,
         cautions: Optional[Sequence[object]] = None,
+        on_error: Optional[Callable[["Exception", "Context"], object]] = None,
     ):
+        if on_error is not None and not callable(on_error):
+            raise TypeError(f"on_error 必须可调用，得到 {type(on_error).__name__}")
         self.prompt_role = prompt_role
         self.prompt_content = prompt_content
         self.output_key = output_key
         self.cautions = list(cautions) if cautions else None
+        self.on_error = on_error
 
     def execute(self, context: Context) -> None:
         from promptkit.core.steps.actions.llm import LLMStep
@@ -467,7 +485,18 @@ class ChatTurn(Step):
             cautions=self.cautions,
             tools=tools,
         )
-        execute_step(step, context)
+        try:
+            execute_step(step, context)
+        except _CONTROL_FLOW:
+            raise
+        except Exception as exc:
+            # 记下来，方便调用方 / handler 事后查看本轮错误
+            context[CHAT_ERROR_KEY] = exc
+            context.trace.append(f"{self.name}:error:{type(exc).__name__}")
+            if self.on_error is None:
+                raise
+            self.on_error(exc, context)
+            return
         context.trace.append(self.name)
 
     def describe(self) -> str:
@@ -486,6 +515,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     after_turn: Optional[Sequence[object]] = None,
     after_end: Sequence[object] = (),
     cautions: Optional[Sequence[object]] = None,
+    on_error: Optional[Callable[["Exception", "Context"], object]] = None,
     max_turns: Optional[int] = None,
     turn_template: Optional[str] = None,
     compact_after: Optional[int] = None,
@@ -516,6 +546,10 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     `after_end` 参数主要给 `ChatWorkflow` 用（声明式写法没有「外面」
     可以放步骤）。用户决定退出后（退出词 / Ctrl+D）它跑在循环之后、
     `ChatWorkflow` 的写记忆与落盘之前，所以仍能读到完整的 Context。
+
+    `on_error=lambda exc, ctx: ...`：某一轮模型调用失败时调用。异常会同时
+    写进 `ctx["chat_error"]` 和 trace（`chat_turn:error:<类型>`）；不传则
+    保持原行为（直接把异常抛出去）。
 
     `ExitWords` 写进 Context 的值会被自动读出来，所以 `exit_words`
     一般不用显式传；显式传的优先。
@@ -640,6 +674,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         ),
         output_key=output_key,
         cautions=cautions,
+        on_error=on_error,
     )
     loop = While(
         Var(signal_key) != "end", max_iterations=max_turns

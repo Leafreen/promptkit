@@ -1,7 +1,10 @@
 # core/workflow.py
 from __future__ import annotations
 
+import json
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -37,6 +40,7 @@ from promptkit.core.settings import (
 from promptkit.core.steps.actions.interactive import OUTPUT_STREAM_KEY, VERBOSITY_KEY
 from promptkit.core.steps.logics.goto import collect_labels
 from promptkit.core.steps.interface import (
+    DUMP_TRACE_KEY,
     HOOKS_KEY,
     Step,
     StepLike,
@@ -46,6 +50,23 @@ from promptkit.core.steps.interface import (
 if TYPE_CHECKING:
     from promptkit.session import Session
     from promptkit.types import AgentLike, JSONValue
+
+
+def _dump_trace(context: Context) -> None:
+    '''`_dump_trace` 开启时把 trace 写成 JSONL（`logs/trace_<时间>.jsonl`）。
+
+    混合内容（字符串 / dict）都写，非 JSON 对象用 `str()` 兜底；
+    实际文件路径会存回 `context["_trace_file"]`，方便调用方取。
+    '''
+    if not context.get(DUMP_TRACE_KEY):
+        return
+    logs = Path("logs")
+    logs.mkdir(parents=True, exist_ok=True)
+    path = logs / f"trace_{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
+    with path.open("w", encoding="utf-8") as fp:
+        for entry in context.trace:
+            fp.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    context["_trace_file"] = str(path)
 
 
 class Workflow(Step):
@@ -321,6 +342,7 @@ class Workflow(Step):
         finally:
             for handler in handlers:
                 bus.off(handler)
+            _dump_trace(context)
 
         return context
 

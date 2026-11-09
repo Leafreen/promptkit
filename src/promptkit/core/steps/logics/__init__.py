@@ -46,6 +46,7 @@ from promptkit.core.steps.logics.function import (
 )
 from promptkit.core.steps.logics.goto import Goto, GotoStep, Label, LabelStep
 from promptkit.core.steps.logics.if_step import If, IfStep
+from promptkit.core.steps.logics.on_error import ErrorHandler, OnError
 from promptkit.core.steps.logics.loop import (
     Break,
     Continue,
@@ -217,6 +218,9 @@ __all__ = [
     "LabelStep",
     "Goto",
     "GotoStep",
+    # on_error.py：异常兜底
+    "OnError",
+    "ErrorHandler",
     # function.py
     "Function",
     "FunctionDef",

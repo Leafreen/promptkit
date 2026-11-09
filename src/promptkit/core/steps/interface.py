@@ -17,6 +17,36 @@ _CONTROL_FLOW = (BreakSignal, ContinueSignal, ReturnSignal, GotoSignal)
 #: Context 里存放 `Hooks` 注册表的键（`promptkit.api.hooks` 用的就是它）
 HOOKS_KEY = "_promptkit_hooks"
 
+#: 开启后每个 Step 前后往 `ctx.trace` 追加结构化记录
+TRACE_STEPS_KEY = "_trace_steps"
+#: `Workflow.run()` 结束时把 trace 落盘到 `logs/trace_<时间>.jsonl`
+DUMP_TRACE_KEY = "_dump_trace"
+
+
+def trace_enabled(context: "Context") -> bool:
+    '''要不要记录结构化步骤 trace（默认关闭，避免改变现有 `ctx.trace` 的语义）。'''
+    return bool(context.get(TRACE_STEPS_KEY) or context.get(DUMP_TRACE_KEY))
+
+
+def _trace_end(
+    context: "Context",
+    step: "Step",
+    started: float,
+    status: str,
+    error: BaseException | None = None,
+) -> None:
+    '''记录一步的结束（开始记录在 `execute_step` 里）。'''
+    entry = {
+        "phase": "end",
+        "step": step.name,
+        "type": type(step).__name__,
+        "duration_ms": _elapsed_ms(started),
+        "status": status,
+    }
+    if error is not None:
+        entry["error"] = f"{type(error).__name__}: {error}"
+    context.trace.append(entry)
+
 
 def execute_step(step: "Step", context: Context) -> None:
     '''执行一步，并在前后发出 STEP_START / STEP_END 事件。
@@ -26,10 +56,14 @@ def execute_step(step: "Step", context: Context) -> None:
 
     挂了 `Hooks`（`context[HOOKS_KEY]`）时顺带派发三个生命周期钩子：
     before（返回 False 即拦截）、after（正常结束）、error（返回 True 即吞掉异常）。
+
+    开了 `_trace_steps` / `_dump_trace` 时，还会在 `ctx.trace` 里记录
+    `{phase, step, type, duration_ms, status, error}`（phase = start / end）。
     '''
     hooks = context.get(HOOKS_KEY)
     bus = bus_of(context)
-    if bus is None and hooks is None:
+    tracing = trace_enabled(context)
+    if bus is None and hooks is None and not tracing:
         step.execute(context)
         return
 
@@ -38,14 +72,29 @@ def execute_step(step: "Step", context: Context) -> None:
         bus.emit(Event(EventType.STEP_START, dict(info)))
 
     started = time.perf_counter()
+    if tracing:
+        context.trace.append(
+            {
+                "phase": "start",
+                "step": step.name,
+                "type": type(step).__name__,
+                "status": "running",
+            }
+        )
     if hooks is not None and not hooks.run_before(step, context):
+        if tracing:
+            _trace_end(context, step, started, "blocked")
         return  # 前置拦截：这一步不执行，工作流继续
 
     try:
         step.execute(context)
-    except _CONTROL_FLOW:
+    except _CONTROL_FLOW as exc:
+        if tracing:
+            _trace_end(context, step, started, "control_flow", exc)
         raise  # break / continue / return / goto：这一步没有正常跑完
     except Exception as exc:
+        if tracing:
+            _trace_end(context, step, started, "error", exc)
         if hooks is None or not hooks.run_error(step, context, exc):
             if bus is not None:
                 bus.emit(
@@ -61,6 +110,8 @@ def execute_step(step: "Step", context: Context) -> None:
             raise
         # 异常被 error 钩子吸收：视作正常结束，继续往下走
     else:
+        if tracing:
+            _trace_end(context, step, started, "ok")
         if hooks is not None:
             hooks.run_after(step, context, _elapsed_ms(started))
 
@@ -68,7 +119,6 @@ def execute_step(step: "Step", context: Context) -> None:
         bus.emit(
             Event(EventType.STEP_END, {**info, "duration_ms": _elapsed_ms(started)})
         )
-
 
 
 def _elapsed_ms(started: float) -> float:

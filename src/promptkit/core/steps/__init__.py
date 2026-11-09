@@ -105,6 +105,7 @@ from promptkit.core.steps.logics import (
     NewVar,
     Not,
     Number,
+    OnError,
     Or,
     Return,
     ReturnStep,
@@ -321,6 +322,8 @@ __all__ = [
     "LabelStep",
     "Goto",
     "GotoStep",
+    # logics：异常兜底
+    "OnError",
     # logics：函数
     "Function",
     "FunctionDef",
