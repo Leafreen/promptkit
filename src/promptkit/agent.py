@@ -70,6 +70,7 @@ from promptkit.core.settings import settings
 from promptkit.executor import Executor
 from promptkit.prompt import Prompt
 from promptkit.core.tool import Tool, as_tools
+from promptkit.core.tool.builtin.clock import drain_alarms
 from promptkit.types import (
     JSONValue,
     Message,
@@ -479,6 +480,16 @@ class Agent(AgentLike):
         self._session.append_message(_as_conversation_message(message))
         self.messages = self._build_messages()
 
+    def _drain_alarms(self) -> None:
+        '''把到点的计时器提醒插进对话（作为 user 消息）。
+
+        `timer` 工具在后台线程里到点，消息先落在 `ALARMS` 队列；每次调模型
+        前取空，模型就能在**下一轮**看到「<15:30>到了。」并被它提醒。放在
+        用户本轮输入之前，历史读起来才是「提醒 -> 用户回应」。
+        '''
+        for text in drain_alarms():
+            self._append_message({"role": "user", "content": text})
+
     def _append_assistant(self, assistant: object) -> Message:
         '''把助手的回复记进上下文。
 
@@ -591,6 +602,7 @@ class Agent(AgentLike):
         bus: EventBus,
         max_tool_rounds: int,
     ) -> str:
+        self._drain_alarms()
         self._append_message(self._normalise(prompt))
 
         tool_list = as_tools(tools)
@@ -734,6 +746,7 @@ class Agent(AgentLike):
         tools: Optional[Sequence[ToolLike]],
         max_tool_rounds: int,
     ) -> Iterator[Event]:
+        self._drain_alarms()
         self._append_message(self._normalise(prompt))
 
         tool_list = as_tools(tools)

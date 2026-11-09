@@ -22,13 +22,25 @@ from promptkit.core.tool.base import (
     tool,
 )
 from promptkit.core.tool.builtin import (
+    ALARMS,
     DEFAULT_ALLOWED_EXTENSIONS,
+    GET_TIME,
     MAX_CONTENT_CHARS,
     RUN_COMMAND,
+    TIMER,
     WEB_SEARCH,
     WRITE_FILE,
     WebSearch,
     WriteFile,
+    clock_text,
+    drain_alarms,
+    elapsed_seconds,
+    now_text,
+    running_timers,
+    start_timer,
+    stop_all_timers,
+    stop_timer,
+    timer,
 )
 
 #: 这几组工具依赖上层包（coding / skill / memory），只在真正取用时导入，
@@ -78,6 +90,19 @@ __all__ = [
     "WRITE_FILE",
     "DEFAULT_ALLOWED_EXTENSIONS",
     "MAX_CONTENT_CHARS",
+    # 时间 / 定时器
+    "GET_TIME",
+    "TIMER",
+    "ALARMS",
+    "clock_text",
+    "now_text",
+    "drain_alarms",
+    "start_timer",
+    "stop_timer",
+    "stop_all_timers",
+    "elapsed_seconds",
+    "running_timers",
+    "timer",
     # 编码 / Skill / 记忆工具（按需导入）
     "ReadFileTool",
     "WriteFileTool",

@@ -107,6 +107,8 @@ CHAT_INPUT_KEY = "usr_input"
 CHAT_REPLY_KEY = "model_reply"
 #: 最近一轮模型调用失败时的异常对象
 CHAT_ERROR_KEY = "chat_error"
+#: 每轮的时间戳（`ChatLoop(timestamps=True)` 写入，模板里可用 `{{chat_time}}`）
+CHAT_TIME_KEY = "chat_time"
 
 #: 默认退出词
 DEFAULT_EXIT_WORDS = ("exit", "quit", ":q")
@@ -131,6 +133,7 @@ def chat_context_vars() -> List[str]:
         CHAT_INPUT_KEY,
         CHAT_REPLY_KEY,
         CHAT_ERROR_KEY,
+        CHAT_TIME_KEY,
     ]
 
 
@@ -523,6 +526,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     compact_prompt: Optional[str] = None,
     compact_memory: object = None,
     compact_memory_key: Optional[str] = None,
+    timestamps: bool = False,
 ) -> Step:
     '''组装多轮对话循环，返回一个 `Workflow`（本身就是 Step）。
 
@@ -566,6 +570,11 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     给了 `compact_memory` 时，每次真正发生压缩后会把摘要**追加**进长期记忆
     （键是 `compact_memory_key:时间戳`，默认前缀 `conversation_summary`）——
     短期上下文被压掉的内容，仍能在后续轮次通过语义召回拿回来。
+
+    `timestamps=True`：每轮调模型前把当前时间写进 `{{chat_time}}`，默认模板
+    变成 `[11-09 15:30] 用户说的话` —— 模型因此能感知「现在几点」。用了
+    自定义 `turn_template` 时不会自动加前缀，需要的话自己在模板里写
+    `{{chat_time}}`。
     '''
     from promptkit.core.steps.actions.interactive import Echo, Read
     from promptkit.core.steps.logics.if_step import If
@@ -670,12 +679,32 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
 
     turn = ChatTurn(
         prompt_content=(
-            turn_template if turn_template is not None else "{{%s}}" % input_key
+            turn_template
+            if turn_template is not None
+            else (
+                # 带时间戳：`[11-09 15:30] 用户说的话`
+                "[{{" + CHAT_TIME_KEY + "}}] {{" + input_key + "}}"
+                if timestamps
+                else "{{%s}}" % input_key
+            )
         ),
         output_key=output_key,
         cautions=cautions,
         on_error=on_error,
     )
+    # 每轮调模型前把「现在几点」写进 Context（模板里用 {{chat_time}}）
+    stamp: Sequence[StepLike] = ()
+    if timestamps:
+        from promptkit.core.steps.logics.function import FunctionStep
+        from promptkit.core.tool.builtin.clock import clock_text
+
+        stamp = (
+            FunctionStep(
+                lambda ctx: clock_text(),
+                output_key=CHAT_TIME_KEY,
+                name="chat_time",
+            ),
+        )
     loop = While(
         Var(signal_key) != "end", max_iterations=max_turns
     ).Do(
@@ -691,6 +720,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         *coerce_steps(*cast(Sequence[StepLike], loop_body)),
         # 压缩放在调模型**之前**（没配 compact_after 就没有这一步）
         *(() if compact_step is None else (compact_step,)),
+        *stamp,
         turn,
         Echo(Var(output_key), render=render),
         *coerce_steps(*resolved_after_turn),

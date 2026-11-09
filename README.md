@@ -37,7 +37,7 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
 
 - 普通 Python 函数直接放进 `tools=[...]`，函数签名自动生成 JSON Schema
 - 内置工具：联网搜索 `WEB_SEARCH`（多后端可插拔）、沙箱写文件 `WriteFile`、
-  跨平台跑命令 `RUN_COMMAND`
+  跨平台跑命令 `RUN_COMMAND`、查时间 `GET_TIME`、到点提醒 `TIMER`
 - MCP 客户端：`load_mcp_tools` 发现工具、`register_mcp_security` 白名单
   安全门、`MCPToolStep` 在工作流里显式调用（仅支持 Streamable HTTP 传输）
 - 编码任务原语（`promptkit.coding`）：`CodingStep` / `ApplyDiff` / `RunTests` /
@@ -407,6 +407,9 @@ chat.run(agent=agent)
 - 会话还能记住 Context 变量（问卷只问一次）：
   `wf.run(..., session="s.json", variables=["basic_info"])`
 - 长对话自动压缩：`ChatWorkflow(compact_after=40, compact_keep=8)`
+- 让模型感知时间：`ChatWorkflow(timestamps=True)`（每轮用户消息自带
+  `[11-09 15:30]` 前缀；手写 `ChatLoop(timestamps=True)` 同理，模板里可用
+  `{{chat_time}}`）
 - 声明式 Step（`Role` / `Want` / `Rules` / `Tools` / `Deliverables` /
   `ExitWords` / `SystemPrompt` / `ChatLoop` / `Compact` / `SaveDeliverables`）
   也可手写组合；`Rules` 等**多次调用会累积**，重置传 `replace=True`
@@ -592,6 +595,13 @@ LLMStep(Prompt(role="user", content="帮我看看订单 67890，能退就退了�
 | `WEB_SEARCH` | 联网搜索；配了 Key（博查 / 智谱 / Tavily / Serper / Brave）就用 Key，否则走免密钥降级链 `百度 → Bing 中国 → DuckDuckGo`；顺序可用 `PROMPTKIT_SEARCH_BACKENDS` 调整 |
 | `WriteFile` / `WRITE_FILE` | 让**模型自己决定**写文件；沙箱限制根目录、扩展名白名单、单次 20 万字符 |
 | `RUN_COMMAND` | 跑 shell 命令（跨平台、UTF-8 容错、带超时） |
+| `GET_TIME` | 查当前时间（`YYYY-MM-DD HH:MM:SS 周X`），模型能主动问「现在几点」 |
+| `TIMER` | 计时器：`timer("start", seconds=600, name="work")` 到点后往对话里插一条 `<15:30>到了。`，模型下一轮即可感知 |
+
+计时器是「抢断式」提醒：后台线程到点后立即打印并排队，Agent 在**下一次**
+调模型前把提醒作为 `user` 消息插进历史（也就是用户下一次说话时模型会先
+看到它）。入参：`action`（`start` / `stop` / `elapsed` / `list`）、
+`seconds`、`name`、`message`（自定义提醒文本，默认 `<HH:MM>到了。`）。
 
 ⚠️ `WriteFile` 的沙箱（`sandbox=True`，默认开）是唯一「模型驱动写磁盘」的
 通道，别关。搜索结果会被塞进提示词而网页内容不可信 —— 别把搜索结果当

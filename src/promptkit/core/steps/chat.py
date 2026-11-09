@@ -59,6 +59,7 @@ from promptkit.memory.config import MemoryConfig, RecallConfig
 
 from promptkit.core.steps.actions.chat_util import (
     CHAT_INPUT_KEY,
+    CHAT_TIME_KEY,
     CHAT_REPLY_KEY,
     DEFAULT_EXIT_WORDS,
     Behavior,
@@ -218,6 +219,8 @@ class ChatWorkflow:
     compact_prompt: Optional[str] = None
     render: str = "markdown"
     read_prompt: str = ">>> "
+    #: 每轮给用户消息加时间戳（`[11-09 15:30] ...`），模型能感知「现在几点」
+    timestamps: bool = False
     name: str = "chat"
     #: 会话文件路径（或 `Session`）。给了就「开跑前 load、结束时 save」，
     #: 下次用同一个路径就接着上次聊。
@@ -481,6 +484,7 @@ class ChatWorkflow:
             # 压缩摘要转存长期记忆：短期窗口滚过去的内容，靠召回还能找回来
             compact_memory=self.memory if self.promote_compaction else None,
             compact_memory_key=self.compact_memory_key,
+            timestamps=self.timestamps,
         )
         if end_writes:
             # 断网 / Ctrl+C / max_turns 用尽时，循环后面的写记忆会被跳过。
@@ -512,16 +516,22 @@ class ChatWorkflow:
         调用方得自己组装 prompt，硬塞 `list[dict]` 的 repr 进去只会让模型困惑。
         '''
         config = self.memory_config
-        if not isinstance(config, MemoryConfig) or not config.has_recall():
-            return None
-        recall = config.recall
-        if not isinstance(recall, RecallConfig) or recall.raw:
-            return None
-        return (
-            "{{%s}}\n\n以下是长期记忆里检索到的相关片段"
-            "（可能有用，也可能不相关，别硬套）：\n{{%s}}"
-            % (CHAT_INPUT_KEY, recall.output_key)
-        )
+        template: Optional[str] = None
+        if isinstance(config, MemoryConfig) and config.has_recall():
+            recall = config.recall
+            if not isinstance(recall, RecallConfig) or recall.raw:
+                return None
+            template = (
+                "{{%s}}\n\n以下是长期记忆里检索到的相关片段"
+                "（可能有用，也可能不相关，别硬套）：\n{{%s}}"
+                % (CHAT_INPUT_KEY, recall.output_key)
+            )
+        if self.timestamps:
+            return "[{{%s}}] %s" % (
+                CHAT_TIME_KEY,
+                template or "{{%s}}" % CHAT_INPUT_KEY,
+            )
+        return template
 
     def _writes_each_turn(self) -> bool:
         config = self.memory_config

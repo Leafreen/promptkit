@@ -70,6 +70,7 @@
 | --- | --- |
 | `ChatWorkflow` / `chat_workflow` | stable |
 | `ChatLoop` / `ChatTurn` / `Behavior` | stable |
+| `ChatLoop(timestamps=True)` / `ChatWorkflow(timestamps=True)` / `CHAT_TIME_KEY` | **新增** — 每轮写入 `{{chat_time}}` 并给用户消息加时间前缀 |
 | `Role` / `Want` / `Rules` / `Tools` / `Deliverables` / `ExitWords` | stable |
 | `SystemPrompt` / `Compact` | stable |
 | `MultilineInput` | stable（若不存在则按阶段 1 新增） |
@@ -119,6 +120,9 @@ Session.from_snapshot(snap, store=None) -> Session
 | --- | --- |
 | `Tool` / `tool` / `as_tool` / `as_tools` / `ToolRegistry` | stable |
 | `RUN_COMMAND` / `WEB_SEARCH` / `WriteFile` | stable |
+| `GET_TIME` / `TIMER` | experimental |
+| `start_timer` / `stop_timer` / `stop_all_timers` / `elapsed_seconds` / `running_timers` / `timer` | experimental |
+| `ALARMS` / `drain_alarms` / `clock_text` / `now_text` | experimental |
 | `ReadFileTool` / `WriteFileTool` / `ApplyDiffTool` / `ListDirTool` / `SearchCodeTool` / `RunCommandTool` / `RunTestsTool` | stable |
 | `MCPTool` / `load_mcp_tools` / `load_mcp_from_config` | experimental |
 
