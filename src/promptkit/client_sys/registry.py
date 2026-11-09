@@ -234,7 +234,7 @@ def detect_vendor(
     `DEFAULT_VENDOR`（DeepSeek）。
 
     `api_key` 是「显式传进来的密钥」——传了就说明用户心里已经有个默认厂商了，
-    不再去环境变量里猜（否则 `Agent(api_key="sk-test")` 的行为会随开发机上的
+    不再去环境变量里猜（否则 `Agent(api_key="test-key")` 的行为会随开发机上的
     环境变量漂移，测试也会飘）。
     '''
     if base_url:
@@ -287,7 +287,7 @@ def resolve_api_key(
     )
     raise ValueError(
         f"没有找到 {spec.label} 的 API Key：请设置环境变量 {want}，"
-        f"或在 {config_module.ENV_FILE} 里写一行 {spec.env_vars[0]}=sk-xxxx{hint}"
+        f"或在 {config_module.ENV_FILE} 里写一行 {spec.env_vars[0]}=<你的密钥>{hint}"
     )
 
 

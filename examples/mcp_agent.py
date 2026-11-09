@@ -87,7 +87,7 @@ def main() -> None:
     ])
 
     # Agent 集成方式（注释）：
-    #   agent = Agent(api_key="sk-...", vendor="doubao")
+    #   agent = Agent(api_key="<你的密钥>", vendor="doubao")
     #   agent.ask("读一下 config.yaml 里有什么", tools=registry.all())
     # Agent 循环零改动 —— MCPTool 和内置 Tool 走同一套 tool_calls 流程
 

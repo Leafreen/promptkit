@@ -3,9 +3,9 @@
 所有逻辑都写在下面的工作流声明里；main 只负责 run()。
 
 运行前准备密钥（二选一）：
-    set DEEPSEEK_API_KEY=sk-xxxx      # Windows
-    export DEEPSEEK_API_KEY=sk-xxxx   # Linux / macOS
-或者在项目根目录的 .env 里写一行 DEEPSEEK_API_KEY=sk-xxxx。
+    set DEEPSEEK_API_KEY=<你的密钥>      # Windows
+    export DEEPSEEK_API_KEY=<你的密钥>   # Linux / macOS
+或者在项目根目录的 .env 里写一行 DEEPSEEK_API_KEY=<你的密钥>。
 
 运行：
     python examples/interview.py

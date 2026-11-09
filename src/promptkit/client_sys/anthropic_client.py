@@ -254,7 +254,7 @@ def _http_error_message(exc: Exception, url: str) -> str:
 class AnthropicClient(BaseClient):
     '''Anthropic Messages API 客户端，对外说 Chat Completions。
 
-        client = AnthropicClient(api_key="sk-ant-xxx")
+        client = AnthropicClient(api_key="<你的密钥>")
         reply = client.create(
             model="claude-sonnet-4-5",
             messages=[{"role": "user", "content": "你好"}],

@@ -1,9 +1,9 @@
 '''同一个工作流，换三家厂商跑 —— 换 Agent 就够了，Workflow 一行都不用改。
 
 运行：
-    set DEEPSEEK_API_KEY=sk-xxxx       # 有哪家的密钥就跑哪家
-    set OPENAI_API_KEY=sk-xxxx
-    set ANTHROPIC_API_KEY=sk-ant-xxxx
+    set DEEPSEEK_API_KEY=<你的密钥>       # 有哪家的密钥就跑哪家
+    set OPENAI_API_KEY=<你的密钥>
+    set ANTHROPIC_API_KEY=<你的密钥>
     python examples/multi_vendor.py                # 有密钥的都跑一遍
     python examples/multi_vendor.py anthropic      # 只跑指定厂商
 

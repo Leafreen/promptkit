@@ -30,7 +30,7 @@ __all__ = ["OpenAIClient"]
 class OpenAIClient(BaseClient):
     '''用官方 `openai` SDK 说话的客户端。
 
-        client = OpenAIClient(api_key="sk-xxx", base_url="https://api.deepseek.com")
+        client = OpenAIClient(api_key="<你的密钥>", base_url="https://api.deepseek.com")
         client.create(model="deepseek-flash", messages=[{"role": "user", "content": "hi"}])
         # 等价于 client.chat.completions.create(...)
 

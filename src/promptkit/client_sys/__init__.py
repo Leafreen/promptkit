@@ -6,7 +6,7 @@
 
     from promptkit.client_sys import make_client
 
-    client = make_client("anthropic", api_key="sk-ant-xxx")
+    client = make_client("anthropic", api_key="<你的密钥>")
     reply = client.create(
         model="claude-sonnet-4-5",
         messages=[{"role": "user", "content": "你好"}],

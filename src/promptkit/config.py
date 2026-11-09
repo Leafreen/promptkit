@@ -91,7 +91,7 @@ def resolve_api_key(
     if not key:
         raise ValueError(
             f"没有找到 API Key：请设置环境变量 {ENV_VAR}，"
-            f"或在 {ENV_FILE} 里写一行 {ENV_VAR}=sk-xxxx"
+            f"或在 {ENV_FILE} 里写一行 {ENV_VAR}=<你的密钥>"
         )
     return key
 
