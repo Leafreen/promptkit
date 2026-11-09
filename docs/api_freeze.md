@@ -57,7 +57,8 @@
 
 | 名字 | 状态 |
 | --- | --- |
-| `Function(args=..., name=...)` | **deprecated（阶段 4 起）** — 改用位置形参 |
+| `Function(args=..., name=...)` | **deprecated（阶段 4 起）** — 改用位置形参 `Function('$a', '$b')` |
+| `Function('$a', ..., name=可选)` | **新增（阶段 4）** — 形参用 `$` 标记（内部去掉）；`name` 缺省自动生成 `function_<id>` |
 | `FunctionDef.Do` / `BoundStep` | stable |
 | `Return` / `ThisFunc` | stable |
 
@@ -172,7 +173,7 @@ Session.from_snapshot(snap, store=None) -> Session
 | 1 | Settings 去全局化、ChatLoop 阶段化 | `settings.xxx = ...` |
 | 2 | Session 新签名、`SessionPop` → `SessionRollback` | `SessionPop`、旧 `Session` 位置参数写法 |
 | 3 | `Call` → `Transform` | `Call`（lambda / 闭包直接报错） |
-| 4 | `Function` 去 `args` 元组与 `name` | `Function(args=..., name=...)` |
+| 4 | `Function` 改位置形参（`$a` 标记），`name` 变可选 | 旧 `Function(args=...)` 不再接受（TypeError） |
 | 5 | `OnError`、Trace 增强 | 无 |
 
 **基线测试**：`tests/baseline/`。每个阶段结束必须全绿，且

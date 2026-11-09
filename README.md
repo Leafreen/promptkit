@@ -19,7 +19,7 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
   本身也是 `Step`，可任意嵌套复用
 - 完整控制流：`If / ElseIf / Else`、`Switch / Case`、`While / DoWhile / For /
   ForEach`、`Break / Continue`、`Label / Goto`、`When`（三元）
-- `Function(args=...).Do(...)` 定义带参数、可复用的步骤，支持 `Return` 和
+- `Function('$a', '$b').Do(...)` 定义带参数、可复用的步骤，支持 `Return` 和
   `ThisFunc` 递归；惰性表达式（`Var("n") + 1` 运行时才求值）
 - 语义条件：`Classify` / `Intent` / `Similar` / `Sem(...)` 运算符写法，
   闭集判定，由 `LLMJudge` 显式注入
@@ -289,7 +289,7 @@ LLMStep(Prompt(role="user", content="判断意图：{{text}}"),
 | `Inc("i", by=1)` / `Dec("i", by=1)` | `i++` / `i += n` / `i--` |
 | `LLMStep(prompt, output_model=None, output_key="output")` | 调模型；给了 `output_model` 就做结构化校验 |
 | `FunctionStep(func, output_key=None)` | 包装任意 Python 函数为步骤 |
-| `Function(args=..., name=...).Do(...)` | 定义带参数的可复用步骤；参数强校验（多传 / 少传 / 重复抛 `ArgumentError`） |
+| `Function('$a', '$b', name=...).Do(...)` | 定义带参数的可复用步骤；形参用 `$` 标记（声明记号，内部去掉）；参数强校验（多传 / 少传 / 重复抛 `ArgumentError`） |
 | `Return(expr)` | 函数返回值，调用方用 `.result` 取（属性，不加括号） |
 | `ThisFunc(Var("n") - 1).result` | 函数体内递归调用自己（上限 `settings.max_recursion_depth`，默认 100） |
 | `Transform(name, *args, **kwargs)` | 具名数据转换表达式（`join` / `len` / `json_dumps` …；用 `@transform("name")` 注册扩展）；**不是步骤**，要包进 `Set` / `Echo` |
@@ -332,7 +332,7 @@ If(Var("p").attr("age") >= 18).Then(...)   # 条件里可以下标、取属性
 ### 函数与递归
 
 ```python
-Ask = Function(args=("job",), name="question").Do(
+Ask = Function('$job', name="question").Do(
     Prompt(role="user", content="面试一个 {{job}} 岗位，问一个问题。"),
 )
 

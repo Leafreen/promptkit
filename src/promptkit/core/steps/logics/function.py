@@ -1,7 +1,8 @@
 # core/steps/function.py
-'''步骤工厂：Function(args=...).Do(...)、Return(...)，以及最基础的 FunctionStep。'''
+'''步骤工厂：Function('$a', '$b').Do(...)、Return(...)，以及最基础的 FunctionStep。'''
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -31,9 +32,6 @@ from promptkit.core.steps.interface import (
     coerce_steps,
     execute_step,
 )
-
-if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
-    from pydantic import BaseModel
 
 _MISSING = object()
 
@@ -67,36 +65,33 @@ class FunctionStep(Step):
 
 
 class FunctionDef:
-    '''`Function(args=...).Do(...)` 的结果：一个可复用的、带参数的步骤定义。
+    '''`Function('$a', '$b').Do(...)` 的结果：一个可复用的、带参数的步骤定义。
 
-        Ask = Function(args=("job",), name="ask").Do(
+        Ask = Function('$job', name="ask").Do(
             Prompt(role="user", content="面试一个{{job}}岗位，问一个问题。"),
         )
         Ask(job="后端工程师")          # -> BoundStep，可以放进 Workflow
+
+    形参用 `$` 前缀标记（只作声明时的记号，内部会去掉）；不传 `name` 时
+    自动生成 `function_<id>` 作为函数名与默认输出变量。
     '''
 
     def __init__(
         self,
-        args: tuple = (),
-        *,
-        name: str = "function",
+        *params: str,
+        name: Optional[str] = None,
         description: str = "",
         output_key: Optional[str] = None,
         output_model: Optional[type] = None,
         tools: Optional[List[ToolLike]] = None,
         inherit: object = False,
     ):
-        self.args = tuple(args)
-        if any(not isinstance(a, str) or not a for a in self.args):
-            raise ArgumentError(f"args 必须是非空字符串序列，得到 {args!r}")
-        if len(set(self.args)) != len(self.args):
-            raise ArgumentError(f"args 有重复：{self.args!r}")
-
-        self.name = name
+        self.args = _normalise_params(params)
+        self.name = name or f"function_{uuid.uuid4().hex[:8]}"
         self.description = description
-        self.output_key = output_key or name
+        self.output_key = output_key or self.name
         #: 要不要继承调用方的状态：True=全部，序列=只继承这些 key
-        self.inherit = _normalise_inherit(inherit, name)
+        self.inherit = _normalise_inherit(inherit, self.name)
         self.output_model = output_model
         self.tools = list(tools) if tools else None
         self.body: List[Step] = []
@@ -167,7 +162,7 @@ class FunctionDef:
 class ReturnStep(Step):
     '''结束当前函数体，并把一个值作为该函数的返回值。
 
-        Add = Function(args=("a", "b"), name="add").Do(
+        Add = Function('$a', '$b', name="add").Do(
             Return(Var("a") + Var("b")),
         )
         Echo("和 = ", Add(a=1, b=2).result())
@@ -282,7 +277,7 @@ def _current_function(context: Context) -> FunctionDef:
 class ThisFuncCall(Step):
     '''对「当前正在执行的函数」的递归调用。
 
-        Factorial = Function(args=("n",), name="factorial").Do(
+        Factorial = Function('$n', name="factorial").Do(
             If(Var("n") == 0).Then(Return(1)).Else(
                 Return(Var("n") * ThisFunc(Var("n") - 1).result)
             )
@@ -350,16 +345,21 @@ def ThisFunc(*args: object, **kwargs: object) -> ThisFuncCall:  # noqa: N802
 
 
 def Function(  # noqa: N802 - 跟随 DSL 命名
-    args: tuple = (),
-    *,
-    name: str = "function",
+    *params: str,
+    name: Optional[str] = None,
     description: str = "",
     output_key: Optional[str] = None,
     output_model: Optional[type] = None,
     tools: Optional[List[ToolLike]] = None,
     inherit: object = False,
 ) -> FunctionDef:
-    '''定义一个带参数的步骤：Function(args=("job",)).Do(Prompt(...))。
+    '''定义一个带参数的步骤：Function('$job', name="ask").Do(Prompt(...))。
+
+    形参按位置传入，用 `$` 前缀标记（声明记号，内部自动去掉）：
+    `Function('$a', '$b')` 等价于旧写法 `Function(args=("a", "b"))`（旧写法已移除）。
+
+    `name` 可选；不传时自动生成 `function_<id>`。它同时是默认输出变量，
+    也可以用 `output_key` 单独指定。
 
     传了 tools 时，这个函数里的模型调用可以自己调用工具（function calling）。
     `description` 是给**模型**看的说明 —— 挂到 `ChatWorkflow(skills=[...])` 时
@@ -369,7 +369,7 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
     带进来。`True` = 全部，`("profile", "topics")` = 只带这几个。
     '''
     return FunctionDef(
-        args=args,
+        *params,
         name=name,
         description=description,
         output_key=output_key,
@@ -377,6 +377,22 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
         tools=tools,
         inherit=inherit,
     )
+
+
+def _normalise_params(params: Tuple[str, ...]) -> Tuple[str, ...]:
+    '''校验形参并去掉声明用的 `$` 前缀。'''
+    names: List[str] = []
+    for raw in params:
+        if not isinstance(raw, str) or not raw:
+            raise ArgumentError(f"形参必须是非空字符串，得到 {raw!r}")
+        # `$a` 只是声明记号：函数体内的变量名是 `a`
+        name = raw[1:] if raw.startswith("$") else raw
+        if not name:
+            raise ArgumentError(f"形参去掉 `$` 后为空：{raw!r}")
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise ArgumentError(f"形参有重复：{names!r}")
+    return tuple(names)
 
 
 def _normalise_inherit(

@@ -2,7 +2,7 @@
 
 典型用法（`from promptkit.core import *` 之后这些名字都可用）：
 
-    Input = Function(args=("job",)).Do(
+    Input = Function('$job').Do(
         Prompt(role="user", content="面试一个{{job}}岗位。"),
     )
 

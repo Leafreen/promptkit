@@ -121,7 +121,7 @@ def inherited_state(inherit: Any, state: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def function_parameters(definition: FunctionDef) -> Dict[str, Any]:
-    '''DSL `Function(args=("a", "b"))` 的参数 Schema：都是必填字符串。'''
+    '''DSL `Function('$a', '$b')` 的参数 Schema：都是必填字符串。'''
     properties = {
         name: {"type": "string", "description": f"参数 {name}"}
         for name in definition.args
@@ -133,7 +133,7 @@ def function_parameters(definition: FunctionDef) -> Dict[str, Any]:
 
 
 class _FunctionTool(Tool):
-    '''`Function(args=...).Do(...)` 的 Tool 视图。'''
+    '''`Function('$a').Do(...)` 的 Tool 视图。'''
 
     def __init__(self, definition: FunctionDef, holder: AgentHolder):
         self.definition = definition
@@ -225,7 +225,7 @@ class _SkillTool(Tool):
 def _last_body_output(definition: FunctionDef, context: Context) -> Any:
     '''函数体自己指定了 `output_key`（不是函数名）时，取最后一个写进去的值。
 
-        Function(args=..., name="make_lab").Do(LLMStep(..., output_key="output"))
+        Function('$topic', name="make_lab").Do(LLMStep(..., output_key="output"))
 
     `Return(...)` 那条路已经写进 `definition.output_key`，不会走到这儿。
     '''

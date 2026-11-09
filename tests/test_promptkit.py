@@ -1347,7 +1347,7 @@ class TestVars(PromptkitTestCase):
 class TestFunctionFactory(PromptkitTestCase):
     def test_bind_and_run_prompt(self):
         agent = FakeAgent(["你好"])
-        Ask = Function(args=("job",), name="ask").Do(
+        Ask = Function("$job", name="ask").Do(
             Prompt(role="user", content="面试一个{{job}}岗位。")
         )
         ctx = Workflow(Ask(job="后端")).run(agent=agent)
@@ -1357,22 +1357,22 @@ class TestFunctionFactory(PromptkitTestCase):
         self.assertEqual(ctx["ask"], "你好")
 
     def test_unknown_argument_raises(self):
-        Ask = Function(args=("job",), name="ask").Do(Prompt(role="user", content="x"))
+        Ask = Function("$job", name="ask").Do(Prompt(role="user", content="x"))
         with self.assertRaises(ArgumentError):
             Ask(joob="后端")
 
     def test_missing_argument_raises(self):
-        Ask = Function(args=("job",), name="ask").Do(Prompt(role="user", content="x"))
+        Ask = Function("$job", name="ask").Do(Prompt(role="user", content="x"))
         with self.assertRaises(ArgumentError):
             Ask()
 
     def test_duplicate_args_raise(self):
         with self.assertRaises(ArgumentError):
-            Function(args=("a", "a"))
+            Function("$a", "a")
 
     def test_args_are_scoped_to_the_step(self):
         agent = FakeAgent(["ok"])
-        Ask = Function(args=("job",), name="ask").Do(
+        Ask = Function("$job", name="ask").Do(
             Prompt(role="user", content="{{job}}")
         )
         ctx = Workflow(NewVar("job", default="外层"), Ask(job="内层")).run(agent=agent)
@@ -1386,14 +1386,14 @@ class TestFunctionFactory(PromptkitTestCase):
 
     def test_output_model(self):
         agent = FakeAgent(['{"label": "退款"}'])
-        Classify = Function(args=(), name="classify", output_model=Intent).Do(
+        Classify = Function(name="classify", output_model=Intent).Do(
             Prompt(role="user", content="判断意图")
         )
         ctx = Workflow(Classify()).run(agent=agent)
         self.assertEqual(ctx["classify"].label, "退款")
 
     def test_do_accepts_plain_steps(self):
-        Mark = Function(args=(), name="mark").Do(
+        Mark = Function(name="mark").Do(
             FunctionStep(lambda _c: "done", output_key="out")
         )
         ctx = Workflow(Mark()).run()
@@ -1402,7 +1402,7 @@ class TestFunctionFactory(PromptkitTestCase):
     def test_expression_argument_is_evaluated(self):
         # 传 Var("n") 时应该注入 n 的当前值，而不是 VarExpr 对象
         agent = FakeAgent(["ok"])
-        Ask = Function(args=("n",), name="ask").Do(
+        Ask = Function("$n", name="ask").Do(
             Prompt(role="user", content="n={{n}}")
         )
         Workflow(NewVar("n", default=1), Set("n", 2), Ask(n=Var("n"))).run(agent=agent)
@@ -1410,7 +1410,7 @@ class TestFunctionFactory(PromptkitTestCase):
 
     def test_expression_argument_refreshed_each_iteration(self):
         agent = FakeAgent(["ok", "ok", "ok"])
-        Ask = Function(args=("n",), name="ask").Do(
+        Ask = Function("$n", name="ask").Do(
             Prompt(role="user", content="n={{n}}")
         )
         Workflow(
@@ -1426,7 +1426,7 @@ class TestFunctionFactory(PromptkitTestCase):
 
     def test_steps_inside_definition_are_reusable(self):
         agent = FakeAgent(["a", "b"])
-        Ask = Function(args=(), name="ask").Do(Prompt(role="user", content="问"))
+        Ask = Function(name="ask").Do(Prompt(role="user", content="问"))
         ctx = Workflow(Ask(), Ask()).run(agent=agent)
         self.assertEqual(ctx["ask"], "b")
         self.assertEqual(len(agent.prompts), 2)
@@ -1860,14 +1860,14 @@ class TestWhileHooks(PromptkitTestCase):
 class TestAgentReply(PromptkitTestCase):
     def test_runs_step_and_returns_reply(self):
         agent = FakeAgent(["问题一"])
-        Ask = Function(args=(), name="ask").Do(Prompt(role="user", content="问一个问题"))
+        Ask = Function(name="ask").Do(Prompt(role="user", content="问一个问题"))
         ctx = Workflow(NewVar("q"), Set("q", Ask().agent_reply())).run(agent=agent)
         self.assertEqual(ctx["q"], "问题一")
         self.assertEqual(ctx["ask"], "问题一")
 
     def test_reevaluated_every_iteration(self):
         agent = FakeAgent(["一", "二", "三"])
-        Ask = Function(args=(), name="ask").Do(Prompt(role="user", content="问"))
+        Ask = Function(name="ask").Do(Prompt(role="user", content="问"))
         ctx = Workflow(
             NewVar("n", default=0),
             NewVar("last"),
@@ -1881,7 +1881,7 @@ class TestAgentReply(PromptkitTestCase):
 
     def test_structured_model_reply(self):
         agent = FakeAgent(['{"label": "投诉"}'])
-        Classify = Function(args=(), name="cls", output_model=Intent).Do(
+        Classify = Function(name="cls", output_model=Intent).Do(
             Prompt(role="user", content="判断意图")
         )
         ctx = Workflow(Set("r", Classify().agent_reply())).run(agent=agent)
@@ -2527,7 +2527,7 @@ class TestStepTree(PromptkitTestCase):
         )
 
     def test_bound_step_shows_args_and_body(self):
-        Ask = Function(args=("job",), name="ask").Do(
+        Ask = Function("$job", name="ask").Do(
             Prompt(role="user", content="面试{{job}}")
         )
         text = Workflow(Ask(job="后端")).render()
@@ -3568,28 +3568,28 @@ class TestGoto(PromptkitTestCase):
 
 class TestFunctionReturn(PromptkitTestCase):
     def test_return_value(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         ctx = Workflow(Set("s", Add(a=1, b=2).result)).run()
         self.assertEqual(ctx["s"], 3)
 
     def test_return_value_is_also_written_to_output_key(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         ctx = Workflow(Add(a=1, b=2)).run()
         self.assertEqual(ctx["add"], 3)
 
     def test_returns_arbitrary_python_objects(self):
         payload = {"name": "Ann"}
-        Make = Function(args=(), name="make").Do(Return(payload))
+        Make = Function(name="make").Do(Return(payload))
         ctx = Workflow(Make()).run()
         self.assertIs(ctx["make"], payload)
 
     def test_return_none_when_no_value_given(self):
-        F = Function(args=(), name="f").Do(Return())
+        F = Function(name="f").Do(Return())
         ctx = Workflow(F()).run()
         self.assertIsNone(ctx["f"])
 
     def test_early_return_from_inside_a_loop(self):
-        FirstEven = Function(args=("xs",), name="first_even").Do(
+        FirstEven = Function("$xs", name="first_even").Do(
             ForEach("x", Var("xs")).Do(
                 If(Var("x") % 2 == 0).Then(Return(Var("x"))),
             ),
@@ -3603,7 +3603,7 @@ class TestFunctionReturn(PromptkitTestCase):
         )
 
     def test_return_from_inside_an_if_branch(self):
-        Sign = Function(args=("n",), name="sign").Do(
+        Sign = Function("$n", name="sign").Do(
             If(Var("n") > 0).Then(Return("正"))
             .ElseIf(Var("n") < 0).Then(Return("负"))
             .Else(Return("零")),
@@ -3614,8 +3614,8 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertEqual(wf.run(v=0)["r"], "零")
 
     def test_function_can_call_another_function(self):
-        Inner = Function(args=("x",), name="inner").Do(Return(Var("x") * 2))
-        Outer = Function(args=("x",), name="outer").Do(
+        Inner = Function("$x", name="inner").Do(Return(Var("x") * 2))
+        Outer = Function("$x", name="outer").Do(
             Inner(x=Var("x")),
             Return(Var("inner") + 1),
         )
@@ -3624,7 +3624,7 @@ class TestFunctionReturn(PromptkitTestCase):
 
     def test_return_re_evaluates_on_each_use(self):
         seen = []
-        F = Function(args=("n",), name="f").Do(
+        F = Function("$n", name="f").Do(
             FunctionStep(lambda c: seen.append(c["n"])),
             Return(Var("n")),
         )
@@ -3637,7 +3637,7 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertEqual(ctx["last"], 2)
 
     def test_missing_return_is_reported_clearly(self):
-        NoReturn = Function(args=(), name="nothing").Do(FunctionStep(lambda c: None))
+        NoReturn = Function(name="nothing").Do(FunctionStep(lambda c: None))
         with self.assertRaises(UndefinedVariable) as cm:
             Workflow(Set("r", NoReturn().result)).run()
         self.assertIn("Return", str(cm.exception))
@@ -3648,12 +3648,12 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertIn("Function", str(cm.exception))
 
     def test_agent_reply_alias_still_works(self):
-        F = Function(args=(), name="f").Do(Return(7))
+        F = Function(name="f").Do(Return(7))
         ctx = Workflow(Set("r", F().agent_reply())).run()
         self.assertEqual(ctx["r"], 7)
 
     def test_prompt_body_needs_no_return(self):
-        Ask = Function(args=("text",), name="ask").Do(
+        Ask = Function("$text", name="ask").Do(
             Prompt(role="user", content="Q:{{text}}")
         )
         self.assertEqual(Ask.output_key, "ask")
@@ -3662,35 +3662,35 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertEqual(ctx["r"], "答复")
 
     def test_tree_rendering(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         self.assertEqual(
             Add(a=1, b=2).render().splitlines(),
             ["add(a=1, b=2)", "└─ Return((Var('a') + Var('b')))"],
         )
 
     def test_return_value_is_type_coerced(self):
-        F = Function(args=(), name="n", output_key="n").Do(Return("42"))
+        F = Function(name="n", output_key="n").Do(Return("42"))
         ctx = Workflow(Number("n"), F()).run()
         self.assertEqual(ctx["n"], 42)
 
     # ---------------- 位置参数 / ThisFunc 递归 ----------------
     def test_positional_arguments(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         self.assertEqual(Workflow(Set("s", Add(1, 2).result)).run()["s"], 3)
         self.assertEqual(Workflow(Set("s", Add(a=1, b=2).result)).run()["s"], 3)
 
     def test_positional_and_keyword_conflict_raises(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         with self.assertRaises(ArgumentError):
             Add(1, a=2)
 
     def test_too_many_positional_arguments_raises(self):
-        Add = Function(args=("a", "b"), name="add").Do(Return(Var("a") + Var("b")))
+        Add = Function("$a", "$b", name="add").Do(Return(Var("a") + Var("b")))
         with self.assertRaises(ArgumentError):
             Add(1, 2, 3)
 
     def test_this_func_recursion(self):
-        Factorial = Function(args=("n",), name="factorial").Do(
+        Factorial = Function("$n", name="factorial").Do(
             If(Var("n") == 0).Then(Return(1)).Else(
                 Return(Var("n") * ThisFunc(Var("n") - 1).result)
             )
@@ -3699,12 +3699,12 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertEqual(Workflow(Set("r", Factorial(0).result)).run()["r"], 1)
 
     def test_this_func_resolves_the_innermost_function(self):
-        Inner = Function(args=("n",), name="inner").Do(
+        Inner = Function("$n", name="inner").Do(
             If(Var("n") == 0).Then(Return(0)).Else(
                 Return(1 + ThisFunc(Var("n") - 1).result)
             )
         )
-        Outer = Function(args=("n",), name="outer").Do(
+        Outer = Function("$n", name="outer").Do(
             If(Var("n") <= 0).Then(Return(0)).Else(
                 Return(ThisFunc(Var("n") - 1).result)
             )
@@ -3719,7 +3719,7 @@ class TestFunctionReturn(PromptkitTestCase):
         self.assertIn("Function", str(cm.exception))
 
     def test_recursion_depth_limit(self):
-        Boom = Function(args=("n",), name="boom").Do(
+        Boom = Function("$n", name="boom").Do(
             Return(ThisFunc(Var("n") + 1).result)
         )
         with using_settings(max_recursion_depth=5):
@@ -4097,7 +4097,7 @@ class TestTools(PromptkitTestCase):
             """查天气。"""
             return "晴"
 
-        Ask = Function(args=("city",), name="ask", tools=[get_weather]).Do(
+        Ask = Function("$city", name="ask", tools=[get_weather]).Do(
             Prompt(role="user", content="{{city}} 天气？")
         )
         agent = fake_agent([fake_message(role="assistant", content="晴")])
@@ -16695,7 +16695,7 @@ class TestChatWorkflowSkills(PromptkitTestCase):
         from promptkit.core import Function, LLMStep, Prompt
 
         return Function(
-            args=("ref_path",),
+            "$ref_path",
             name="make_lab",
             description="根据学习主题生成实验任务清单",
             **kwargs,
@@ -16888,7 +16888,7 @@ class TestChatWorkflowSkillsMemory(MemoryTestCase):
         from promptkit.skill.chat import AgentHolder, as_tools
 
         memory = self.make_memory()
-        counter = Function(args=("topic",), name="count_topic", description="记一下")
+        counter = Function("$topic", name="count_topic", description="记一下")
 
         def body(ctx):
             done = ctx["memory"].read("topics", [])
@@ -16915,7 +16915,7 @@ class TestStateInheritance(MemoryTestCase):
         from promptkit.core import Function, LLMStep, Prompt
 
         return Function(
-            args=("q",), name="probe", description="探针", output_key="out", **kwargs
+            "$q", name="probe", description="探针", output_key="out", **kwargs
         ).Do(LLMStep(Prompt(role="user", content=prompt_text), output_key="out"))
 
     def test_inherit_all(self):
@@ -16951,7 +16951,7 @@ class TestStateInheritance(MemoryTestCase):
         from promptkit.core import Function
 
         with self.assertRaises(Exception):
-            Function(args=(), name="x", inherit=42)
+            Function(name="x", inherit=42)
 
     def test_bound_function_becomes_a_zero_arg_tool(self):
         from promptkit.skill.chat import as_tools
@@ -16989,7 +16989,7 @@ class TestStateInheritance(MemoryTestCase):
         from promptkit.core import Function, FunctionStep
 
         EchoInput = Function(
-            args=(), name="echo_input", description="回显本轮输入", inherit=True
+            name="echo_input", description="回显本轮输入", inherit=True
         ).Do(FunctionStep(lambda ctx: ctx["usr_input"], output_key="out"))
 
         agent = fake_agent(

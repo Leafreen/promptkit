@@ -6,7 +6,7 @@
 
 要点：
 
-- `Function(args=..., name=..., description=...).Do(...)` 定义的是 **DSL 函数**，
+- `Function('$a', name=..., description=...).Do(...)` 定义的是 **DSL 函数**，
   它可以直接放进 `ChatWorkflow(skills=[...])` —— 编译时会变成一个工具，
   模型自己决定什么时候调。
 - 工具的 `description` 是**给模型看的**，比代码注释重要得多。
@@ -68,7 +68,7 @@ def remember_topic(topic: str, ctx: SkillContext) -> str:
 
 #: 一个 DSL 函数：参数 ref_path，内部还会调模型（模型可以顺手用 WRITE）
 MakeLab = Function(
-    args=("ref_path",),
+    "$ref_path",
     name="make_lab",
     description="根据当前学习主题生成一份实验任务清单；ref_path 是参考文档地址",
     output_key="lab",

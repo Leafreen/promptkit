@@ -13,7 +13,7 @@ if __name__ == '__main__':
     agent = Agent()
 
     EmotionAnalyzer = Function(
-        args=('text', ),
+        '$text',
         name='analyze_emotion',
         output_key='score',
     ).Do(

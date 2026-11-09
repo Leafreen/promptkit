@@ -26,15 +26,15 @@ from promptkit.core import *  # noqa: E402,F403
 # 4. 回答，并在最后互补
 # =====================================================
 
-Input = Function(args=("job", "extra_info"), name="greeting").Do(
+Input = Function("$job", "$extra_info", name="greeting").Do(
     Prompt(role="user", content="你是一个面试官，准备面试一个{{job}}岗位。下面是附加信息：{{extra_info}}。请先问好，然后开始面试。未接收到指令，不要生成问题")
 )
 
-GenerateQuestions = Function(args=("job", "extra_info", "user_answer"), name="question").Do(
+GenerateQuestions = Function("$job", "$extra_info", "$user_answer", name="question").Do(
     Prompt(role="user", content="候选人刚才的回答是：{{user_answer}}\n请针对{{job}}岗位生成下一个面试问题，只问一个问题，不要给出答案。")
 )
 
-SumUp = Function(args=("job", "extra_info"), name="summary").Do(
+SumUp = Function("$job", "$extra_info", name="summary").Do(
     Prompt(role="user", content="请回答问题，并在最后总结。并给出评价")
 )
 
