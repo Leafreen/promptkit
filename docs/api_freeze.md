@@ -48,6 +48,7 @@
 | `Var` / `NewVar` / `Set` / `Inc` / `Dec` | stable |
 | `Expr` / `as_expr` / `Const` / `VarExpr` / `BinaryExpr` | stable |
 | `Call` | **deprecated（阶段 3 起）** — 改用 `Transform` |
+| `Transform` / `transform` / `register_transform` | **新增（阶段 3）** — 具名、可序列化的数据转换 |
 | `Len` / `ItemExpr` / `AttrExpr` | stable |
 | `Intent` / `Similar` / `Classify` / `Judge` / `LLMJudge` | stable |
 | `LoopHooks` / `loop_hooks` | stable |

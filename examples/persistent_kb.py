@@ -1,7 +1,5 @@
 '''持久化知识库：**建一次，反复用**。
 
-⚠️ 知识库是**实验性功能，默认关闭**，所以下面要先 enable 一下。
-
     python examples/persistent_kb.py build      # 扫 docs 目录 → kb.json（只处理新文件）
     python examples/persistent_kb.py search 退款  # 查一下，不花 token
     python examples/persistent_kb.py stats       # 看看库里有什么
@@ -18,18 +16,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from typing import List  # noqa: E402
 
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel
 
-from promptkit import features  # noqa: E402
-
-features.enable("knowledge")  # ← 实验性功能，默认关闭
-
-from promptkit.agent import Agent  # noqa: E402
-from promptkit.cautions import JSON_ONLY  # noqa: E402
-from promptkit.core import (  # noqa: E402
-    Call,
+from promptkit.agent import Agent
+from promptkit.cautions import JSON_ONLY
+from promptkit.core import (
     Echo,
     Goto,
     If,
@@ -39,10 +31,12 @@ from promptkit.core import (  # noqa: E402
     Not,
     Prompt,
     Set,
+    Transform,
     Var,
     Workflow,
+    transform,
 )
-from promptkit.knowledge import KnowledgeBase  # noqa: E402
+from promptkit.knowledge import KnowledgeBase
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DOCS = os.path.join(HERE, "kb_docs")
@@ -51,10 +45,28 @@ DEFAULT_KB = os.path.join(HERE, "kb.json")
 #: 低于这个分数就当作「没搜到」（词法检索里不相关查询也会拿到 0.3~0.5 分）
 MIN_SCORE = 1.0
 
+#: `build_workflow(kb)` 期间指向当前知识库；Transform 是具名的，只能通过
+#: 这个模块级引用拿到「这一次构建用的实例」（示例场景单线程够用）。
+_ACTIVE_KB: KnowledgeBase | None = None
+
+
+@transform("kb_search")
+def search_knowledge(question: str, k: int = 4, min_score: float = MIN_SCORE) -> list:
+    '''检索当前知识库。'''
+    if _ACTIVE_KB is None:
+        raise RuntimeError("build_workflow(kb) 还没设置 _ACTIVE_KB")
+    return _ACTIVE_KB.search(question, k=k, min_score=min_score)
+
+
+@transform("kb_format")
+def format_hits(hits: list, query: str) -> str:
+    '''把检索结果拼成资料块。'''
+    return KnowledgeBase.format(hits, query=query)
+
 
 class Answer(BaseModel):
     answer: str
-    used: List[int]
+    used: list[int]
     enough: bool
 
 
@@ -107,16 +119,18 @@ def search(kb_path: str, question: str, k: int = 3) -> int:
 
 def build_workflow(kb: KnowledgeBase) -> Workflow:
     '''问答工作流。和 non-persistent 版唯一的区别是 KB 来自磁盘。'''
+    global _ACTIVE_KB
+    _ACTIVE_KB = kb
     return Workflow(
-        Set("hits", Call(kb.search, Var("question"), k=4, min_score=MIN_SCORE)),
-        Echo("（检索到 ", Call(len, Var("hits")), " 段资料）"),
+        Set("hits", Transform("kb_search", Var("question"), k=4, min_score=MIN_SCORE)),
+        Echo("（检索到 ", Transform("len", Var("hits")), " 段资料）"),
 
         If(Len(Var("hits")) == 0).Then(
             Set("answer", "知识库里没有和这个问题相关的内容。"),
             Goto("done"),
         ),
 
-        Set("context", Call(KnowledgeBase.format, Var("hits"), query=Var("question"))),
+        Set("context", Transform("kb_format", Var("hits"), query=Var("question"))),
         LLMStep[Answer](
             prompt=Prompt(
                 role="user",
@@ -150,7 +164,7 @@ def ask(kb_path: str, question: str) -> int:
     return 0
 
 
-def main(argv: List[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="持久化知识库示例")
     parser.add_argument("--kb", default=DEFAULT_KB, help=f"知识库文件（默认 {DEFAULT_KB}）")
     parser.add_argument("--docs", default=DOCS, help="文档目录")

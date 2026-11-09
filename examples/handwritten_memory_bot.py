@@ -14,18 +14,14 @@
 可以试试第一轮说「请记住：我喜欢用生活例子理解数学符号」，
 退出后再启动，问「我喜欢怎样理解数学符号？」。
 '''
-from pathlib import Path
 import sys
+from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_DIR / "src"))
 
-from promptkit import features  # noqa: E402
-
-features.enable("knowledge")
-
-from promptkit.agent import Agent  # noqa: E402
-from promptkit.core import (  # noqa: E402
+from promptkit.agent import Agent
+from promptkit.core import (
     ChatLoop,
     Echo,
     ExitWords,
@@ -40,15 +36,15 @@ from promptkit.core import (  # noqa: E402
     Want,
     Workflow,
 )
-from promptkit.core.tool import WEB_SEARCH, WriteFile  # noqa: E402
-from promptkit.knowledge import KNOWLEDGE_REFERENCE  # noqa: E402
-from promptkit.memory import (  # noqa: E402
+from promptkit.core.tool import WEB_SEARCH, WriteFile
+from promptkit.knowledge import KNOWLEDGE_REFERENCE
+from promptkit.memory import (
     MEMORY_REFERENCE,
     WRITE_MEMORY,
     TokenBudget,
     long_term_memory,
 )
-from promptkit.memory.adapters import HashEmbedding  # noqa: E402
+from promptkit.memory.adapters import HashEmbedding
 
 # ============================ 配置区 ============================
 KNOWLEDGE_PATH = Path(r"D:\学习资源\运筹学")  # 改成你的资料目录

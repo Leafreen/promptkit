@@ -10,12 +10,19 @@ Python 不能重载 `and` / `or` / `not`，所以用 `&` / `|` / `~` 代替。
 from __future__ import annotations
 
 import operator
+import warnings
 from typing import TYPE_CHECKING, Callable, Dict, Iterable, Optional, Protocol, cast
 
-from promptkit.core.errors import UndefinedVariable
+from promptkit.core.errors import (
+    UndefinedVariable,
+    UnknownTransformError,
+    UnserializableCallError,
+)
 
 if TYPE_CHECKING:  # 只用于类型标注：运行时只对 context 做鸭子类型调用
     from promptkit.core.context import Context
+
+    from .transforms import Transform
 
 
 class _Executable(Protocol):
@@ -165,7 +172,7 @@ class Expr:
         # 有了 __getitem__ 之后，Python 会退回到「按下标迭代」的老协议上，
         # 而 Expr 永远不会抛 IndexError，那就是死循环。这里显式堵掉。
         raise TypeError(
-            "Expr 不能被迭代：请用 For('x', ...) 遍历，或 Call(iter, expr)"
+            "Expr 不能被迭代：请用 For('x', ...) 遍历，或 Transform('list', expr)"
         )
 
     def __bool__(self) -> bool:
@@ -311,11 +318,10 @@ class AgentReplyExpr(Expr):
 
 
 class CallExpr(Expr):
-    '''调用一个函数，参数本身也可以是表达式：
+    '''调用一个函数，参数本身也可以是表达式（旧接口，保留给 `Expr.method`）。
 
-        Call(add, Var("a"), Var("b"))       # 等价于 add(a, b)，运行时求值
-        Call(len, Var("text"))
-        Call(Var("callback"), 1)            # 函数本身也可以来自变量
+        CallExpr(add, Var("a"), Var("b"))   # 等价于 add(a, b)，运行时求值
+        CallExpr(len, Var("text"))
     '''
 
     def __init__(self, func: object, *args: object, **kwargs: object):
@@ -402,15 +408,57 @@ class TemplateExpr(Expr):
 
 def Call(  # noqa: N802
     func: object, *args: object, **kwargs: object
-) -> CallExpr:
-    '''把普通 Python 函数调用变成表达式：`Call(add, Var("a"), Var("b"))`。'''
-    return CallExpr(func, *args, **kwargs)
+) -> "Transform":
+    '''【已弃用】旧的任意函数调用；阶段 3 起统一改用 `Transform`。
+
+    行为：
+
+    - 注册过的普通函数（`@transform("name")`）→ 翻译成 `Transform("name", ...)`
+    - lambda / 闭包 / 动态表达式（`Var("f")`）→ `UnserializableCallError`
+    - 未注册的函数 → `UnknownTransformError`
+
+    每次调用都会发 `DeprecationWarning`。新代码请直接写
+    `Transform("join", Var("lines"), sep="\\n")`。
+    '''
+    warnings.warn(
+        "Call 已弃用（阶段 3）：请改用 Transform('name', ...)",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if not callable(func) and not isinstance(func, Expr):
+        raise TypeError(
+            f"Call 的第一个参数必须是可调用对象或表达式，得到 {func!r}"
+        )
+    if isinstance(func, Expr):
+        raise UnserializableCallError(
+            "Call 不再支持动态函数表达式（如 Call(Var('f'), ...)）："
+            "这种调用无法序列化，请改用 Transform('name', ...)"
+        )
+    if getattr(func, "__name__", "") == "<lambda>" or getattr(
+        func, "__closure__", None
+    ):
+        raise UnserializableCallError(
+            "Call 不再支持 lambda / 闭包：无法序列化，请改用 "
+            "@transform('name') 注册后再写 Transform('name', ...)"
+        )
+
+    from .transforms import Transform, transform_name
+
+    name = transform_name(func)
+    if name is None:
+        raise UnknownTransformError(
+            f"{getattr(func, '__name__', func)!r} 还没有注册为转换；"
+            "请先用 @transform('name') 注册，或直接写 Transform('name', ...)"
+        )
+    return Transform(name, *args, **kwargs)
 
 
-def Len(value: object) -> CallExpr:  # noqa: N802
-    '''长度：`Len(Var("items"))`，等价于 `Call(len, ...)`。
+def Len(value: object) -> "Transform":  # noqa: N802
+    '''长度：`Len(Var("items"))`，等价于 `Transform("len", ...)`。
 
     不能做成 `len(expr)`：Python 的 len() 会立刻调用 __len__，
     而表达式必须等到运行时才能求值。
     '''
-    return CallExpr(len, value)
+    from .transforms import Transform
+
+    return Transform("len", value)

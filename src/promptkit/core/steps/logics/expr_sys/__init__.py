@@ -18,6 +18,14 @@ from promptkit.core.steps.logics.expr_sys.expr import (
     VarExpr,
     as_expr,
 )
+from promptkit.core.steps.logics.expr_sys.transforms import (
+    Transform,
+    get_transform,
+    register_transform,
+    registered_transforms,
+    transform,
+    transform_name,
+)
 from promptkit.core.steps.logics.expr_sys.vartypes import (
     Number,
     Str,
@@ -39,6 +47,13 @@ __all__ = [
     "AttrExpr",
     "Len",
     "as_expr",
+    # transforms.py
+    "Transform",
+    "transform",
+    "register_transform",
+    "get_transform",
+    "transform_name",
+    "registered_transforms",
     # vartypes.py
     "VarType",
     "Number",

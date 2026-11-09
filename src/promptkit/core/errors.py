@@ -29,6 +29,17 @@ class VarTypeError(WorkflowError, TypeError):
     '''给带类型的变量赋了转不过去的值。'''
 
 
+class UnknownTransformError(WorkflowError, KeyError):
+    '''`Transform` 用了没注册过的名字。'''
+
+    def __str__(self) -> str:  # KeyError.__str__ 会加引号，这里去掉
+        return Exception.__str__(self)
+
+
+class UnserializableCallError(WorkflowError, TypeError):
+    '''`Call` 传入了 lambda / 闭包 / 动态表达式，无法转成可序列化的 `Transform`。'''
+
+
 class BreakSignal(WorkflowError):
     '''内部信号：BreakStep 抛出，由外层循环捕获。用户不应该看到它。'''
 

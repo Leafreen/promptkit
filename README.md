@@ -60,7 +60,7 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
   （`KVMemory` SQLite、`VectorMemory` 语义召回、`LayeredMemory` 组合）
 - 向量记忆默认 `HashEmbedding` 词法级向量，零依赖开箱即用，可换
   OpenAI / 本地模型 / Chroma / Qdrant 适配器
-- 实验性知识库（`promptkit.knowledge`，默认关闭，需 `features.enable("knowledge")`）
+- 知识库（`promptkit.knowledge`，BM25 词法检索，零依赖开箱即用）
 
 **可观测性**
 
@@ -292,7 +292,7 @@ LLMStep(Prompt(role="user", content="判断意图：{{text}}"),
 | `Function(args=..., name=...).Do(...)` | 定义带参数的可复用步骤；参数强校验（多传 / 少传 / 重复抛 `ArgumentError`） |
 | `Return(expr)` | 函数返回值，调用方用 `.result` 取（属性，不加括号） |
 | `ThisFunc(Var("n") - 1).result` | 函数体内递归调用自己（上限 `settings.max_recursion_depth`，默认 100） |
-| `Call(func, *args)` | 把函数调用变成表达式（**不是步骤**，要包进 `Set` / `Echo`） |
+| `Transform(name, *args, **kwargs)` | 具名数据转换表达式（`join` / `len` / `json_dumps` …；用 `@transform("name")` 注册扩展）；**不是步骤**，要包进 `Set` / `Echo` |
 | `If(c).Then(...).ElseIf(c).Then(...).Else(...)` | 多路分支；条件支持常量 / lambda / `Condition` 子类 / `And` / `Or` / `Not` |
 | `When(cond, a, b)` | 三元表达式 `cond ? a : b` |
 | `Switch(v).Case(a, b).Then(...).Default(...)` | switch-case；默认不穿透，`Case(1, fallthrough=True)` 显式穿透 |
@@ -750,11 +750,9 @@ vec.recall("退款怎么处理", top_k=3)
 [examples/memory_tutor.py](examples/memory_tutor.py)、
 [examples/handwritten_memory_bot.py](examples/handwritten_memory_bot.py)。
 
-**知识库**是实验性功能，默认关闭：
+**知识库**（`promptkit.knowledge`）开箱即用：
 
 ```python
-from promptkit import features
-features.enable("knowledge")        # 或环境变量 PROMPTKIT_ENABLE_KNOWLEDGE=1
 from promptkit.knowledge import KnowledgeBase
 ```
 
@@ -947,11 +945,12 @@ promptkit/
 组合条件写成 `(Var("n") > 1) & (Var("m") < 2)`（`&` 优先级高于比较，括号
 必须加）。判断放进 `If(...)` / `While(...)` / `Condition(...)`。
 
-**Q：`Call(f)` 直接放进 `Workflow(...)` 报 `TypeError`？**
-`Call` 是表达式不是步骤（求值出一个值，但没有「执行」语义）。包进
-`Set("x", Call(f))` / `Echo(Call(f))`，或只为了副作用用
-`FunctionStep(lambda ctx: f())`。同理 `Set("x", SomeStep())` 也是错的 ——
-步骤不是值。
+**Q：`Transform("name", ...)` 直接放进 `Workflow(...)` 报 `TypeError`？**
+`Transform` 是表达式不是步骤（求值出一个值，但没有「执行」语义）。包进
+`Set("x", Transform("join", Var("lines")))` / `Echo(Transform("upper", Var("s")))`，
+或只为了副作用用 `FunctionStep(lambda ctx: f())`。同理 `Set("x", SomeStep())`
+也是错的 —— 步骤不是值。旧的 `Call(f, ...)` 仍可用（会发 `DeprecationWarning`），
+但它只能翻译注册过的具名函数。
 
 **Q：`Save` 路径想用循环变量 `i`，f-string 不行？**
 `Save` 的 `file=` 在构造时是普通字符串，f-string 在构建工作流时就定死了。

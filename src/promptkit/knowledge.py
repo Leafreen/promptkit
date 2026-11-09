@@ -1,17 +1,8 @@
 '''知识库：分块 + 检索 + 拼进提示词。
 
-⚠️ **实验性功能，默认关闭。** import 本模块时会先过一道
-`features.require("knowledge")` 守卫，没启用就直接抛 `FeatureDisabled`
-（错误信息里写了两种启用方式）：
-
-    from promptkit import features
-    features.enable("knowledge")        # 或设环境变量 PROMPTKIT_ENABLE_KNOWLEDGE=1
-
-    from promptkit.knowledge import KnowledgeBase
-
 分工：工作流负责**编排**（什么时候检索、检索不到怎么办、结果怎么进提示词），
-本模块只负责**检索本身**。它是普通 Python，通过 `Call(kb.search, ...)`
-或 `kb.as_tool()` 接进工作流。
+本模块只负责**检索本身**。它是普通 Python，通过 `Transform("kb_search", ...)`
+（先 `register_transform` 注册）或 `kb.as_tool()` 接进工作流。
 
 零依赖：BM25 词法检索，中文按「双字 + 单字」切分；不联网、不需要向量库。
 要语义检索就替换 `KnowledgeBase.search`（保持签名），工作流层不用改 ——
@@ -35,26 +26,14 @@ import os
 import re
 import tempfile
 import time
-
-from promptkit.features import require
-
-# 守卫：没打开就 import 失败，并告诉你怎么打开
-require("knowledge")
-
-from dataclasses import dataclass, field  # noqa: E402
-from typing import (  # noqa: E402
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Sequence,
-    Union,
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
+from typing import (
     cast,
 )
 
-from promptkit.core.tool import Tool  # noqa: E402
-from promptkit.types import JSONValue  # noqa: E402
+from promptkit.core.tool import Tool
+from promptkit.types import JSONValue
 
 #: 持久化文件的格式版本（读旧文件永远兼容，读到更新的会报错）
 FORMAT_VERSION = 2
@@ -129,7 +108,7 @@ def token_weight(token: str) -> float:
     return 1.0 if len(token) > 1 else _UNIGRAM_WEIGHT
 
 
-def tokenize(text: str) -> List[str]:
+def tokenize(text: str) -> list[str]:
     '''把文本切成检索用的 token：英文按单词、中文按「双字 + 单字」。
 
     参数：
@@ -153,7 +132,7 @@ def tokenize(text: str) -> List[str]:
     '''
     if not text:
         return []
-    tokens: List[str] = _ASCII_WORD.findall(text.lower())
+    tokens: list[str] = _ASCII_WORD.findall(text.lower())
     for run in _CJK_RUN.findall(text):
         tokens.extend(run)  # 单字：兜底召回
         tokens.extend(run[i : i + 2] for i in range(len(run) - 1))  # 双字：主力
@@ -161,7 +140,7 @@ def tokenize(text: str) -> List[str]:
 
 
 # ---------- 分块 ----------
-def chunk_text(text: str, max_chars: int = 400, overlap: int = 60) -> List[str]:
+def chunk_text(text: str, max_chars: int = 400, overlap: int = 60) -> list[str]:
     '''把长文本切成检索用的块：先按空行分段，过长的段再按长度滑窗切。
 
     参数：
@@ -190,7 +169,7 @@ def chunk_text(text: str, max_chars: int = 400, overlap: int = 60) -> List[str]:
         raise ValueError("max_chars 必须为正")
     overlap = max(0, min(overlap, max_chars - 1))
 
-    chunks: List[str] = []
+    chunks: list[str] = []
     for paragraph in re.split(r"\n\s*\n", text or ""):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -228,7 +207,7 @@ class Hit:
     score: float = 0.0
     index: int = -1
 
-    def to_dict(self) -> Dict[str, JSONValue]:
+    def to_dict(self) -> dict[str, JSONValue]:
         '''转成可 JSON 序列化的字典。
 
         返回：
@@ -239,7 +218,7 @@ class Hit:
             只是展示 / 落盘用的快照，四舍五入会丢精度；需要精确分数
             就直接读 `.score`。
         '''
-        payload: Dict[str, JSONValue] = {
+        payload: dict[str, JSONValue] = {
             "text": self.text,
             "source": self.source,
             "score": round(self.score, 4),
@@ -287,18 +266,18 @@ class KnowledgeBase:
     批量灌数据比每块都重建划算得多。
     '''
 
-    chunks: List[str] = field(default_factory=list)
-    sources: List[str] = field(default_factory=list)
+    chunks: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
     max_chars: int = 400
     overlap: int = 60
     #: 增量同步的台账：source -> {"mtime": ..., "size": ...}
-    ingested: Dict[str, Dict[str, JSONValue]] = field(default_factory=dict)
+    ingested: dict[str, dict[str, JSONValue]] = field(default_factory=dict)
 
     # 派生数据：按需重建（_dirty 时）
-    _index: Dict[str, Dict[int, int]] = field(
+    _index: dict[str, dict[int, int]] = field(
         default_factory=dict, init=False, repr=False
     )
-    _lengths: List[int] = field(default_factory=list, init=False, repr=False)
+    _lengths: list[int] = field(default_factory=list, init=False, repr=False)
     _dirty: bool = field(default=True, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -327,8 +306,8 @@ class KnowledgeBase:
             复杂度 O(总 token 数)。只在索引脏或块数变化时调用；`add()` 期间
             不做增量更新，避免每块都重建一次。
         '''
-        index: Dict[str, Dict[int, int]] = {}
-        lengths: List[int] = []
+        index: dict[str, dict[int, int]] = {}
+        lengths: list[int] = []
         for position, chunk in enumerate(self.chunks):
             tokens = tokenize(chunk)
             lengths.append(len(tokens))
@@ -462,7 +441,7 @@ class KnowledgeBase:
         force: bool = False,
         prune: bool = True,
         encoding: str = "utf-8",
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         '''对着一个目录做**增量**同步，返回各项计数。
 
         参数：
@@ -506,7 +485,7 @@ class KnowledgeBase:
             present.add(name)
 
             info = os.stat(full)
-            fingerprint: Dict[str, JSONValue] = {
+            fingerprint: dict[str, JSONValue] = {
                 "mtime": round(info.st_mtime, 3),
                 "size": info.st_size,
             }
@@ -590,7 +569,7 @@ class KnowledgeBase:
         return cls(max_chars=max_chars, overlap=overlap).add_dir(directory)
 
     # ---------------- 检索 ----------------
-    def search(self, query: str, k: int = 3, min_score: float = 0.0) -> List[Hit]:
+    def search(self, query: str, k: int = 3, min_score: float = 0.0) -> list[Hit]:
         '''BM25 检索，返回得分最高的若干块。
 
         参数：
@@ -626,7 +605,7 @@ class KnowledgeBase:
 
         self._ensure_index()
         average = (sum(self._lengths) / total) or 1.0
-        scores: Dict[int, float] = {}
+        scores: dict[int, float] = {}
 
         for token in set(tokenize(query)):
             postings = self._index.get(token)
@@ -673,7 +652,7 @@ class KnowledgeBase:
 
     # ---------------- 拼提示词 ----------------
     @staticmethod
-    def format(hits: "Sequence[Union[Hit, Dict[str, JSONValue]]]", query: str = "") -> str:
+    def format(hits: "Sequence[Hit | dict[str, JSONValue]]", query: str = "") -> str:
         '''把检索结果拼成带编号的资料块文本。
 
         参数：
@@ -717,7 +696,7 @@ class KnowledgeBase:
     def as_tool(
         self,
         name: str = "search_knowledge_base",
-        description: Optional[str] = None,
+        description: str | None = None,
         k: int = 3,
     ) -> Tool:
         '''把检索包成 `Tool`，让模型自己决定什么时候查、查什么。
@@ -758,7 +737,7 @@ class KnowledgeBase:
         )
 
     # ---------------- 持久化 ----------------
-    def to_dict(self, include_index: bool = False) -> Dict[str, JSONValue]:
+    def to_dict(self, include_index: bool = False) -> dict[str, JSONValue]:
         '''组装成可 JSON 序列化的字典（`save` 的内部表示）。
 
         参数：
@@ -777,7 +756,7 @@ class KnowledgeBase:
             `include_index=False` —— 频繁序列化大库时这点开销要算进去。
         '''
         self._ensure_index()
-        payload: Dict[str, JSONValue] = {
+        payload: dict[str, JSONValue] = {
             "format": _FORMAT_NAME,
             "version": FORMAT_VERSION,
             "max_chars": self.max_chars,
@@ -834,8 +813,8 @@ class KnowledgeBase:
         cls,
         path: str,
         *,
-        max_chars: Optional[int] = None,
-        overlap: Optional[int] = None,
+        max_chars: int | None = None,
+        overlap: int | None = None,
     ) -> "KnowledgeBase":
         '''从磁盘加载知识库。
 
@@ -863,7 +842,7 @@ class KnowledgeBase:
         '''
         with open(path, encoding="utf-8") as handle:
             raw = json.load(handle)
-        data: Dict[str, JSONValue] = raw if isinstance(raw, dict) else {}
+        data: dict[str, JSONValue] = raw if isinstance(raw, dict) else {}
 
         version = data.get("version")
         if isinstance(version, int) and version > FORMAT_VERSION:
@@ -876,28 +855,28 @@ class KnowledgeBase:
         file_overlap = data.get("overlap", 60)
 
         kb = cls(
-            chunks=list(cast(List[str], data.get("chunks") or [])),
-            sources=list(cast(List[str], data.get("sources") or [])),
+            chunks=list(cast(list[str], data.get("chunks") or [])),
+            sources=list(cast(list[str], data.get("sources") or [])),
             max_chars=max_chars if max_chars is not None else cast(int, file_max_chars),
             overlap=overlap if overlap is not None else cast(int, file_overlap),
         )
-        kb.ingested = cast(Dict[str, Dict[str, JSONValue]], data.get("ingested", {}))
+        kb.ingested = cast(dict[str, dict[str, JSONValue]], data.get("ingested", {}))
 
         # 存了索引就直接用，省掉一次全量分词
-        raw_index = cast(Dict[str, Dict[str, int]], data.get("index") or {})
+        raw_index = cast(dict[str, dict[str, int]], data.get("index") or {})
         if raw_index:
             kb._index = {
                 token: {int(position): count for position, count in postings.items()}
                 for token, postings in raw_index.items()
             }
-            kb._lengths = [int(n) for n in cast(List[int], data.get("lengths") or [])]
+            kb._lengths = [int(n) for n in cast(list[int], data.get("lengths") or [])]
             kb._dirty = len(kb._lengths) != len(kb.chunks)
         return kb
 
     # 旧名字，保留可用。注意：它是 `to_dict` 的**别名**，返回 dict，不是 JSON 字符串
     dumps = to_dict
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         '''给 CLI / 日志看的概况。
 
         返回：
@@ -936,11 +915,11 @@ class KnowledgeBase:
         return f"<KnowledgeBase chunks={len(self.chunks)} sources={unique}>"
 
 
-def KNOWLEDGE_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool）
+def KNOWLEDGE_REFERENCE(
     source: object,
     *,
     name: str = "search_knowledge_base",
-    description: Optional[str] = None,
+    description: str | None = None,
     k: int = 3,
     max_chars: int = 400,
     overlap: int = 60,
@@ -1008,11 +987,11 @@ def KNOWLEDGE_REFERENCE(  # noqa: N802 - 跟 DSL 命名（工厂，返回 Tool�
 
 
 __all__ = [
-    "KnowledgeBase",
-    "Hit",
-    "chunk_text",
-    "tokenize",
-    "token_weight",
-    "KNOWLEDGE_REFERENCE",
     "FORMAT_VERSION",
+    "KNOWLEDGE_REFERENCE",
+    "Hit",
+    "KnowledgeBase",
+    "chunk_text",
+    "token_weight",
+    "tokenize",
 ]

@@ -268,10 +268,6 @@ from promptkit.core.model_action.caution_related.formatter import (  # noqa: E40
 )
 from promptkit import features  # noqa: E402
 
-# 知识库是实验性功能，默认关闭（见 promptkit/features.py）。
-# 测试要在 import 之前打开，否则连模块都进不来。
-features.enable("knowledge")
-
 from promptkit.knowledge import (  # noqa: E402
     FORMAT_VERSION,
     KnowledgeBase,
@@ -337,8 +333,11 @@ from promptkit.core import (  # noqa: E402
     Str,
     Switch,
     ThisFunc,
+    Transform,
     UndefinedVariable,
     UnknownLabel,
+    UnknownTransformError,
+    UnserializableCallError,
     Var,
     VarTypeError,
     When,
@@ -357,6 +356,7 @@ from promptkit.core import (  # noqa: E402
     LoopHookHandle,
     LoopHooks,
     loop_hooks,
+    register_transform,
     Workflow,
     WorkflowError,
 )
@@ -2078,26 +2078,30 @@ class TestVarTypes(PromptkitTestCase):
         with self.assertRaises(VarTypeError):
             Workflow(Number("n")).run(n="abc")
 
-    def test_call_invokes_python_function(self):
+    def test_transform_invokes_registered_python_function(self):
         def add(a, b):
             return a + b
 
+        register_transform("test_add", add)
         ctx = Workflow(
             Number("a"),
             Number("b"),
             Set("a", "12"),
             Set("b", "34"),
-            Set("sum", Call(add, Var("a"), Var("b"))),
+            Set("sum", Transform("test_add", Var("a"), Var("b"))),
         ).run()
         self.assertEqual(ctx["sum"], 46)
 
-    def test_call_in_echo(self):
+    def test_transform_in_echo(self):
         def double(x):
             return x * 2
 
+        register_transform("test_double", double)
         with mock.patch("builtins.print") as fake:
             Workflow(
-                Number("n"), Set("n", "5"), Echo("结果=", Call(double, Var("n")))
+                Number("n"),
+                Set("n", "5"),
+                Echo("结果=", Transform("test_double", Var("n"))),
             ).run()
         self.assertEqual(printed(fake), ["结果=10"])
 
@@ -2105,11 +2109,15 @@ class TestVarTypes(PromptkitTestCase):
         with self.assertRaises(TypeError):
             Call(42, Var("n"))
 
-    def test_call_supports_kwargs(self):
+    def test_transform_supports_kwargs(self):
+        def round_to(value, ndigits):
+            return round(value, ndigits)
+
+        register_transform("test_round", round_to)
         ctx = Workflow(
             Number("b"),
             Set("b", "2"),
-            Set("r", Call(round, 3.14159, ndigits=Var("b"))),
+            Set("r", Transform("test_round", 3.14159, ndigits=Var("b"))),
         ).run()
         self.assertEqual(ctx["r"], 3.14)
 
@@ -2415,13 +2423,10 @@ class TestPythonObjects(PromptkitTestCase):
         ).run()
         self.assertEqual(ctx["n"], 3)
 
-    def test_call_with_a_callable_from_a_variable(self):
-        ctx = Workflow(
-            NewVar("f", default=lambda x: x * 2),
-            NewVar("n", default=21),
-            Set("r", Call(Var("f"), Var("n"))),
-        ).run()
-        self.assertEqual(ctx["r"], 42)
+    def test_call_with_a_callable_from_a_variable_is_rejected(self):
+        # Call 只能翻译「注册过的具体函数」；变量里的可调用对象解析不出来
+        with self.assertRaises(UnserializableCallError):
+            Call(Var("f"), Var("n"))
 
     def test_for_over_an_attribute(self):
         seen = []
@@ -2893,8 +2898,9 @@ class TestWhen(PromptkitTestCase):
             calls.append(1)
             raise AssertionError("不该被求值")
 
+        register_transform("test_boom", boom)
         ctx = Workflow(
-            Set("r", When(True, "ok", Call(boom))),
+            Set("r", When(True, "ok", Transform("test_boom"))),
         ).run()
         self.assertEqual(ctx["r"], "ok")
         self.assertEqual(calls, [])
@@ -2984,9 +2990,10 @@ class TestSwitch(PromptkitTestCase):
             calls.append(1)
             return 2
 
+        register_transform("test_subject", subject)
         seen = []
         Workflow(
-            Switch(Call(subject))
+            Switch(Transform("test_subject"))
             .Case(1).Then(FunctionStep(lambda c: seen.append("one")))
             .Case(3).Then(FunctionStep(lambda c: seen.append("three")))
             .Case(2).Then(FunctionStep(lambda c: seen.append("two"))),
@@ -5226,11 +5233,14 @@ class TestKnowledgeBaseWorkflow(PromptkitTestCase):
         self.kb = KnowledgeBase()
         self.kb.add("退款政策：未发货可直接退款。", source="policy.md")
         self.kb.add("配送范围：只支持中国大陆。", source="shipping.md")
+        # Transform 是具名的：把这次用的实例方法注册进去
+        register_transform("test_kb_search", self.kb.search)
+        register_transform("test_kb_format", KnowledgeBase.format)
 
-    def test_call_bridges_to_python(self):
+    def test_transform_bridges_to_python(self):
         ctx = Workflow(
             Set("question", "怎么退款"),
-            Set("hits", Call(self.kb.search, Var("question"), k=2)),
+            Set("hits", Transform("test_kb_search", Var("question"), k=2)),
         ).run()
         self.assertTrue(ctx["hits"])
         self.assertIn("退款", ctx["hits"][0].text)
@@ -5238,15 +5248,15 @@ class TestKnowledgeBaseWorkflow(PromptkitTestCase):
     def test_format_step_produces_prompt_ready_text(self):
         ctx = Workflow(
             Set("question", "怎么退款"),
-            Set("hits", Call(self.kb.search, Var("question"), k=2)),
-            Set("context", Call(KnowledgeBase.format, Var("hits"))),
+            Set("hits", Transform("test_kb_search", Var("question"), k=2)),
+            Set("context", Transform("test_kb_format", Var("hits"))),
         ).run()
         self.assertIn("[1]", ctx["context"])
 
     def test_empty_retrieval_can_be_branched_on(self):
         ctx = Workflow(
             Set("question", "量子纠缠"),
-            Set("hits", Call(self.kb.search, Var("question"))),
+            Set("hits", Transform("test_kb_search", Var("question"))),
             If(Len(Var("hits")) == 0).Then(
                 Set("answer", "不知道"),
                 Goto("done"),
@@ -5260,8 +5270,8 @@ class TestKnowledgeBaseWorkflow(PromptkitTestCase):
         agent = FakeAgent(["答"])
         wf = Workflow(
             Set("question", "怎么退款"),
-            Set("hits", Call(self.kb.search, Var("question"), k=1)),
-            Set("context", Call(KnowledgeBase.format, Var("hits"))),
+            Set("hits", Transform("test_kb_search", Var("question"), k=1)),
+            Set("context", Transform("test_kb_format", Var("hits"))),
             LLMStep(
                 prompt=Prompt(role="user", content="资料：{{context}}\n问：{{question}}"),
                 output_key="answer",
@@ -5519,124 +5529,34 @@ class TestPersistentKbExample(PromptkitTestCase):
 
 
 class TestFeatureFlags(PromptkitTestCase):
-    '''实验性功能默认关闭 —— 这是「撤回」的落地方式：代码留着，默认不生效。'''
-
-    def test_knowledge_is_a_known_feature(self):
-        self.assertIn("knowledge", features.features())
-
-    def test_default_is_off(self):
-        # 测试进程里被显式打开了，所以先关掉再看默认
-        with features.using("knowledge", False):
-            self.assertFalse(features.enabled("knowledge"))
-
-    def test_enable_and_disable(self):
-        with features.using("knowledge", False):
-            features.enable("knowledge")
-            self.assertTrue(features.enabled("knowledge"))
-            features.disable("knowledge")
-            self.assertFalse(features.enabled("knowledge"))
-
-    def test_env_var_enables(self):
-        with features.using("knowledge", False):
-            with mock.patch.dict(
-                os.environ, {"PROMPTKIT_ENABLE_KNOWLEDGE": "1"}, clear=False
-            ):
-                self.assertTrue(features.enabled("knowledge"))
-
-    def test_env_var_accepts_common_truthy_spellings(self):
-        for value in ("1", "true", "YES", "On"):
-            with features.using("knowledge", False):
-                with mock.patch.dict(
-                    os.environ, {"PROMPTKIT_ENABLE_KNOWLEDGE": value}, clear=False
-                ):
-                    self.assertTrue(features.enabled("knowledge"), value)
-
-    def test_env_var_zero_is_not_enabled(self):
-        with features.using("knowledge", False):
-            with mock.patch.dict(
-                os.environ, {"PROMPTKIT_ENABLE_KNOWLEDGE": "0"}, clear=False
-            ):
-                self.assertFalse(features.enabled("knowledge"))
-
-    def test_require_raises_a_helpful_error(self):
-        with features.using("knowledge", False):
-            with self.assertRaises(features.FeatureDisabled) as cm:
-                features.require("knowledge")
-        message = str(cm.exception)
-        self.assertIn("默认关闭", message)
-        self.assertIn("PROMPTKIT_ENABLE_KNOWLEDGE", message)
-        self.assertIn("features.enable('knowledge')", message)
-
-    def test_require_passes_when_enabled(self):
-        with features.using("knowledge", True):
-            features.require("knowledge")  # 不该抛
-
-    def test_using_restores_the_previous_state(self):
-        features.enable("knowledge")
-        with features.using("knowledge", False):
-            self.assertFalse(features.enabled("knowledge"))
-        self.assertTrue(features.enabled("knowledge"))
+    '''功能开关机制本身的行为（当前没有任何实验性功能处于开关下）。'''
 
     def test_unknown_feature_is_rejected(self):
         with self.assertRaises(KeyError) as cm:
             features.enable("time-travel")
         self.assertIn("没有这个功能开关", str(cm.exception))
 
-    def test_status(self):
-        with features.using("knowledge", False):
-            self.assertEqual(features.status()["knowledge"], "off")
-        with features.using("knowledge", True):
-            self.assertEqual(features.status()["knowledge"], "on (runtime)")
+    def test_require_unknown_feature_is_rejected(self):
+        with self.assertRaises(KeyError):
+            features.require("nope")
 
-    def test_disabled_by_default_in_a_fresh_process(self):
-        '''真正证明「默认关闭」：起一个干净的子进程 import 它。'''
-        import subprocess
+    def test_features_list_is_empty(self):
+        '''目前没有功能挂在实验开关上，features() 应该返回空列表。'''
+        self.assertEqual(features.features(), [])
 
-        import promptkit
+    def test_status_is_empty(self):
+        self.assertEqual(features.status(), {})
 
-        # 包目录的**父目录**才在 sys.path 上
-        parent = os.path.dirname(os.path.dirname(os.path.abspath(promptkit.__file__)))
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k != "PROMPTKIT_ENABLE_KNOWLEDGE"
-        }
-        env["PYTHONPATH"] = parent
-        env["PYTHONIOENCODING"] = "utf-8"
+    def test_other_modules_import_fine(self):
+        '''核心能力不依赖任何实验功能开关。'''
+        import importlib
 
-        result = subprocess.run(
-            [sys.executable, "-c", "import promptkit.knowledge"],
-            capture_output=True,
-            text=True,
-            env=env,
-            encoding="utf-8",
-            errors="replace",
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("默认关闭", result.stderr)
-
-        # 环境变量一开就能用
-        env["PROMPTKIT_ENABLE_KNOWLEDGE"] = "1"
-        ok = subprocess.run(
-            [sys.executable, "-c", "import promptkit.knowledge; print('ok')"],
-            capture_output=True,
-            text=True,
-            env=env,
-            encoding="utf-8",
-            errors="replace",
-        )
-        self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.assertIn("ok", ok.stdout)
-
-    def test_other_features_still_import_with_it_off(self):
-        '''关掉知识库不该影响核心能力。'''
-        with features.using("knowledge", False):
-            import importlib
-
-            module = importlib.import_module("promptkit.core")
-            self.assertTrue(hasattr(module, "Workflow"))
-            module = importlib.import_module("promptkit.agent")
-            self.assertTrue(hasattr(module, "Agent"))
+        module = importlib.import_module("promptkit.core")
+        self.assertTrue(hasattr(module, "Workflow"))
+        module = importlib.import_module("promptkit.agent")
+        self.assertTrue(hasattr(module, "Agent"))
+        module = importlib.import_module("promptkit.knowledge")
+        self.assertTrue(hasattr(module, "KnowledgeBase"))
 
 
 class TestWebSearchHelpers(PromptkitTestCase):
@@ -6305,13 +6225,12 @@ class TestItemAssignment(PromptkitTestCase):
         self.assertIn("['k'] = 1", tree)
 
     def test_bare_call_of_getitem_is_an_expression_not_a_step(self):
-        '''回归：`Call(getitem(...), ...)` 是表达式，直接放进 Workflow 会报错。
+        '''回归：表达式直接放进 Workflow 会报错。
 
         想写容器要用 Set(Var("d")["k"], v)。
         '''
-        from operator import getitem
 
-        expr = Call(getitem(Var("d"), "k"), 1)
+        expr = Transform("len", Var("d"))
         self.assertIsInstance(expr, Expr)
         self.assertNotIsInstance(expr, Step)
         with self.assertRaises(TypeError) as cm:

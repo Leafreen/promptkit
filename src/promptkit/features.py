@@ -6,29 +6,27 @@
 
     from promptkit import features
 
-    features.enable("knowledge")        # 或者设环境变量 PROMPTKIT_ENABLE_KNOWLEDGE=1
+    features.enable("some_feature")        # 或者设环境变量 PROMPTKIT_ENABLE_SOME_FEATURE=1
 
-    from promptkit.knowledge import KnowledgeBase
-
-    features.disable("knowledge")       # 关回去
-    features.status()                   # 看看现在都开了什么
+    features.disable("some_feature")       # 关回去
+    features.status()                      # 看看现在都开了什么
 
 测试里想临时开关，用 `features.using(...)`，退出会自动还原。
 '''
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Dict, Iterator, List
 
 __all__ = [
-    "FeatureDisabled",
     "FEATURE_ENV",
-    "features",
-    "enabled",
-    "enable",
+    "FeatureDisabled",
     "disable",
+    "enable",
+    "enabled",
+    "features",
     "require",
-    "using",
     "status",
+    "using",
 ]
 
 
@@ -37,18 +35,16 @@ class FeatureDisabled(RuntimeError):
 
 
 #: 功能名 -> 对应的环境变量名
-FEATURE_ENV: Dict[str, str] = {
-    "knowledge": "PROMPTKIT_ENABLE_KNOWLEDGE",
-}
+FEATURE_ENV: dict[str, str] = {}
 
 #: 「打开」的各种写法
 _TRUTHY = {"1", "true", "yes", "on", "y", "t"}
 
 #: 运行时开关。默认全关 —— 要显式打开才算数。
-_enabled: Dict[str, bool] = {name: False for name in FEATURE_ENV}
+_enabled: dict[str, bool] = {name: False for name in FEATURE_ENV}
 
 
-def features() -> List[str]:
+def features() -> list[str]:
     '''所有可开关的功能名。'''
     return sorted(FEATURE_ENV)
 
@@ -108,7 +104,7 @@ def using(name: str, flag: bool = True) -> Iterator[bool]:
         _enabled[name] = saved
 
 
-def status() -> Dict[str, str]:
+def status() -> dict[str, str]:
     '''每个功能现在的状态。'''
     return {
         name: (

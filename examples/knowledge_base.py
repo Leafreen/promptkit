@@ -1,7 +1,5 @@
 '''用 Workflow 搭一个知识库问答（RAG）。
 
-⚠️ 知识库是**实验性功能，默认关闭**，所以下面要先 enable 一下。
-
 分工：
   - `KnowledgeBase`（promptkit/knowledge.py）负责**检索** —— 普通 Python
   - `Workflow` 负责**编排** —— 什么时候检索、检索不到怎么办、资料怎么进提示词
@@ -18,17 +16,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from typing import List  # noqa: E402
 
-from pydantic import BaseModel  # noqa: E402
+from pydantic import BaseModel
 
-from promptkit import features  # noqa: E402
-
-features.enable("knowledge")  # ← 实验性功能，默认关闭
-
-from promptkit.agent import Agent  # noqa: E402
-from promptkit.core import (  # noqa: E402
-    Call,
+from promptkit.agent import Agent
+from promptkit.cautions import JSON_ONLY
+from promptkit.core import (
     Echo,
     Goto,
     If,
@@ -39,11 +32,12 @@ from promptkit.core import (  # noqa: E402
     Not,
     Prompt,
     Set,
+    Transform,
     Var,
     Workflow,
+    transform,
 )
-from promptkit.cautions import JSON_ONLY  # noqa: E402
-from promptkit.knowledge import KnowledgeBase  # noqa: E402
+from promptkit.knowledge import KnowledgeBase
 
 # ====================== 1. 建库 ======================
 # 真实项目里换成 KnowledgeBase.from_dir("docs") 或 .add_file(...)
@@ -74,9 +68,21 @@ KB.add(
 MIN_SCORE = 1.0
 
 
+@transform("kb_search")
+def search_knowledge(question: str, k: int = 4, min_score: float = MIN_SCORE) -> list:
+    '''把实例方法包成具名转换，DSL 里就能写 Transform("kb_search", ...)。'''
+    return KB.search(question, k=k, min_score=min_score)
+
+
+@transform("kb_format")
+def format_hits(hits: list, query: str) -> str:
+    '''把检索结果拼成提示词里的资料块。'''
+    return KnowledgeBase.format(hits, query=query)
+
+
 class Answer(BaseModel):
     answer: str
-    used: List[int]  # 用到了第几段资料
+    used: list[int]  # 用到了第几段资料
     enough: bool  # 资料够不够回答
 
 
@@ -88,8 +94,8 @@ rag = Workflow(
     NewVar("answer"),
 
     # ① 检索：把普通 Python 函数接进工作流
-    Set("hits", Call(KB.search, Var("question"), k=4, min_score=MIN_SCORE)),
-    Echo("（检索到 ", Call(len, Var("hits")), " 段资料）"),
+    Set("hits", Transform("kb_search", Var("question"), k=4, min_score=MIN_SCORE)),
+    Echo("（检索到 ", Transform("len", Var("hits")), " 段资料）"),
 
     # ② 检索不到就别花 token 了
     If(Len(Var("hits")) == 0).Then(
@@ -98,7 +104,7 @@ rag = Workflow(
     ),
 
     # ③ 把资料拼成提示词能用的文本
-    Set("context", Call(KnowledgeBase.format, Var("hits"), query=Var("question"))),
+    Set("context", Transform("kb_format", Var("hits"), query=Var("question"))),
 
     # ④ 让模型基于资料回答，并强制标注用到哪几段
     LLMStep[Answer](

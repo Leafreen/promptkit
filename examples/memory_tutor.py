@@ -34,14 +34,15 @@ from pydantic import BaseModel  # noqa: E402
 from promptkit.agent import Agent  # noqa: E402
 from promptkit.cautions import JSON_ONLY  # noqa: E402
 from promptkit.core import (  # noqa: E402
-    Call,
     LLMStep,
     ReadMemory,
     RecallMemory,
     Set,
+    Transform,
     Var,
     Workflow,
     WriteMemory,
+    transform,
 )
 from promptkit.memory import KVMemory, TokenBudget, VectorMemory  # noqa: E402
 from promptkit.memory.adapters import HashEmbedding  # noqa: E402
@@ -66,6 +67,7 @@ class Session(BaseModel):
     weak_points: list[str]  # 这次暴露出来的薄弱点
 
 
+@transform("join_list")
 def join_list(values) -> str:
     '''把列表拼成可读文本（prompt 里插 list 会变成 repr）。'''
     if not values:
@@ -125,7 +127,7 @@ def build(question: str, kv: KVMemory, vector: VectorMemory) -> Workflow:
         ReadMemory(kv, "level", output_key="level", default="未知"),
         ReadMemory(kv, "weak_points", output_key="weak_points", default=[]),
         ReadMemory(kv, "visits", output_key="visits", default=0),
-        Set("weak_text", Call(join_list, Var("weak_points"))),
+        Set("weak_text", Transform("join_list", Var("weak_points"))),
         # 2) 按问题召回笔记（第一次跑是空的）
         RecallMemory(
             vector,
