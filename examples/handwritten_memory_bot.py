@@ -8,12 +8,14 @@
 - recall_memory：按意思召回长期记忆（只读）。
 - write_memory：把值得长期保留的信息写入长期记忆（显式授权）。
 
-先修改下面的 KNOWLEDGE_PATH，再运行：
+先准备一份资料目录（默认读项目下的 skills/，可用环境变量 KNOWLEDGE_DIR 覆盖），
+再运行：
     python examples/handwritten_memory_bot.py
 
 可以试试第一轮说「请记住：我喜欢用生活例子理解数学符号」，
 退出后再启动，问「我喜欢怎样理解数学符号？」。
 '''
+import os
 import sys
 from pathlib import Path
 
@@ -47,7 +49,7 @@ from promptkit.memory import (
 from promptkit.memory.adapters import HashEmbedding
 
 # ============================ 配置区 ============================
-KNOWLEDGE_PATH = Path(r"D:\学习资源\运筹学")  # 改成你的资料目录
+KNOWLEDGE_PATH = Path(os.environ.get("KNOWLEDGE_DIR", PROJECT_DIR / "skills"))
 DATA_DIR = PROJECT_DIR / ".tmp" / "handwritten-memory-bot"
 MEMORY_PATH = DATA_DIR / "tutor.db"
 SESSION_PATH = DATA_DIR / "session.json"
