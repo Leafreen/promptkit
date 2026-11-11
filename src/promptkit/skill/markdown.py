@@ -26,7 +26,8 @@
     请按 {{period}} 汇总。
 
 没有 frontmatter 时：名字取文件名，描述取第一个标题 / 段落，参数为空。
-只解析**简单 YAML**（嵌套映射 / 标量 / 标量列表）；复杂结构请显式传参。
+只解析**简单 YAML**（嵌套映射 / 标量 / 标量列表 / `>` `|` 块标量）；
+复杂结构请显式传参。
 '''
 from __future__ import annotations
 
@@ -297,17 +298,36 @@ def _split_frontmatter(text: str, path: Path) -> Tuple[Dict[str, Any], str]:
 
 
 def _parse_frontmatter(raw: str, path: Path) -> Dict[str, Any]:
-    '''只解析简单 YAML：嵌套映射、标量、标量列表。
+    '''只解析简单 YAML：嵌套映射、标量、标量列表、块标量（`>` / `|`）。
 
     项目不把 pyyaml 当必需依赖，所以这里手写一个小解析器；遇到
     不支持的结构就明确报错，而不是悄悄解析错。
     '''
     entries: List[Tuple[int, str]] = []
-    for line in raw.expandtabs(2).splitlines():
+    lines = raw.expandtabs(2).splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         text = line.strip()
         if not text or text.startswith("#"):
+            index += 1
             continue
-        entries.append((len(line) - len(line.lstrip(" ")), text))
+        indent = len(line) - len(line.lstrip(" "))
+        header = _BLOCK_HEADER_RE.match(text) if not text.startswith("- ") else None
+        if header:
+            # 块标量在进入 entry 流之前折叠成单行 JSON 字符串，
+            # 否则后续行会被当成独立的 key 误报缩进错误。
+            value, index = _collect_block_scalar(lines, index, indent, header)
+            entries.append(
+                (
+                    indent,
+                    f"{header.group('key')}: "
+                    f"{json.dumps(value, ensure_ascii=False)}",
+                )
+            )
+            continue
+        entries.append((indent, text))
+        index += 1
     if not entries:
         return {}
 
@@ -319,6 +339,80 @@ def _parse_frontmatter(raw: str, path: Path) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise SkillValidationError(f"技能文件 {path} 的 frontmatter 必须是映射")
     return value
+
+
+#: 块标量头：`key: >` / `key: |-` / `key: |2+` 等；chomp 与缩进指示符顺序不校验
+_BLOCK_HEADER_RE = re.compile(
+    r"^(?P<key>[^:]+?):\s*(?P<style>[>|])(?P<flags>[-+0-9]*)\s*$"
+)
+
+
+def _collect_block_scalar(
+    lines: List[str], index: int, key_indent: int, header: "re.Match[str]"
+) -> Tuple[str, int]:
+    '''收集 `>`（折叠）/ `|`（保留换行）块标量的内容。
+
+    简化实现：折叠模式把连续非空行并成一行（空行 = 段落分隔），
+    不处理「更深的行保留换行」这条边缘规则；对技能描述足够了。
+    返回 (文本, 消耗到的行号)。
+    '''
+    flags = header.group("flags") or ""
+    chomp = "-" if "-" in flags else ("+" if "+" in flags else "clip")
+    index += 1
+
+    content_indent: Optional[int] = None
+    probe = index
+    while probe < len(lines):
+        line = lines[probe]
+        if not line.strip():
+            probe += 1
+            continue
+        line_indent = len(line) - len(line.lstrip(" "))
+        if line_indent <= key_indent:
+            break
+        content_indent = line_indent
+        break
+    if content_indent is None:
+        return "", index
+
+    body: List[str] = []
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            body.append("")
+            index += 1
+            continue
+        line_indent = len(line) - len(line.lstrip(" "))
+        if line_indent < content_indent:
+            break
+        body.append(line[content_indent:])
+        index += 1
+
+    while body and not body[0]:
+        body.pop(0)
+    while body and not body[-1]:
+        body.pop()
+
+    if header.group("style") == "|":
+        text = "\n".join(body)
+    else:
+        parts: List[str] = []
+        current: List[str] = []
+        for line in body:
+            if not line.strip():
+                if current:
+                    parts.append(" ".join(current))
+                    current = []
+                parts.append("")
+            else:
+                current.append(line.strip())
+        if current:
+            parts.append(" ".join(current))
+        text = "\n".join(parts)
+
+    if chomp == "-" or not text:
+        return text, index
+    return text + "\n", index
 
 
 def _parse_block(
@@ -388,6 +482,13 @@ def _parse_list(
 def _parse_scalar(text: str) -> Any:
     '''标量：引号字符串、布尔、null、数字、`[a, b]` 列表、单行 JSON。'''
     value = text.strip()
+    if value.startswith('"'):
+        # 块标量折叠后是 JSON 编码的单行字符串；json.loads 能正确还原
+        # 引号、换行等转义，比朴素去引号可靠。
+        try:
+            return json.loads(value)
+        except ValueError:
+            pass
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]
 

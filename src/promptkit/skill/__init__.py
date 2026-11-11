@@ -26,7 +26,15 @@ Skill 可以调 Skill（`ctx.call_skill`）；第三方包用 entry points 装�
 '''
 from promptkit.skill.context import SkillContext
 from promptkit.skill.errors import (
+    DependencyInstallError,
+    DuplicateToolError,
+    InvalidSkillPackageError,
+    PathEscapeError,
+    PythonInterpreterError,
+    ResourceNotFoundError,
+    ScriptNotFoundError,
     SkillAlreadyExists,
+    SkillDependencyError,
     SkillError,
     SkillExecutionError,
     SkillNotFound,
@@ -40,6 +48,15 @@ from promptkit.skill.orchestrate_skill import (
     orchestrate_validate,
     register_orchestrate_skills,
 )
+from promptkit.skill.package import (
+    ScriptSpec,
+    SkillPackage,
+    as_skill_package,
+    load_skills_from_dir,
+    merge_tools,
+)
+from promptkit.skill.python import ENV_VAR as PYTHON_ENV_VAR
+from promptkit.skill.python import resolve_python
 from promptkit.skill.registry import SkillRegistry
 from promptkit.skill.schema import build_parameters, type_schema, validate_args
 from promptkit.skill.spec import Skill, SkillSpec, build_spec, skill
@@ -75,6 +92,15 @@ __all__ = [
     "as_skill",
     "as_skills",
     "MarkdownSkillTool",
+    # 目录式技能包（SKILL.md + references/assets/templates + scripts）
+    "as_skill_package",
+    "SkillPackage",
+    "ScriptSpec",
+    "load_skills_from_dir",
+    "merge_tools",
+    # 解释器自动解析
+    "resolve_python",
+    "PYTHON_ENV_VAR",
     # 注册 / 执行
     "SkillRegistry",
     "SkillContext",
@@ -91,6 +117,15 @@ __all__ = [
     "SkillAlreadyExists",
     "SkillNotFound",
     "SkillExecutionError",
+    "SkillDependencyError",
+    # 技能包（skill_spec v1）
+    "InvalidSkillPackageError",
+    "DependencyInstallError",
+    "ScriptNotFoundError",
+    "ResourceNotFoundError",
+    "PathEscapeError",
+    "DuplicateToolError",
+    "PythonInterpreterError",
     # 编排 Skill（自包含）
     "orchestrate_run",
     "orchestrate_plan",

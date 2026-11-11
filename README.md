@@ -9,7 +9,7 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
 
 - 包名 `promptkit`，版本 0.1.0，要求 Python ≥ 3.10
 - 核心依赖只有 `openai>=1.40` 和 `pydantic>=2.0`
-- 项目地址：`d:\projects\promptkit`（src 布局，包在 `src/promptkit/`）
+- 项目采用 src 布局，包在 `src/promptkit/`
 
 ## 功能特性
 
@@ -409,7 +409,10 @@ chat.run(agent=agent)
 - 长对话自动压缩：`ChatWorkflow(compact_after=40, compact_keep=8)`
 - 让模型感知时间：`ChatWorkflow(timestamps=True)`（每轮用户消息自带
   `[11-09 15:30]` 前缀；手写 `ChatLoop(timestamps=True)` 同理，模板里可用
-  `{{chat_time}}`）
+  `{{chat_time}}`）。也可以把步骤塞进循环体：`ChatLoop(TimeStamp(), ...)`
+- 计时器主动推送：`ChatWorkflow(proactive_alarms=True)` —— 到点立刻让模型
+  说一句，不等用户输入（底层是 `AlarmRunner` 后台线程 + `Agent` 回合锁）。
+  步骤写法：`ChatLoop(ProactiveAlarms())`
 - 声明式 Step（`Role` / `Want` / `Rules` / `Tools` / `Deliverables` /
   `ExitWords` / `SystemPrompt` / `ChatLoop` / `Compact` / `SaveDeliverables`）
   也可手写组合；`Rules` 等**多次调用会累积**，重置传 `replace=True`
@@ -598,10 +601,42 @@ LLMStep(Prompt(role="user", content="帮我看看订单 67890，能退就退了�
 | `GET_TIME` | 查当前时间（`YYYY-MM-DD HH:MM:SS 周X`），模型能主动问「现在几点」 |
 | `TIMER` | 计时器：`timer("start", seconds=600, name="work")` 到点后往对话里插一条 `<15:30>到了。`，模型下一轮即可感知 |
 
-计时器是「抢断式」提醒：后台线程到点后立即打印并排队，Agent 在**下一次**
-调模型前把提醒作为 `user` 消息插进历史（也就是用户下一次说话时模型会先
-看到它）。入参：`action`（`start` / `stop` / `elapsed` / `list`）、
-`seconds`、`name`、`message`（自定义提醒文本，默认 `<HH:MM>到了。`）。
+计时器有两种投递方式：
+
+- **排队（默认）**：到点后立即打印并排队，Agent 在**下一次**调模型前把提醒
+  作为 `user` 消息插进历史（用户下次说话时模型会先看到它）。
+- **主动推送**：`ChatLoop(proactive_alarms=True)` / `ChatWorkflow(...)`，或
+  把 `ProactiveAlarms()` 塞进循环体，或直接 `AlarmRunner(agent).start()` ——
+  到点立刻让模型跑一轮，不用等用户输入。
+  `AlarmRunner` 是后台守护线程，`Agent` 内有回合锁保证同一时刻只有一轮调用；
+  对话结束（正常 / 异常）时会自动停掉。
+
+入参：`action`（`start` / `stop` / `elapsed` / `list`）、`seconds`、`name`、
+`message`（自定义提醒文本，默认 `<HH:MM>到了。`）。
+
+不在聊天里也能用 DSL 原语（写进步骤树就一定执行，不依赖模型是否调工具）：
+
+```python
+from promptkit.core import (
+    Workflow, TimeStamp, StartTimer, WaitAlarm, StopTimer,
+)
+
+wf = Workflow(
+    TimeStamp(),                       # chat_time = "11-09 15:30"（短格式）
+    StartTimer(600, name="contest"),   # 10 分钟后提醒
+    WaitAlarm(timeout=700, output_key="alarm"),  # 阻塞等提醒
+    StopTimer("contest"),
+)
+```
+
+| 原语 | 做什么 |
+| --- | --- |
+| `TimeStamp(output_key="chat_time")` | 写短时间戳，适合塞进 prompt |
+| `Now(output_key="now")` | 写完整时间（含星期），支持 `timezone=` |
+| `StartTimer(seconds, name=..., message=...)` | 起计时器，到点提醒进 `ALARMS` |
+| `StopTimer(name=...)` | 停计时器 |
+| `WaitAlarm(timeout=None, output_key="alarm")` | 阻塞等一条提醒；超时写空串、不抛异常 |
+| `ProactiveAlarms()` | 放进 `ChatLoop` 循环体，等价于 `proactive_alarms=True` |
 
 ⚠️ `WriteFile` 的沙箱（`sandbox=True`，默认开）是唯一「模型驱动写磁盘」的
 通道，别关。搜索结果会被塞进提示词而网页内容不可信 —— 别把搜索结果当
@@ -688,9 +723,48 @@ def classify_sentiment(text: str, ctx: SkillContext) -> Sentiment:
 `SkillStep(skill, text=Var("text"), output_key="s")` 放进工作流、
 `registry.to_tools(ctx)` 交给 Agent 自己挑、`ChatWorkflow(skills=[...])`
 挂进聊天。没有全局注册表，注册是显式的；插件通过
-`entry-points."promptkit.skills"` 加载。示例见
+`entry-points."promptkit.skills"` 加载。外部 `.md` 技能（一段说明 + 参数表）
+用 `as_skill("skills/x.md")` / `as_skills("skills/")` 加载后直接当 Tool 用。
+示例见
 [examples/skills.py](examples/skills.py)、
-[examples/skill_refund.py](examples/skill_refund.py)。
+[examples/skill_refund.py](examples/skill_refund.py)、
+[examples/markdown_skill.py](examples/markdown_skill.py)（外部 `.md` 技能）、
+[examples/skill_with_script.py](examples/skill_with_script.py)（技能里带脚本）。
+
+目录式技能包（`SKILL.md` 或 `AGENT.md` + `references/` + `assets/` +
+`scripts/`）用 `as_skill_package("skills/xxx")` 加载
+
+```python
+from promptkit.skill import as_skill_package
+
+pkg = as_skill_package("skills/ppt-master")
+
+# 工具路由：正文按需加载，模型匹配时自己调技能工具
+ChatWorkflow(role="PPT 助手", tools=pkg.tools())
+
+# 提示词路由：让「什么时候该用这个技能」始终在 system prompt 里
+ChatWorkflow(
+    role="PPT 助手",
+    rules=[pkg.routing_prompt()],
+    tools=pkg.tools(),
+)
+```
+
+`pkg.routing_prompt()` 只放技能名、描述和触发规则，控制 token；确实需要整份
+入口常驻时用 `rules=[pkg.instructions]`（`{{参数}}` 会保持原样，可用
+`pkg.skill.render(...)` 替换）。
+
+资源路径限定在技能目录内，二进制只返回元信息；脚本从 `argparse` 推断参数
+Schema，只允许执行加载时登记过的 `.py`（不走 shell，带超时和输出截断）。
+frontmatter 支持 `dependencies`（缺失会标注，`strict_dependencies=True` 时
+直接抛 `SkillDependencyError`）和 `allowed-tools`（兼容 `Read` / `Glob` /
+`Bash` 写法）。示例见
+[examples/skill_package.py](examples/skill_package.py)。
+
+技能脚本用哪个解释器不需要手工配置，`resolve_python` 按下面的顺序取：
+显式 `python=` → 环境变量 `PROMPTKIT_PYTHON` → 技能包根目录的 `.venv` /
+`venv` → 当前解释器 → PATH。换一台电脑直接 `pip install .` 就能用；Windows
+商店那种退出码 9009 的假 python 会在探测阶段被自动跳过。
 
 ### MCP 接入
 
@@ -941,6 +1015,7 @@ promptkit/
   [orchestrate_refactor.py](examples/orchestrate_refactor.py) — 编排各场景
 - [skills.py](examples/skills.py) — Skill 注册表与互调
 - [skill_refund.py](examples/skill_refund.py) — 业务 Skill：规则 + 工作流
+- [skill_package.py](examples/skill_package.py) — 目录式技能包：资源按需读 + 脚本参数自动推断
 - [course_assistant.py](examples/course_assistant.py) — `skills=[DSL 函数]` 挂进聊天
 
 ## 常见问题 FAQ
@@ -985,7 +1060,8 @@ sympy 的 `parse_latex` 需要 `antlr4-python3-runtime` 且版本挑剔（sympy
 
 **Q：`python examples/xxx.py` 报 9009 / 「不是内部或外部命令」？**
 这是环境 PATH 问题（终端找不到 `python`），不是项目问题。Windows 上先确认
-Python 已加入 PATH，或用完整解释器路径运行。
+Python 已加入 PATH，或用完整解释器路径运行。技能包内部已自动探测可用解释器
+（`resolve_python`），也可以用环境变量 `PROMPTKIT_PYTHON` 直接指定。
 
 **Q：改了 `agent.start_prompts` 没生效？**
 `agent.messages` 是构造时算好的缓存。改完要 `agent.reset()`（清空历史）
