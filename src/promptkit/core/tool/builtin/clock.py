@@ -4,18 +4,22 @@
 - `TIMER`：起一个计时器；到点会往对话里插一条 `<时间>到了。`
 - `ALARMS`：到点消息的队列，`Agent.ask()` 每次调模型前会把它取空，
   把里面的消息作为 user 消息插进历史（所以模型能在下一轮「被提醒」）
+- `AlarmRunner`：后台线程版的「主动推送」—— 一到点立刻让模型跑一轮，
+  不用等用户下一次输入（`ChatLoop(proactive_alarms=True)` 会自动用它）
 
 不想让模型自己调也行，Python 侧直接用：
 
-    from promptkit.core.tool import start_timer, drain_alarms, clock_text
+    from promptkit.core.tool import AlarmRunner, start_timer, clock_text
+
     start_timer(300, name="contest")      # 5 分钟后提醒
+    AlarmRunner(agent).start()            # 到点立刻让模型说一句
 '''
 from __future__ import annotations
 
 import threading
 import time as _time
 from datetime import datetime, timedelta, tzinfo
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from promptkit.core.tool.base import Tool
 
@@ -59,22 +63,37 @@ class AlarmBoard:
     def __init__(self) -> None:
         self._items: List[str] = []
         self._lock = threading.Lock()
+        #: 有消息时唤醒正在 `wait()` 的后台线程（AlarmRunner）
+        self._arrived = threading.Condition(self._lock)
 
     def push(self, text: str) -> None:
-        with self._lock:
+        with self._arrived:
             self._items.append(text)
+            self._arrived.notify_all()
 
     def drain(self) -> List[str]:
-        with self._lock:
+        with self._arrived:
             items, self._items = self._items, []
         return items
 
     def peek(self) -> List[str]:
-        with self._lock:
+        with self._arrived:
             return list(self._items)
 
+    def wait(self, timeout: Optional[float] = None) -> Optional[str]:
+        '''阻塞等到一条到点消息；超时返回 `None`。
+
+        和 `drain()` 二选一：谁先取到就归谁，提醒不会重复投递。
+        '''
+        with self._arrived:
+            if not self._items:
+                self._arrived.wait(timeout)
+            if self._items:
+                return self._items.pop(0)
+            return None
+
     def clear(self) -> None:
-        with self._lock:
+        with self._arrived:
             self._items.clear()
 
 
@@ -205,11 +224,91 @@ def timer(
 
 TIMER = Tool.from_function(timer, name="timer")
 
+
+# ============================ 主动推送 ============================
+class AlarmRunner:
+    '''后台守护线程：一到点就立刻让模型跑一轮，不等用户输入。
+
+        runner = AlarmRunner(agent).start()
+        ...                                  # 用户该干嘛干嘛
+        runner.stop()
+
+    `ChatLoop(proactive_alarms=True)` 会在对话期间自动起停它。
+
+    - 线程只做一件事：从 `ALARMS` 取一条提醒，调 `agent.ask(提醒)`；
+      真正的并发保护在 `Agent` 的回合锁里（同一时刻只有一轮模型调用）。
+    - `prompt_template` 可换发给模型的内容，`{alarm}` 是提醒原文。
+    - `Agent.ask()` 本来就会先取空队列，所以提醒**不会重复**：
+      主线程先取到就由主线程带上，后台线程先取到就由后台线程推送。
+    '''
+
+    def __init__(
+        self,
+        agent: Any,
+        *,
+        prompt_template: Optional[str] = None,
+        on_error: Optional[Callable[[BaseException], None]] = None,
+        poll_interval: float = 0.2,
+    ) -> None:
+        self.agent = agent
+        self.prompt_template = prompt_template
+        self.on_error = on_error
+        self.poll_interval = poll_interval
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+
+    def start(self) -> "AlarmRunner":
+        if self.running:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="promptkit-alarm-runner", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 2.0) -> None:
+        '''停掉后台线程（正在跑的那一轮模型调用会先跑完）。'''
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout)
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            alarm = ALARMS.wait(self.poll_interval)
+            if alarm is None:
+                continue
+            prompt = (
+                self.prompt_template.format(alarm=alarm)
+                if self.prompt_template
+                else alarm
+            )
+            try:
+                self.agent.ask(prompt)
+            except BaseException as exc:  # 后台线程的异常不能吞掉主流程
+                if self.on_error is not None:
+                    self.on_error(exc)
+                else:
+                    print(
+                        f"\n[计时器提醒失败] {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+
+    def __repr__(self) -> str:
+        return f"<AlarmRunner running={self.running}>"
+
+
 __all__ = [
     "ALARMS",
     "GET_TIME",
     "TIMER",
     "AlarmBoard",
+    "AlarmRunner",
     "clock_text",
     "drain_alarms",
     "elapsed_seconds",

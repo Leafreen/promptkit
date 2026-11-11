@@ -219,8 +219,13 @@ class ChatWorkflow:
     compact_prompt: Optional[str] = None
     render: str = "markdown"
     read_prompt: str = ">>> "
-    #: 每轮给用户消息加时间戳（`[11-09 15:30] ...`），模型能感知「现在几点」
+    #: 每轮给用户消息加时间戳（`[11-09 15:30] ...`），模型能感知「现在几点」。
+    #: 等价写法：在 `behavior` 里放一个 `TimeStamp()`。
     timestamps: bool = False
+    #: 计时器到点时立刻让模型推送一轮回复（不等用户输入）。
+    #: 后台线程在对话期间运行，退出时自动停掉。
+    #: 等价写法：在 `behavior` 里放一个 `ProactiveAlarms()`。
+    proactive_alarms: bool = False
     name: str = "chat"
     #: 会话文件路径（或 `Session`）。给了就「开跑前 load、结束时 save」，
     #: 下次用同一个路径就接着上次聊。
@@ -485,6 +490,7 @@ class ChatWorkflow:
             compact_memory=self.memory if self.promote_compaction else None,
             compact_memory_key=self.compact_memory_key,
             timestamps=self.timestamps,
+            proactive_alarms=self.proactive_alarms,
         )
         if end_writes:
             # 断网 / Ctrl+C / max_turns 用尽时，循环后面的写记忆会被跳过。

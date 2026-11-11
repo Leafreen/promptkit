@@ -37,6 +37,14 @@ from promptkit.core.steps.actions.memory import (
     WriteMemory,
 )
 from promptkit.core.steps.actions.message import MessageStep
+from promptkit.core.steps.actions.clock import (
+    Now,
+    ProactiveAlarms,
+    StartTimer,
+    StopTimer,
+    TimeStamp,
+    WaitAlarm,
+)
 from promptkit.core.steps.actions.recall import RecallMemory, format_recalled
 from promptkit.core.steps.actions.chat_util import (
     CHAT_ROLE_KEY,
@@ -109,7 +117,15 @@ __all__ = [
     "RecallMemory",
     "format_recalled",
     # message.py
-    "MessageStep",    "CHAT_ROLE_KEY",
+    "MessageStep",
+    # clock.py：时间与计时器
+    "TimeStamp",
+    "Now",
+    "StartTimer",
+    "StopTimer",
+    "WaitAlarm",
+    "ProactiveAlarms",
+    "CHAT_ROLE_KEY",
     "CHAT_WANT_KEY",
     "CHAT_RULES_KEY",
     "CHAT_DELIVERABLES_KEY",

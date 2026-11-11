@@ -527,6 +527,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     compact_memory: object = None,
     compact_memory_key: Optional[str] = None,
     timestamps: bool = False,
+    proactive_alarms: bool = False,
 ) -> Step:
     '''组装多轮对话循环，返回一个 `Workflow`（本身就是 Step）。
 
@@ -574,7 +575,15 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     `timestamps=True`：每轮调模型前把当前时间写进 `{{chat_time}}`，默认模板
     变成 `[11-09 15:30] 用户说的话` —— 模型因此能感知「现在几点」。用了
     自定义 `turn_template` 时不会自动加前缀，需要的话自己在模板里写
-    `{{chat_time}}`。
+    `{{chat_time}}`。也**可以把 `TimeStamp()` 塞进循环体**，效果等同于
+    `timestamps=True`（和 `Compact(...)` 一样用步骤表达配置）：
+
+        ChatLoop(TimeStamp(), If(...).Then(...))
+
+    `proactive_alarms=True`：计时器到点时**不再等用户输入**，后台线程立刻
+    调 `agent.ask("<15:30>到了。")` 推送一轮模型回复。对话结束（正常 / 异常）
+    时自动停掉后台线程；同一时刻只有一轮模型调用（`Agent` 内有回合锁）。
+    步骤写法同理：`ChatLoop(ProactiveAlarms())`。
     '''
     from promptkit.core.steps.actions.interactive import Echo, Read
     from promptkit.core.steps.logics.if_step import If
@@ -592,10 +601,17 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         （类在函数内定义：`chat_util` 顶部 import `Workflow` 会形成循环导入。）
         '''
 
-        def __init__(self, *steps: object, chat_turn: ChatTurn, **kwargs):
+        def __init__(
+            self,
+            *steps: object,
+            chat_turn: ChatTurn,
+            proactive: bool = False,
+            **kwargs,
+        ):
             super().__init__(*cast(Sequence[StepLike], steps), **kwargs)
             self._chat_turn = chat_turn
             self._finally: List[Step] = []
+            self._proactive = proactive
 
         def Template(self, text: str) -> "ChatLoopWorkflow":  # noqa: N802
             '''换掉每轮发给模型的内容（支持 `{{var}}` 占位）。'''
@@ -614,10 +630,30 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             return self
 
         def execute(self, context: Context) -> None:
+            # 到点提醒要「抢断」进模型：起一个后台线程守 ALARMS，
+            # 循环结束（正常 / 异常）时一定要停，否则线程会活到进程结束。
+            runner = self._start_alarm_runner(context)
+            try:
+                self._run_loop(context)
+            finally:
+                if runner is not None:
+                    runner.stop()
+
+        def _start_alarm_runner(self, context: Context):
+            if not self._proactive:
+                return None
+            agent = context.get("agent")
+            if agent is None:
+                return None
+            from promptkit.core.tool.builtin.clock import AlarmRunner
+
+            return AlarmRunner(agent).start()
+
+        def _run_loop(self, context: Context) -> None:
             failure: Optional[BaseException] = None
             try:
                 super().execute(context)
-            except BaseException as exc:  # 控制流信号也先收尾再往上抛
+            except BaseException as exc:  # 控制流信号也要先收尾再往上抛
                 failure = exc
 
             cleanup_error: Optional[BaseException] = None
@@ -644,6 +680,26 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             "或者关键字 behavior=[...]，不要同时给"
         )
     loop_body = tuple(steps) if steps else tuple(behavior or ())
+
+    # 循环体里的原语等价于关键字（和 `Compact(...)` 同一种写法）：
+    #   ChatLoop(TimeStamp())        == ChatLoop(timestamps=True)
+    #   ChatLoop(ProactiveAlarms())  == ChatLoop(proactive_alarms=True)
+    # `TimeStamp` 保留在循环体里（它真要写变量）；标记步骤摘掉，它不属于
+    # 每轮动作 —— 真正起停后台线程的是整个循环。
+    from promptkit.core.steps.actions.clock import ProactiveAlarms, TimeStamp
+
+    stamps = [
+        step
+        for step in loop_body
+        if isinstance(step, TimeStamp) and step.output_key == CHAT_TIME_KEY
+    ]
+    stamped = timestamps or bool(stamps)
+    proactive = proactive_alarms or any(
+        isinstance(step, ProactiveAlarms) for step in loop_body
+    )
+    loop_body = tuple(
+        step for step in loop_body if not isinstance(step, ProactiveAlarms)
+    )
 
     # 每轮要跑的收尾步骤。没显式给就默认「把 when='each_turn' 的交付物存掉」——
     # 手写 Workflow 时 `Deliverable(when="each_turn")` 否则会**完全没效果**：
@@ -684,7 +740,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             else (
                 # 带时间戳：`[11-09 15:30] 用户说的话`
                 "[{{" + CHAT_TIME_KEY + "}}] {{" + input_key + "}}"
-                if timestamps
+                if stamped
                 else "{{%s}}" % input_key
             )
         ),
@@ -692,9 +748,10 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         cautions=cautions,
         on_error=on_error,
     )
-    # 每轮调模型前把「现在几点」写进 Context（模板里用 {{chat_time}}）
+    # 每轮调模型前把「现在几点」写进 Context（模板里用 {{chat_time}}）。
+    # 循环体里已经有 TimeStamp() 就不再补一个。
     stamp: Sequence[StepLike] = ()
-    if timestamps:
+    if stamped and not stamps:
         from promptkit.core.steps.logics.function import FunctionStep
         from promptkit.core.tool.builtin.clock import clock_text
 
@@ -736,6 +793,7 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         # （`max_turns` 用尽会抛 LoopLimitExceeded，不会走到）。
         *coerce_steps(*cast(Sequence[StepLike], after_end)),
         chat_turn=turn,
+        proactive=proactive,
         name="chat_loop",
     )
 

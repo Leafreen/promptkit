@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import sys
+import threading
 from contextlib import contextmanager
 from typing import (
     Dict,
@@ -373,6 +374,10 @@ class Agent(AgentLike):
         # 历史由对话状态层的 Session 管；`history` 属性只是兼容旧接口的活视图
         self._session: ConversationSession = ConversationSession()
         self.messages: List[Message] = self._build_messages()
+        #: 回合锁：同一时刻只允许一轮模型调用。计时器提醒会从后台线程
+        #: 调 `ask()`（`AlarmRunner`），没有锁的话历史会被两条线程交叉写坏。
+        #: 用 RLock：工具内部再调 `agent.ask()` 是同一个线程，不能自锁。
+        self._turn_lock = threading.RLock()
 
         if register_as_default:
             Agent._default = self
@@ -438,6 +443,8 @@ class Agent(AgentLike):
         child.client = self.client
         child._session = self._session.clone()
         child.messages = child._build_messages()
+        # 子 Agent 有自己的历史，锁也要独立（不能和父 Agent 抢同一把）
+        child._turn_lock = threading.RLock()
         return child
 
     def _build_messages(self) -> List[Message]:
@@ -585,15 +592,16 @@ class Agent(AgentLike):
         target = bus if bus is not None else self.bus
         rounds = settings.max_tool_rounds if max_tool_rounds is None else max_tool_rounds
 
-        with self._extra_handlers(target, on_event, verbose):
-            if stream:
-                text = ""
-                for event in self._stream_events(prompt, tools, rounds):
-                    target.emit(event)
-                    if event.type == EventType.MESSAGE_END:
-                        text = event.data.get("text", text)
-                return text
-            return self._ask_once(prompt, tools, target, rounds)
+        with self._turn_lock:
+            with self._extra_handlers(target, on_event, verbose):
+                if stream:
+                    text = ""
+                    for event in self._stream_events(prompt, tools, rounds):
+                        target.emit(event)
+                        if event.type == EventType.MESSAGE_END:
+                            text = event.data.get("text", text)
+                    return text
+                return self._ask_once(prompt, tools, target, rounds)
 
     def _ask_once(
         self,
@@ -727,18 +735,19 @@ class Agent(AgentLike):
 
         rounds = settings.max_tool_rounds if max_tool_rounds is None else max_tool_rounds
         stream = self._stream_events(prompt, tools, rounds)
-        if not handlers:
-            yield from stream
-            return
+        with self._turn_lock:
+            if not handlers:
+                yield from stream
+                return
 
-        # 临时挂上，只为这一次迭代服务
-        for handler in handlers:
-            self.bus.on(handler)
-        try:
-            yield from stream
-        finally:
+            # 临时挂上，只为这一次迭代服务
             for handler in handlers:
-                self.bus.off(handler)
+                self.bus.on(handler)
+            try:
+                yield from stream
+            finally:
+                for handler in handlers:
+                    self.bus.off(handler)
 
     def _stream_events(
         self,

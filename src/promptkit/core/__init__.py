@@ -160,6 +160,14 @@ from promptkit.core.steps.actions.chat_util import (
     chat_context_vars,
 )
 from promptkit.core.steps.chat import Deliverable, ChatWorkflow, chat_workflow
+from promptkit.core.steps.actions.clock import (
+    Now,
+    ProactiveAlarms,
+    StartTimer,
+    StopTimer,
+    TimeStamp,
+    WaitAlarm,
+)
 from promptkit.core.steps import (
     BoundStep,
     Break,
@@ -542,5 +550,12 @@ __all__ = [
     "Deliverable",
     "ChatWorkflow",
     "chat_workflow",
+    # 时间 / 计时器
+    "TimeStamp",
+    "Now",
+    "StartTimer",
+    "StopTimer",
+    "WaitAlarm",
+    "ProactiveAlarms",
 
 ]
