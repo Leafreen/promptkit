@@ -1,11 +1,8 @@
 # PromptKit
 
-一个极简的 LLM 提示词 / 工作流 Python DSL：把逻辑写成步骤树，让 Agent 自己调工具。
+一个极简的 LLM 提示词 / 工作流 / Agent开发 Python DSL：把逻辑写成步骤树，让 Agent 自己调工具。
 
-PromptKit 把提示词、结构化输出、控制流、约束、工具调用、多模态、记忆这些
-「写 LLM 应用绕不开的东西」做成一套小而可组合的库：提示词是带 `{{变量}}`
-的对象，工作流是一棵可以 `print` 出来的步骤树，模型输出由 Pydantic 校验并
-自动重试，约束（Caution）和解析方式（Formatter）都是可复用的对象。
+PromptKit 把提示词、结构化输出、控制流、约束、工具调用、多模态、记忆这些“写 LLM 应用绕不开的东西”做成一套小而可组合的库：提示词是带 `{{变量}}`的对象，工作流是一棵可以 `print` 出来的步骤树，模型输出由 Pydantic 校验并自动重试，约束（Caution）和解析方式（Formatter）都是可复用的对象。此外还有`ChatWorkflow`以及系统提示词构建步，通过纯代码来定义模型的系统提示词，减少搭建Agent的系统提示词文字量，加快智能体开发进程。
 
 - 包名 `promptkit`，版本 0.1.0，要求 Python ≥ 3.10
 - 核心依赖只有 `openai>=1.40` 和 `pydantic>=2.0`
@@ -17,20 +14,16 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
 
 - `Workflow` / `LLMStep` / `FunctionStep` 组合出顺序执行的步骤树，`Workflow`
   本身也是 `Step`，可任意嵌套复用
-- 完整控制流：`If / ElseIf / Else`、`Switch / Case`、`While / DoWhile / For /
-  ForEach`、`Break / Continue`、`Label / Goto`、`When`（三元）
-- `Function('$a', '$b').Do(...)` 定义带参数、可复用的步骤，支持 `Return` 和
-  `ThisFunc` 递归；惰性表达式（`Var("n") + 1` 运行时才求值）
-- 语义条件：`Classify` / `Intent` / `Similar` / `Sem(...)` 运算符写法，
-  闭集判定，由 `LLMJudge` 显式注入
-- 声明式聊天机器人 `ChatWorkflow`（角色 / 目标 / 规则 / 交付物编译成普通
-  `Workflow`）、会话持久化 `Session`
+- 完整控制流：`If / ElseIf / Else`、`Switch / Case`、`While / DoWhile / For / ForEach`、`Break / Continue`、`Label / Goto`、`When`（三元）
+- `Function('$a', '$b').Do(...)` 定义带参数、可复用的步骤，支持 `Return` 和 `ThisFunc` 递归；惰性表达式（`Var("n") + 1` 运行时才求值）
+- 语义条件：`Classify` / `Intent` / `Similar` / `Sem(...)` 运算符写法，闭集判定，由 `LLMJudge` 显式注入（支持基于语义的判断）
+- 声明式聊天机器人 `ChatWorkflow`（角色 / 目标 / 规则 / 交付物编译成普通`Workflow`）、会话持久化 `Session`（一般Agent智能体开发）
 
 **LLM 输出控制**
 
-- `Prompt` 对象 + `{{var}}` 变量模板（支持 `{{a.b.0}}` 点路径，缺变量报错）
+- `Prompt` 对象 + `{{var}}` 变量模板（支持 `{{a.b.0}}` 点路径，变量缺失时显式报错）
 - `Executor` 结构化输出：Pydantic 模型校验，解析失败带错误信息自动重试
-- `Caution` 约束体系：原子约束 + 预置组合，全局默认 → Workflow → Step 三层合并
+- `Caution` 约束体系：针对常见输出需求给出了预置的组合，实现原子约束 + 预置组合，全局默认 → Workflow → Step 三层合并
 - `Formatter` 可换解析方式：JSON / XML / YAML / 正则
 
 **工具与 MCP**
@@ -42,10 +35,10 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
   安全门、`MCPToolStep` 在工作流里显式调用（仅支持 Streamable HTTP 传输）
 - 编码任务原语（`promptkit.coding`）：`CodingStep` / `ApplyDiff` / `RunTests` /
   `FixLoop` / `Sandbox`，构成「改代码 → 跑测试 → 失败再改」闭环
-- 多代理编排（`promptkit.orchestrate`）：`Plan` / `ExecutePlan` /
+- 【实验性】 多代理编排（`promptkit.orchestrate`）：`Plan` / `ExecutePlan` /
   `AggregateStep`，任务拆分、上下文隔离、失败降级、token 预算
-- Skill（`promptkit.skill`）：把「提示词 + 流程 + 工具 + 输出契约」封装成
-  可注册、可描述、可执行的能力单元
+- Skill（`promptkit.skill`）：实现代码写Skil：把 提示词 + 流程 + 工具 + 输出契约 封装成
+  可注册、可描述、可执行的能力单元，同时支持一般的skill包解析
 
 **多模态**
 
@@ -66,11 +59,11 @@ PromptKit 把提示词、结构化输出、控制流、约束、工具调用、�
 
 - 事件系统：执行与显示解耦，`EventBus` + `EventType`，`Agent` / `Step`
   只发事件、不 `print`
-- `verbose` 分级（`Verbosity.SILENT / NORMAL / VERBOSE / DEBUG`）；
+- ⁠记录`verbose` 分级（`Verbosity.SILENT / NORMAL / VERBOSE / DEBUG`）；
   结果走 stdout，过程走 stderr
 - 开箱 handler：`console_display` / `json_display` / `log_display`
 - 终端渲染：`Echo(render="markdown")`（装 `rich` 后带排版），LaTeX 公式
-  零依赖转 Unicode
+  零依赖转 Unicode，现在只支持转换部分的线性形式的，一般的渲染方法正在研究中。
 
 ## 安装
 
@@ -96,14 +89,14 @@ pip install -r requirements.txt
 
 不装也能跑，只是对应功能退化或缺席：
 
-| extra | 装上得到 | 不装会怎样 |
-| --- | --- | --- |
-| `rich` | 终端 Markdown 排版、代码高亮、表格 | 退回纯文本（去掉标记） |
-| `math` | sympy 多行数学排版 | 用内置的零依赖 Unicode 渲染（默认） |
-| `render` | `rich` + `sympy` | 同上 |
-| `yaml` | `YamlFormatter` | 用别的解析器 |
-| `mcp` | MCP 客户端（`mcp>=1.0`） | 无法连接 MCP Server |
-| `dev` | `pytest`、`mypy` | 无法跑测试 / 类型检查 |
+| extra | 装上得到                           | 不装会怎样                          |
+| ------- | ------------------------------------ | ------------------------------------- |
+| `rich`      | 终端 Markdown 排版、代码高亮、表格 | 退回纯文本（去掉标记）              |
+| `math`      | sympy 多行数学排版【弃用】         | 用内置的零依赖 Unicode 渲染（默认） |
+| `render`      | `rich` + `sympy`                                | 同上                                |
+| `yaml`      | `YamlFormatter`                                   | 用别的解析器                        |
+| `mcp`      | MCP 客户端（`mcp>=1.0`）                     | 无法连接 MCP Server                 |
+| `dev`      | `pytest`、`mypy`                                 | 无法跑测试 / 类型检查               |
 
 ```bash
 pip install -e ".[render]"   # 终端排版 + 数学公式
@@ -113,7 +106,7 @@ pip install -e ".[mcp]"      # 接 MCP Server
 ⚠️ `math` extra 里 sympy 的 `parse_latex` 还要求 **antlr4 运行时**且版本挑剔
 （sympy 1.14 硬性要求 `antlr4-python3-runtime==4.11`），见 [常见问题](#常见问题-faq)。
 
-### 配置密钥（.env）
+### 配置API key（.env）
 
 `config.load_env_file()` 会按「当前工作目录 → 项目根目录 → 包目录」查找
 `.env`（项目根的 `.env` 和 `src/promptkit/.env` 都能被找到）。模板见
@@ -150,10 +143,12 @@ from promptkit.prompt import Prompt
 agent = Agent()                       # 默认 DeepSeek；换厂商：Agent(vendor="openai")
 
 wf = Workflow(
-    Set("topic", Read("想聊什么主题？")),
+    NewVar("topic"),  # 设置变量topic
+    Set("topic", Read("想聊什么主题？")),  # 询问用户，将询问值保存至变量topic中。Read用法同python的input()
+    
     LLMStep(Prompt(role="user", content="用一句话介绍：{{topic}}"),
-            output_key="intro"),
-    Echo("介绍：{{intro}}"),
+            output_key="intro"),  # 调用模型，将模型的输出保存至intro变量中
+    Echo("介绍：{{intro}}"),  # 输出
 )
 
 if __name__ == "__main__":
@@ -196,11 +191,13 @@ Prompt(role="user", content="意图：{{intent.label}}").render(intent=Intent(la
 - `{{key}}` 是**严格**语法：变量不存在抛 `KeyError` 并列出可用变量；
   角色不是 system/user/assistant 抛 `ValueError`。推荐使用。
 - 也兼容 `${key}` / `$key`，但**宽松**：找不到变量就原样保留（因为 `$`
-  和 LaTeX 公式、价格天生冲突）。想「写错立刻报错」就用 `{{}}`。
+  和 LaTeX 公式、价格天生冲突）。想“写错立刻报错”就用 `{{}}`。
 - `Echo` 的字符串只认 `{{key}}`：`Echo("分数：{{score}}")` 等价于
   `Echo("分数：", Var("score"))`。
 - 单花括号 `{name}` 不会被替换，模型会原样收到 —— 不报错但答非所问，
   是最常见的坑。
+
+  P.S.如果实在记不住，那就用`{{var}}`当作**只能**用在DSL里的低配版f-string算了。。。~~这玩意只能粗暴的替换，其实应该当成宏是吧（）~~
 
 ### Agent 与厂商
 
@@ -217,13 +214,13 @@ Agent(base_url="http://localhost:11434/v1", model="qwen2.5",
       api_key="ollama")                    # Ollama / vLLM 等兼容端点
 ```
 
-| 厂商 | `vendor=` | 环境变量 | 默认模型 |
-| --- | --- | --- | --- |
-| DeepSeek | `deepseek`（默认） | `DEEPSEEK_API_KEY` | `deepseek-flash` |
-| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| Anthropic | `anthropic`（别称 `claude`） | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
-| 豆包 | `doubao` | `DOUBAO_API_KEY` / `ARK_API_KEY` | `doubao-seed-2-1-pro-260915` |
-| 兼容端点 | `openai-compatible`（必须给 `base_url` 和 `model`） | `OPENAI_API_KEY` | — |
+| 厂商      | `vendor=`                | 环境变量 | 默认模型 |
+| ----------- | ----------------- | ---------- | ---------- |
+| DeepSeek  | `deepseek`（默认）        | `DEEPSEEK_API_KEY`         | `deepseek-flash`         |
+| OpenAI    | `openai`                | `OPENAI_API_KEY`         | `gpt-4o-mini`         |
+| Anthropic | `anthropic`（别称 `claude`）       | `ANTHROPIC_API_KEY`         | `claude-sonnet-4-5`         |
+| 豆包      | `doubao`                | `DOUBAO_API_KEY` / `ARK_API_KEY`      | `doubao-seed-2-1-pro-260915`         |
+| 兼容端点  | `openai-compatible`（必须给 `base_url` 和 `model`） | `OPENAI_API_KEY`         | —       |
 
 厂商识别顺序：`vendor=` 显式 > `base_url` 主机名 > `model` 前缀 > 环境里
 现成的密钥 > DeepSeek。厂商特有参数走 `params=`（如
@@ -231,9 +228,11 @@ Agent(base_url="http://localhost:11434/v1", model="qwen2.5",
 方言，Anthropic 的协议差异由 `AnthropicClient` 翻译（`urllib` 直连，不需要
 装 anthropic SDK）。
 
+如果别人可以看到你的代码，或者你有意要把代码传给他人，**千万不要**明文把你的apikey扔进代码里！！！请进行脱敏处理。
+
 ### LLMStep 的三件事
 
-`LLMStep` 是「调一次模型」的步骤，只关心三件事：
+`LLMStep` 是调**一次**模型的步骤，只关心三件事：
 
 ```python
 LLMStep(
@@ -244,13 +243,12 @@ LLMStep(
 )
 ```
 
-提示词里的 `{{var}}` 从 Context 取值。agent 从哪来：`LLMStep(..., agent=agent)`，
-或统一写在 `wf.run(agent=agent)`。
+提示词里的 `{{var}}` 从 Context 取值。agent 从哪来：`LLMStep(..., agent=agent)`、在workflow外面声明一个Agent对象或统一写在 `wf.run(agent=agent)`。
 
 ### 结构化输出
 
 `output_model` 给一个 Pydantic 模型，`Executor` 会从模型输出里抽取 JSON
-（裸 JSON、```` ```json ```` 代码块、夹在解释文字里的 JSON 都能识别），
+（裸 JSON、` ```json ` 代码块、夹在解释文字里的 JSON 都能识别），
 解析或校验失败时**带着错误信息自动重试**，`settings.max_retries` 次后抛
 `MaxRetriesExceeded`：
 
@@ -280,42 +278,42 @@ LLMStep(Prompt(role="user", content="判断意图：{{text}}"),
 
 ### 内置步骤速查表
 
-| 语法 | 说明 |
-| --- | --- |
-| `NewVar("x", type=None, default=...)` | 声明变量；`Number("n")` / `Str("s")` 声明带类型的（默认 `0` / `""`） |
-| `Var("x")` / `Var(name="x", val=expr)` | 读变量 / 写变量；支持点路径 `Var("a.b")` |
-| `Set("x", expr)` | 写变量（按声明类型转换） |
-| `Set(Var("d")["k"], expr)` | 写容器的下标（dict / list，支持嵌套和表达式键） |
-| `Inc("i", by=1)` / `Dec("i", by=1)` | `i++` / `i += n` / `i--` |
-| `LLMStep(prompt, output_model=None, output_key="output")` | 调模型；给了 `output_model` 就做结构化校验 |
-| `FunctionStep(func, output_key=None)` | 包装任意 Python 函数为步骤 |
-| `Function('$a', '$b', name=...).Do(...)` | 定义带参数的可复用步骤；形参用 `$` 标记（声明记号，内部去掉）；参数强校验（多传 / 少传 / 重复抛 `ArgumentError`） |
-| `Return(expr)` | 函数返回值，调用方用 `.result` 取（属性，不加括号） |
-| `ThisFunc(Var("n") - 1).result` | 函数体内递归调用自己（上限 `settings.max_recursion_depth`，默认 100） |
-| `Transform(name, *args, **kwargs)` | 具名数据转换表达式（`join` / `len` / `json_dumps` …；用 `@transform("name")` 注册扩展）；**不是步骤**，要包进 `Set` / `Echo` |
-| `If(c).Then(...).ElseIf(c).Then(...).Else(...)` | 多路分支；条件支持常量 / lambda / `Condition` 子类 / `And` / `Or` / `Not` |
-| `When(cond, a, b)` | 三元表达式 `cond ? a : b` |
-| `Switch(v).Case(a, b).Then(...).Default(...)` | switch-case；默认不穿透，`Case(1, fallthrough=True)` 显式穿透 |
-| `While(cond, max_iterations=N).Do(...)` | 条件循环；超限抛 `LoopLimitExceeded` |
-| `DoWhile(cond).Do(...)` | 先执行一次再判断 |
-| `For(init, cond, step).Do(...)` | C 风格 `for(init; cond; step)`，如 `For(Set("i",0), Var("i")<5, Inc("i"))` |
-| `ForEach("x", iterable).Do(...)` | 遍历 range / 列表 / 表达式 |
-| `Break()` / `Continue()` | 跳出 / 跳过本轮（作用于最内层循环；`Switch` 不吞 `Break`） |
-| `OnError(*steps, handler=..., fallback=..., output_key="error")` | 兜底一组步骤的异常：默认吞掉并写 `output_key`，`reraise=True` 处理完再抛 |
-| `Label("x")` / `Goto("x")` | 跳到**顶层**标签（重试循环、跳出深层嵌套）；上限 `max_jumps` |
-| `Read(prompt="")` | 读一行标准输入（惰性表达式）；`.Until(标记)` 多行读取；`.OnBreak()` Ctrl+C/D 不炸工作流 |
-| `ReadFile(path)` | 读整个文件（惰性，UTF-8） |
-| `Confirm("继续？")` | 是非题（y/n/是/否），`.Default(True)` 兜底空输入 |
-| `Choose("吃啥？", "A", "B")` | 编号菜单选一个，`.Default(2)` 兜底 |
-| `Echo(*parts, render="text"\|"markdown", title=...)` | 打印 / 渲染；支持 `{{var}}` 插值 |
-| `Save(*values, file=..., format="text"\|"json", append=...)` | 写文件（UTF-8 + LF，自动建父目录；`file` 支持 `{{i}}` 模板；媒体部件直接落盘） |
-| `SaveJSON(value, file=...)` | 写成合法 JSON 文件 |
-| `SaveHistory(file=..., include_variables=True)` | 对话历史 + 步骤轨迹 + 变量存成 JSON |
-| `MessageStep(role, content)` | 往 `context["messages"]` 追加消息 |
-| `Len(expr)` | 长度（`len(expr)` 会立刻求值，不行） |
-| `SkipStep()` | 空步骤（写显式空分支） |
-| `expr[i]` / `expr[a:b]` / `expr.attr("n")` / `expr.method("m", *a)` | 下标 / 切片 / 取属性 / 调方法（都是惰性） |
-| `print(wf)` / `step.render()` | 打印整棵步骤树（纯展示，不执行） |
+| 语法      | 说明                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------- |
+| `NewVar("x", type=None, default=...)`          | 声明变量；`Number("n")` / `Str("s")` 声明带类型的（默认 `0` / `""`）                                                          |
+| `Var("x")` / `Var(name="x", val=expr)`       | 读变量 / 写变量；支持点路径 `Var("a.b")`                                                                    |
+| `Set("x", expr)`          | 写变量（按声明类型转换）                                                                        |
+| <p><span data-type="code">Set(Var("d")["k"], expr)</span></p>&#10;<p><span data-type="code">Set（Var("object").attr("a"), expr)</span></p>&#10;    | <p><span data-type="text">写容器的下标（dict / list，支持嵌套和表达式键）</span></p>&#10;<p><span data-type="text">或是对象的属性（等价于python原生的</span><span data-type="code">object.a = expr</span><span data-type="text">)</span></p>&#10;                                                                                          |
+| `Inc("i", by=1)` / `Dec("i", by=1)`       | `i++` / `i += n` / `i--`                                                                                          |
+| `LLMStep(prompt, output_model=None, output_key="output")`          | 调模型；给了 `output_model` 就做结构化校验                                                                    |
+| `FunctionStep(func, output_key=None)`          | 包装任意 Python 函数为步骤                                                                      |
+| `Function('$a', '$b', name=...).Do(...)`          | 定义带参数的可复用步骤；形参用 `$` 标记（声明记号，内部去掉）；参数强校验（多传 / 少传 / 重复抛 `ArgumentError`） |
+| `Return(expr)`          | 函数返回值，调用方用 `.result` 取（属性，不加括号）                                                      |
+| `ThisFunc(Var("n") - 1).result`          | 函数体内递归调用自己（上限 `settings.max_recursion_depth`，默认 100），~~因为用Function定义的东西相当于是python的lambda函数，不支持递归。只能用这种方式支持。。。~~                                                       |
+| `Transform(name, *args, **kwargs)`          | 具名数据转换表达式（`join` / `len` / `json_dumps` …；用 `@transform("name")` 注册扩展）；**不是步骤**，要包进 `Set` / `Echo`                                     |
+| `If(c).Then(...).ElseIf(c).Then(...).Else(...)`          | 多路分支；条件支持常量 / lambda / `Condition` 子类 / `And` / `Or` / `Not`                                                |
+| `When(cond, a, b)`          | 三元表达式 `cond ? a : b`                                                                                     |
+| `Switch(v).Case(a, b).Then(...).Default(...)`          | switch-case；默认不穿透，`Case(1, fallthrough=True)` 显式穿透                                                              |
+| `While(cond, max_iterations=N).Do(...)`          | 条件循环；超限抛 `LoopLimitExceeded`                                                                               |
+| `DoWhile(cond).Do(...)`          | 先执行一次再判断                                                                                |
+| `For(init, cond, step).Do(...)`          | C 风格 `for(init; cond; step)`，如 `For(Set("i",0), Var("i")<5, Inc("i"))`                                                                                    |
+| `ForEach("x", iterable).Do(...)`          | 遍历 range / 列表 / 表达式                                                                      |
+| `Break()` / `Continue()`       | 跳出 / 跳过本轮（作用于最内层循环；`Switch` 不吞 `Break`）                                                     |
+| `OnError(*steps, handler=..., fallback=..., output_key="error")`          | 兜底一组步骤的异常：默认吞掉并写 `output_key`，`reraise=True` 处理完再抛                                                  |
+| `Label("x")` / `Goto("x")`       | 跳到**顶层**标签（重试循环、跳出深层嵌套）；上限 `max_jumps`                                                       |
+| `Read(prompt="")`          | 读一行标准输入（惰性表达式）；`.Until(标记)` 多行读取；`.OnBreak()` Ctrl+C/D 不炸工作流                                   |
+| `ReadFile(path)`          | 读整个文件（惰性，UTF-8）                                                                       |
+| `Confirm("继续？")`          | 是非题（y/n/是/否），`.Default(True)` 兜底空输入                                                                |
+| `Choose("吃啥？", "A", "B")`          | 编号菜单选一个，`.Default(2)` 兜底                                                                           |
+| `Echo(*parts, render="text"\|"markdown", title=...)`          | 打印 / 渲染；支持 `{{var}}` 插值                                                                         |
+| `Save(*values, file=..., format="text"\|"json", append=...)`          | 写文件（UTF-8 + LF，自动建父目录；`file` 支持 `{{i}}` 模板；媒体部件直接落盘）                               |
+| `SaveJSON(value, file=...)`          | 写成合法 JSON 文件                                                                              |
+| `SaveHistory(file=..., include_variables=True)`          | 对话历史 + 步骤轨迹 + 变量存成 JSON                                                             |
+| `MessageStep(role, content)`          | 往 `context["messages"]` 追加消息                                                                                    |
+| `Len(expr)`          | 长度（`len(expr)` 会立刻求值，不行）                                                                       |
+| `SkipStep()`          | 空步骤（写显式空分支）                                                                          |
+| `expr[i]` / `expr[a:b]` / `expr.attr("n")` / `expr.method("m", *a)` | 下标 / 切片 / 取属性 / 调方法（都是惰性）                                                       |
+| `print(wf)` / `step.render()`       | 打印整棵步骤树（纯展示，不执行）                                                                |
 
 ### 表达式与条件
 
@@ -365,11 +363,10 @@ wf.run(agent=agent, judge=LLMJudge(agent))   # judge 注入一次，所有语义
 
 ```python
 If(Similar(Var("a"), Var("b"), "same", "contains")).Then(...)  # same/contains/entails/contradicts/independent
-If(Sem(Var("a")) == Var("b")).Then(...)   # 运算符写法：== / >= / >> / ^
+If(Sem(Var("a")) == Var("b")).Then(...)   # 运算符写法：==相等 / >=包含 / >>推出 / ^矛盾
 ```
 
-可控性设计：闭集标签（选到闭集外报错）、模型只产出 `label + confidence +
-reason`（真假由代码算）、确定性规则先短路、置信度阈值 + margin、unknown
+可控性设计：闭集标签（选到闭集外报错）、模型只产出 `label + confidence + reason`（真假由代码算）、确定性规则先短路、置信度阈值 + margin、unknown
 默认走 Else、每次 run 共享调用预算（默认 32）并缓存、注入防护（文本放在
 `<<< >>>` 里）。语义条件只适合软判断，硬约束（金额、权限）用确定性条件。
 
@@ -377,8 +374,7 @@ reason`（真假由代码算）、确定性规则先短路、置信度阈值 + m
 
 `While(...).Hook(扩展点, fn)` 支持 7 个扩展点（`LOOP_START` /
 `BEFORE_CONDITION` / `BEFORE_ITERATION` / `AFTER_ITERATION` / `LOOP_LIMIT` /
-`LOOP_ERROR` / `LOOP_END`），钩子签名 `fn(event: LoopHookEvent) ->
-Optional[bool]`，返回 `False` 可短路。钩子异常不会炸主循环，记进
+`LOOP_ERROR` / `LOOP_END`），钩子签名 `fn(event: LoopHookEvent) -> Optional[bool]`，返回 `False` 可短路。钩子异常不会炸主循环，记进
 `hooks.failures`。完整示例见 [examples/while_hooks.py](examples/while_hooks.py)。
 
 ### 聊天机器人与会话
@@ -445,45 +441,45 @@ LLMStep(
 
 ### 原子约束
 
-| 类 | 输出示例 |
-| --- | --- |
-| `OutputFormat(format, extra="")` | `请以 JSON 格式输出。` |
-| `NoExtraText()` | `除非另有指令，不要生成任何解释、前后缀或其他内容。` |
-| `NoMarkdown()` | `不要使用 Markdown 标记……直接输出纯文本。` |
-| `Language(lang)` | `请使用中文回答。` |
-| `MaxLength(n)` | `回答不超过 200 字。` |
-| `NoFabrication()` | `如果信息不足或不确定，直接说不知道，不要编造或猜测。` |
-| `Citations(style="[编号]")` | `引用资料时用 [编号] 标出出处……` |
-| `Grounded()` | `只根据上面提供的资料回答……` |
-| `Concise()` | `回答尽量简短直接……` |
-| `StepByStep()` | `请分步骤说明，每一步都给出理由或依据。` |
-| `AskFirst(at_most=3)` | `如果缺少必要信息，先问我（一次最多 3 个问题）……` |
-| `Tone(tone)` | `语气要求：礼貌。` |
-| `Role(role)` | `你现在扮演：资深客服。` |
-| `Style(style)` | 风格约束（生图 / 生视频也用） |
-| `NoText()` | 画面中不要出现文字（多模态用） |
-| `Quality(...)` | 画质约束（多模态用） |
+| 类  | 输出示例                                 |
+| ----- | ------------------------------------------ |
+| `OutputFormat(format, extra="")`    | `请以 JSON 格式输出。`                                         |
+| `NoExtraText()`    | `除非另有指令，不要生成任何解释、前后缀或其他内容。`                                         |
+| `NoMarkdown()`    | `不要使用 Markdown 标记……直接输出纯文本。`                                         |
+| `Language(lang)`    | `请使用中文回答。`                                         |
+| `MaxLength(n)`    | `回答不超过 200 字。`                                         |
+| `NoFabrication()`    | `如果信息不足或不确定，直接说不知道，不要编造或猜测。`                                         |
+| `Citations(style="[编号]")`    | `引用资料时用 [编号] 标出出处……`                                         |
+| `Grounded()`    | `只根据上面提供的资料回答……`                                         |
+| `Concise()`    | `回答尽量简短直接……`                                         |
+| `StepByStep()`    | `请分步骤说明，每一步都给出理由或依据。`                                         |
+| `AskFirst(at_most=3)`    | `如果缺少必要信息，先问我（一次最多 3 个问题）……`                                         |
+| `Tone(tone)`    | `语气要求：礼貌。`                                         |
+| `Role(role)`    | `你现在扮演：资深客服。`                                         |
+| `Style(style)`    | 风格约束（生图 / 生视频也用）            |
+| `NoText()`    | 画面中不要出现文字（多模态用）           |
+| `Quality(...)`    | 画质约束（多模态用）                     |
 | `SchemaHint(dict)` / `JsonSchemaHint(Model)` | 输出字段说明（后者从 Pydantic 自动生成） |
-| `Custom(text)` | 原样输出 |
+| `Custom(text)`    | 原样输出                                 |
 
 ### 预置约束组
 
 `cautions=[JSON_STRICT]` 直接用；都是 `CautionGroup`，可继续 `+`：
 
-| 组 | 内容 | 场景 |
-| --- | --- | --- |
-| `json_only()` / `JSON_ONLY` | JSON + 无废话 + 语言 | 简单结构化输出 |
+| 组  | 内容                                              | 场景                     |
+| ----- | --------------------------------------------------- | -------------------------- |
+| `json_only()` / `JSON_ONLY` | JSON + 无废话 + 语言                              | 简单结构化输出           |
 | `json_strict()` / `JSON_STRICT` | JSON + NoMarkdown + 无废话 + NoFabrication + 语言 | 模型老爱包代码块或编字段 |
-| `json_with_schema(schema)` | JSON + 字段说明 + 无废话 + 语言 | 字段多、要求明确 |
-| `plain_text()` / `PLAIN_TEXT` | 无废话 + 长度 + 语言 | 普通文本回复 |
-| `concise_text()` | NoMarkdown + Concise + 长度 + 语言 | 简短纯文本 |
-| `code_only()` / `CODE_ONLY` | 代码 + 语言 + 无废话 | 只要代码 |
-| `polite_reply()` | 纯文本 + 礼貌语气 | 客服 |
-| `grounded()` / `GROUNDED` | Grounded + Citations + NoFabrication + 语言 | 知识库 / 联网搜索 |
-| `tutor(persona)` / `TUTOR` | Role + Tone + StepByStep + NoFabrication | 教学 / 辅导 |
-| `socratic()` / `SOCRATIC` | Role + AskFirst + StepByStep + Tone | 追问式引导 |
-| `analyst()` / `ANALYST` | Role + StepByStep + Concise + NoFabrication | 数据分析 |
-| `translator()` | 译文 + 无废话 + NoMarkdown + 语言 | 翻译 |
+| `json_with_schema(schema)`    | JSON + 字段说明 + 无废话 + 语言                   | 字段多、要求明确         |
+| `plain_text()` / `PLAIN_TEXT` | 无废话 + 长度 + 语言                              | 普通文本回复             |
+| `concise_text()`    | NoMarkdown + Concise + 长度 + 语言                | 简短纯文本               |
+| `code_only()` / `CODE_ONLY` | 代码 + 语言 + 无废话                              | 只要代码                 |
+| `polite_reply()`    | 纯文本 + 礼貌语气                                 | 客服                     |
+| `grounded()` / `GROUNDED` | Grounded + Citations + NoFabrication + 语言       | 知识库 / 联网搜索        |
+| `tutor(persona)` / `TUTOR` | Role + Tone + StepByStep + NoFabrication          | 教学 / 辅导              |
+| `socratic()` / `SOCRATIC` | Role + AskFirst + StepByStep + Tone               | 追问式引导               |
+| `analyst()` / `ANALYST` | Role + StepByStep + Concise + NoFabrication       | 数据分析                 |
+| `translator()`    | 译文 + 无废话 + NoMarkdown + 语言                 | 翻译                     |
 
 ### 三层合并，就近优先
 
@@ -498,8 +494,7 @@ LLMStep(..., cautions=[MaxLength(50)])                     # ③ Step 级
 LLMStep(..., use_default_cautions=False)                   # 单步豁免全局默认
 ```
 
-同一套约束也作用于 `ImageGenStep` / `VideoGenStep`（`cautions=[Style("水彩画"),
-NoText()]`，三层合并语义一致）。Caution 是**事前引导**，`output_model` +
+同一套约束也作用于 `ImageGenStep` / `VideoGenStep`（`cautions=[Style("水彩画"), NoText()]`，三层合并语义一致）。Caution 是**事前引导**，`output_model` +
 重试是**事后兜底**，两者互补。
 
 ⚠️ 全局默认是进程级可变状态，测试里用 `using_default_cautions(...)` /
@@ -524,15 +519,14 @@ wf.run(image_prompt="一只橘猫趴在机械键盘上睡觉")
 
 四个步骤：
 
-| 步骤 | 作用 | 输出 |
-| --- | --- | --- |
-| `ImageGenStep(prompt_key, output_key, client=..., size=...)` | 文生图 / 以图生图 | `ImagePart` |
-| `VideoGenStep(prompt_key, output_key, client=..., duration=...)` | 文生视频 / 以图生视频 | `VideoPart` |
-| `STTStep(audio_key, output_key, client=...)` | 语音转文字 | `str` |
-| `TTSStep(text_key, output_key, client=..., voice=...)` | 文字转语音 | `AudioPart` |
+| 步骤 | 作用                  | 输出 |
+| ------ | ----------------------- | ------ |
+| `ImageGenStep(prompt_key, output_key, client=..., size=...)`     | 文生图 / 以图生图     | `ImagePart`     |
+| `VideoGenStep(prompt_key, output_key, client=..., duration=...)`     | 文生视频 / 以图生视频 | `VideoPart`     |
+| `STTStep(audio_key, output_key, client=...)`     | 语音转文字            | `str`     |
+| `TTSStep(text_key, output_key, client=..., voice=...)`     | 文字转语音            | `AudioPart`     |
 
-`prompt_key` 既可以是 Context 变量名，也可以直接给 `Prompt`。**以图生图 /
-以图生视频**就是把图片部件放进 Prompt：
+`prompt_key` 既可以是 Context 变量名，也可以直接给 `Prompt`。**以图生图 /以图生视频**就是把图片部件放进 Prompt：
 
 ```python
 from promptkit.core.content import ImagePart, TextPart
@@ -593,17 +587,17 @@ LLMStep(Prompt(role="user", content="帮我看看订单 67890，能退就退了�
 
 内置工具：
 
-| 工具 | 说明 |
-| --- | --- |
-| `WEB_SEARCH` | 联网搜索；配了 Key（博查 / 智谱 / Tavily / Serper / Brave）就用 Key，否则走免密钥降级链 `百度 → Bing 中国 → DuckDuckGo`；顺序可用 `PROMPTKIT_SEARCH_BACKENDS` 调整 |
-| `WriteFile` / `WRITE_FILE` | 让**模型自己决定**写文件；沙箱限制根目录、扩展名白名单、单次 20 万字符 |
-| `RUN_COMMAND` | 跑 shell 命令（跨平台、UTF-8 容错、带超时） |
-| `GET_TIME` | 查当前时间（`YYYY-MM-DD HH:MM:SS 周X`），模型能主动问「现在几点」 |
-| `TIMER` | 计时器：`timer("start", seconds=600, name="work")` 到点后往对话里插一条 `<15:30>到了。`，模型下一轮即可感知 |
+| 工具 | 说明                                                                                                     |
+| ------ | ---------------------------------------------------------------------------------------------------------- |
+| `WEB_SEARCH`     | 联网搜索；配了 Key（博查 / 智谱 / Tavily / Serper / Brave）就用 Key，否则走免密钥降级链 `百度 → Bing 中国 → DuckDuckGo`；顺序可用 `PROMPTKIT_SEARCH_BACKENDS` 调整 |
+| `WriteFile` / `WRITE_FILE`  | 让**模型自己决定**写文件；沙箱限制根目录、扩展名白名单、单次 20 万字符                                                   |
+| `RUN_COMMAND`     | 跑 shell 命令（跨平台、UTF-8 容错、带超时）                                                              |
+| `GET_TIME`     | 查当前时间（`YYYY-MM-DD HH:MM:SS 周X`），模型能主动问「现在几点」                                                                 |
+| `TIMER`     | 计时器：`timer("start", seconds=600, name="work")` 到点后往对话里插一条 `<15:30>到了。`，模型下一轮即可感知                                                       |
 
 计时器有两种投递方式：
 
-- **排队（默认）**：到点后立即打印并排队，Agent 在**下一次**调模型前把提醒
+- **排队（默认）** ：到点后立即打印并排队，Agent 在**下一次**调模型前把提醒
   作为 `user` 消息插进历史（用户下次说话时模型会先看到它）。
 - **主动推送**：`ChatLoop(proactive_alarms=True)` / `ChatWorkflow(...)`，或
   把 `ProactiveAlarms()` 塞进循环体，或直接 `AlarmRunner(agent).start()` ——
@@ -629,14 +623,14 @@ wf = Workflow(
 )
 ```
 
-| 原语 | 做什么 |
-| --- | --- |
-| `TimeStamp(output_key="chat_time")` | 写短时间戳，适合塞进 prompt |
-| `Now(output_key="now")` | 写完整时间（含星期），支持 `timezone=` |
-| `StartTimer(seconds, name=..., message=...)` | 起计时器，到点提醒进 `ALARMS` |
-| `StopTimer(name=...)` | 停计时器 |
-| `WaitAlarm(timeout=None, output_key="alarm")` | 阻塞等一条提醒；超时写空串、不抛异常 |
-| `ProactiveAlarms()` | 放进 `ChatLoop` 循环体，等价于 `proactive_alarms=True` |
+| 原语 | 做什么                               |
+| ------ | -------------------------------------- |
+| `TimeStamp(output_key="chat_time")`     | 写短时间戳，适合塞进 prompt          |
+| `Now(output_key="now")`     | 写完整时间（含星期），支持 `timezone=`          |
+| `StartTimer(seconds, name=..., message=...)`     | 起计时器，到点提醒进 `ALARMS`                |
+| `StopTimer(name=...)`     | 停计时器                             |
+| `WaitAlarm(timeout=None, output_key="alarm")`     | 阻塞等一条提醒；超时写空串、不抛异常 |
+| `ProactiveAlarms()`     | 放进 `ChatLoop` 循环体，等价于 `proactive_alarms=True`                |
 
 ⚠️ `WriteFile` 的沙箱（`sandbox=True`，默认开）是唯一「模型驱动写磁盘」的
 通道，别关。搜索结果会被塞进提示词而网页内容不可信 —— 别把搜索结果当
@@ -671,8 +665,7 @@ wf = Workflow(
 
 要点：三种输出格式（`diff` / `full_file` / `json`，都校验「能不能执行」）；
 `Sandbox` 守安全边界（只收相对路径、敏感文件拒绝、命令白名单、审计日志，
-**不是容器级沙箱**）；`default_coding_tools(root, allow_write=True,
-allow_commands=["python"])` 把同一批能力交给 Agent 自主使用。示例见
+**不是容器级沙箱**）；`default_coding_tools(root, allow_write=True, allow_commands=["python"])` 把同一批能力交给 Agent 自主使用。示例见
 [examples/coding_agent.py](examples/coding_agent.py)、
 [examples/coding_chat.py](examples/coding_chat.py)。
 
@@ -766,7 +759,7 @@ frontmatter 支持 `dependencies`（缺失会标注，`strict_dependencies=True`
 `venv` → 当前解释器 → PATH。换一台电脑直接 `pip install .` 就能用；Windows
 商店那种退出码 9009 的假 python 会在探测阶段被自动跳过。
 
-### MCP 接入
+### 【实验】MCP 接入
 
 `promptkit.mcp` 是 MCP 客户端，**只支持 Streamable HTTP 传输**（不支持
 stdio / sse），需要 `pip install -e ".[mcp]"`：
@@ -799,11 +792,11 @@ MCPTool 和内置 Tool 走同一套 `tool_calls` 流程，Agent 循环零改动�
 
 三层记忆，别混用：
 
-| 层 | 生命周期 | 实现 |
-| --- | --- | --- |
-| 工作记忆 | 单次 `Workflow.run` | `Context` |
+| 层       | 生命周期 | 实现               |
+| ---------- | ---------- | -------------------- |
+| 工作记忆 | 单次 `Workflow.run`    | `Context`                   |
 | 短期记忆 | 单次会话 | `SessionMemory`（只读包 `Agent.history`）/ `Session` 文件 |
-| 长期记忆 | 跨会话 | `KVMemory`（SQLite）/ `VectorMemory` / `LayeredMemory` |
+| 长期记忆 | 跨会话   | `KVMemory`（SQLite）/ `VectorMemory` / `LayeredMemory`    |
 
 设计原则：**显式优于魔法**（读写 / 召回都写在步骤里：`ReadMemory` /
 `WriteMemory` / `RecallMemory` / `MemoryStep`，给模型的记忆工具只给读）、
@@ -826,8 +819,7 @@ vec.recall("退款怎么处理", top_k=3)
   `%APPDATA%\promptkit\memory\` 等，可用 `PROMPTKIT_DATA_DIR` 整体改）；
   `VectorMemory` 不传 `path=` 时是进程内索引
 - 召回后过 `TokenBudget` 裁剪，别让长笔记吃掉上下文
-- 声明式接入：`ChatWorkflow(memory=..., memory_config=MemoryConfig(read=[...],
-  recall=RecallConfig(...), write=[...]))`；`store="data/u001"` 把 session
+- 声明式接入：`ChatWorkflow(memory=..., memory_config=MemoryConfig(read=[...], recall=RecallConfig(...), write=[...]))`；`store="data/u001"` 把 session
   和长期记忆接在一起（含压缩摘要沉淀）
 - `StorageConfig` 里 `namespace` **必填**（多用户隔离全靠它）
 
@@ -861,14 +853,14 @@ agent = Agent(bus=bus)
 
 事件类型（`EventType` 同时是 `str` 子类）：
 
-| 事件 | 含义 |
-| --- | --- |
+| 事件   | 含义                                              |
+| -------- | --------------------------------------------------- |
 | `THINKING_START` / `THINKING_DELTA` / `THINKING_END` | 思考过程（DeepSeek / o1 / Claude 的思考都能识别） |
-| `TOOL_CALL_START` / `TOOL_CALL_DELTA` / `TOOL_CALL_END` | 工具调用（流式下参数一段段拼） |
-| `TOOL_RESULT` | 工具返回值 |
-| `MESSAGE_DELTA` / `MESSAGE_END` | 最终回复（流式逐 token，`END` 带完整文本） |
-| `STEP_START` / `STEP_END` | 每个 Step 的开始 / 结束 |
-| `ERROR` | 某一步抛异常（`Break` / `Continue` / `Return` / `Goto` 算控制流，不发） |
+| `TOOL_CALL_START` / `TOOL_CALL_DELTA` / `TOOL_CALL_END` | 工具调用（流式下参数一段段拼）                    |
+| `TOOL_RESULT`       | 工具返回值                                        |
+| `MESSAGE_DELTA` / `MESSAGE_END`    | 最终回复（流式逐 token，`END` 带完整文本）             |
+| `STEP_START` / `STEP_END`    | 每个 Step 的开始 / 结束                           |
+| `ERROR`       | 某一步抛异常（`Break` / `Continue` / `Return` / `Goto` 算控制流，不发）          |
 
 四种用法：
 
@@ -905,17 +897,17 @@ with using_settings(max_iterations=5):            # 临时改，退出自动还�
     wf.run()
 ```
 
-| 设置 | 默认 | 管什么 |
-| --- | --- | --- |
-| `max_iterations` | `100` | `While` / `DoWhile` 迭代上限 |
-| `max_for_iterations` | `10000` | `For` / `ForEach` 迭代上限 |
-| `max_recursion_depth` | `100` | `Function` 递归上限 |
-| `max_steps` | `50` | 一个 `Workflow` 最多几步 |
-| `max_jumps` | `10000` | `Goto` 连续跳转上限 |
-| `max_retries` | `2` | `LLMStep` 结构化输出重试次数 |
-| `max_tool_rounds` | `8` | 工具调用循环上限 |
-| `auto_schema` | `False` | `LLMStep` 默认注入 JSON Schema |
-| `encoding` | `"utf-8"` | `Save` / `ReadFile` / `SaveHistory` 编码 |
+| 设置 | 默认 | 管什么                |
+| ------ | ------ | ----------------------- |
+| `max_iterations`     | `100`     | `While` / `DoWhile` 迭代上限          |
+| `max_for_iterations`     | `10000`     | `For` / `ForEach` 迭代上限          |
+| `max_recursion_depth`     | `100`     | `Function` 递归上限             |
+| `max_steps`     | `50`     | 一个 `Workflow` 最多几步        |
+| `max_jumps`     | `10000`     | `Goto` 连续跳转上限         |
+| `max_retries`     | `2`     | `LLMStep` 结构化输出重试次数   |
+| `max_tool_rounds`     | `8`     | 工具调用循环上限      |
+| `auto_schema`     | `False`     | `LLMStep` 默认注入 JSON Schema |
+| `encoding`     | `"utf-8"`     | `Save` / `ReadFile` / `SaveHistory` 编码           |
 
 显式传参永远优先（`While(cond, max_iterations=10)` 用 10）。写错设置名在
 调用时立刻 `TypeError` 并列出可用项。⚠️ 进程级可变状态，测试用
@@ -1020,55 +1012,55 @@ promptkit/
 
 ## 常见问题 FAQ
 
-**Q：变量写了 `{name}` 没替换成值，模型答非所问？**
+**Q：变量写了**  **`{name}`**  **没替换成值，模型答非所问？** 
 变量是**双花括号** `{{name}}`。单花括号不报错也不替换，是最容易踩的坑。
-`$name` / `${name}` 也能用但宽松（找不到就原样保留）；要「写错立刻报错」
+`$name` / `${name}` 也能用但宽松（找不到就原样保留）；要写错立刻报错
 就用 `{{}}`。
 
-**Q：`Echo(Var("x"))` 和 `Echo("{{x}}")` 有区别吗？**
+**Q：** **`Echo(Var("x"))`**  **和** **`Echo("{{x}}")`**  **有区别吗？** 
 没有，`Echo` 字符串支持 `{{key}}` 插值（只认 `{{}}`，不认 `$key`，避免
 `价格是 $100` 被误伤）。但 `Echo` 不直接输出 `Condition` / 布尔表达式结果
 ——要按条件选文本用 `When(cond, a, b)`。
 
-**Q：`Var("n") > 1 and Var("m") < 2` 为什么报错？**
+**Q：** **`Var("n") > 1 and Var("m") < 2`** **为什么报错？** 
 `and` / `or` / `not` 不能重载，`Expr` 的 `bool()` 会抛 `TypeError`。
 组合条件写成 `(Var("n") > 1) & (Var("m") < 2)`（`&` 优先级高于比较，括号
 必须加）。判断放进 `If(...)` / `While(...)` / `Condition(...)`。
 
-**Q：`Transform("name", ...)` 直接放进 `Workflow(...)` 报 `TypeError`？**
-`Transform` 是表达式不是步骤（求值出一个值，但没有「执行」语义）。包进
+**Q：** **`Transform("name", ...)`**  **直接放进** **`Workflow(...)`**  **报** **`TypeError`** **？** 
+`Transform` 是表达式不是步骤（求值出一个值，但没有执行语义）。包进
 `Set("x", Transform("join", Var("lines")))` / `Echo(Transform("upper", Var("s")))`，
 或只为了副作用用 `FunctionStep(lambda ctx: f())`。同理 `Set("x", SomeStep())`
 也是错的 —— 步骤不是值。旧的 `Call(f, ...)` 仍可用（会发 `DeprecationWarning`），
 但它只能翻译注册过的具名函数。
 
-**Q：`Save` 路径想用循环变量 `i`，f-string 不行？**
+**Q：** **`Save`** **路径想用循环变量** **`i`** **，f-string 不行？** 
 `Save` 的 `file=` 在构造时是普通字符串，f-string 在构建工作流时就定死了。
 用模板：`Save(Var("img"), file="cats/cat_{{i}}.png")`，`{{i}}` 在保存时按
-上下文展开。
+上下文展开。就记着，workflow里面用双括号。
 
-**Q：MCP 连不上本地 stdio server？**
+**Q：MCP 连不上本地 stdio server？** 
 `promptkit.mcp` **只支持 Streamable HTTP 传输**（规格约束），不支持
 stdio / sse。`load_mcp_tools(..., transport=...)` 传别的会直接报错。
 
-**Q：装了 `math` extra 后 sympy 报错 / 公式被改错？**
+**Q：【弃用】 装了** **`math`** **extra 后 sympy 报错 / 公式被改错？** 
 sympy 的 `parse_latex` 需要 `antlr4-python3-runtime` 且版本挑剔（sympy
 1.14 硬性要求 `==4.11`），装上后按它报错里的版本号补装即可。另外 sympy
 解析是有损的（`ln` 变 `log(x, E)`、`\sqrt5` 解析失败、多行公式放弃），
 所以默认走内置的零依赖 Unicode 渲染；要 sympy 排版显式
 `render_math(..., prefer_sympy=True)`。
 
-**Q：`python examples/xxx.py` 报 9009 / 「不是内部或外部命令」？**
+**Q：** **`python examples/xxx.py`** **报 9009 / 「不是内部或外部命令」？** 
 这是环境 PATH 问题（终端找不到 `python`），不是项目问题。Windows 上先确认
 Python 已加入 PATH，或用完整解释器路径运行。技能包内部已自动探测可用解释器
 （`resolve_python`），也可以用环境变量 `PROMPTKIT_PYTHON` 直接指定。
 
-**Q：改了 `agent.start_prompts` 没生效？**
+**Q：改了** **`agent.start_prompts`** **没生效？** 
 `agent.messages` 是构造时算好的缓存。改完要 `agent.reset()`（清空历史）
 或 `agent.rebuild()`（保留历史）；`SystemPrompt()` 默认帮你做。接会话时
 `session=` 存在会自动改成 `reset=False`，不会抹掉装回来的历史。
 
-**Q：聊天开头问卷每次启动都重问？**
+**Q：聊天开头问卷每次启动都重问？** 
 `Session` 默认只存对话历史，Context 变量不在 `messages` 里。传
 `wf.run(..., session="s.json", variables=["basic_info"])` 让指定变量跨进程
 保存，配合 `If(Var("basic_info") == {})` 只问一次。
@@ -1109,7 +1101,9 @@ mypy                          # 类型检查（基线见 pyproject.toml [tool.my
 本仓库暂未包含 LICENSE 文件。在采用、分发或二次开发前，请联系作者 /
 维护者确认许可条款。
 
-## 相关文档
+作者QQ: 2284929655
+
+相关文档
 
 - [docs/orchestrate-api-v2.md](docs/orchestrate-api-v2.md) — 编排 API v2 设计
 - [docs/typing-any-audit.md](docs/typing-any-audit.md) — 类型注解审计与 mypy 收紧计划
