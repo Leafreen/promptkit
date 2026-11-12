@@ -9,7 +9,13 @@ from typing import TYPE_CHECKING, Optional, Union, cast, overload
 from promptkit.core._missing import MISSING
 from promptkit.core.errors import UndefinedVariable
 from promptkit.core.steps.interface import Step
-from promptkit.core.steps.logics.expr_sys.expr import Expr, ItemExpr, VarExpr, as_expr
+from promptkit.core.steps.logics.expr_sys.expr import (
+    AttrExpr,
+    Expr,
+    ItemExpr,
+    VarExpr,
+    as_expr,
+)
 from promptkit.core.steps.logics.expr_sys.vartypes import VarType
 
 if TYPE_CHECKING:  # 只用于类型标注
@@ -38,17 +44,28 @@ class VarDecl(VarExpr, Step):
         self.var_type = var_type
         self.default = default
 
-    def default_value(self) -> object:
-        '''没有显式给 default 时，用类型自带的默认值。'''
-        if self.default is not MISSING:
-            return self.default
-        return None if self.var_type is None else self.var_type.default
+    def default_value(self, context: Context) -> object:
+        '''算出声明时用的默认值。
+
+        `default` 传表达式（如 `Var("a")`、`Var("n") + 1`）时在声明这一刻求值，
+        和 `Set` 的取值语义保持一致；字面量原样返回。
+        '''
+        if self.default is MISSING:
+            return None if self.var_type is None else self.var_type.default
+        if isinstance(self.default, Expr):
+            return self.default.eval(context)
+        return self.default
 
     def execute(self, context: Context) -> None:
+        # 变量已存在（例如 Workflow.run(n=...) 传进来）时保持原值，
+        # 也就不用求值 default，避免表达式引用别的变量时白抛异常
         if self.var_type is not None:
-            context.declare(self.var, self.var_type, self.default_value())
-        else:
-            context.setdefault(self.var, self.default_value())
+            if self.var in context:
+                context.declare(self.var, self.var_type)
+            else:
+                context.declare(self.var, self.var_type, self.default_value(context))
+        elif self.var not in context:
+            context.setdefault(self.var, self.default_value(context))
         context.trace.append(f"{self.name}:{self.var}")
 
     def __repr__(self) -> str:
@@ -121,6 +138,44 @@ class SetItemStep(Step):
 
     def __repr__(self) -> str:
         return f"SetItem({self.item!r}, {self.value!r})"
+
+
+class SetAttrStep(Step):
+    '''给对象写一个属性：`Set(Var("cur").attr("next"), v)`。
+
+    读用 `Var("cur").attr("next")`，写用 `Set(Var("cur").attr("next"), v)`，
+    两边写法对称。
+
+        Set(Var("node").attr("next"), Var("other"))
+        Set(Var("person").attr("name"), "张三")
+
+    和 `SetItemStep` 一样是**就地修改**对象。
+    '''
+
+    name = "set_attr"
+
+    def __init__(self, attr: AttrExpr, value: object):
+        if not isinstance(attr, AttrExpr):
+            raise TypeError(f"SetAttrStep 需要一个属性表达式，得到 {attr!r}")
+        self.attr = attr
+        self.value = as_expr(value)
+
+    def execute(self, context: Context) -> None:
+        target = self.attr.target.eval(context)
+        try:
+            setattr(target, self.attr.name, self.value.eval(context))
+        except AttributeError as exc:
+            raise TypeError(
+                f"不能给 {type(target).__name__} 设置属性 {self.attr.name!r}"
+                f"（{self.attr.target!r} 求值成了 {target!r}）"
+            ) from exc
+        context.trace.append(self.name)
+
+    def describe(self) -> str:
+        return f"{self.attr!r} = {self.value!r}"
+
+    def __repr__(self) -> str:
+        return f"SetAttr({self.attr!r}, {self.value!r})"
 
 
 def _var_name(name: object) -> str:
@@ -198,6 +253,7 @@ def NewVar(  # noqa: N802
         NewVar("state", default="进行中")     # 不限制类型
         NewVar("count", type=Number)          # 指定类型
         NewVar("name", type=Str, default="")  # 指定类型和默认值
+        NewVar("alias", default=Var("name"))  # default 也可以是表达式，声明时求值
     '''
     if not isinstance(name, str) or not name:
         raise TypeError(f"变量名必须是非空字符串，得到 {name!r}")
@@ -251,14 +307,19 @@ def Var(  # noqa: N802
     return VarExpr(cast(str, name), type=type)
 
 
-def Set(name: object, value: object) -> Union[SetItemStep, SetStep]:  # noqa: N802
+def Set(  # noqa: N802
+    name: object, value: object
+) -> Union[SetItemStep, SetAttrStep, SetStep]:
     '''给变量赋值。
 
         Set("state", "结束")                 # 普通变量
         Set("n", Var("n") + 1)
         Set(Var("d")["k"], v)               # 给容器写一个下标
         Set(Var("xs")[0], v)
+        Set(Var("node").attr("next"), v)    # 给对象写一个属性
     '''
     if isinstance(name, ItemExpr):
         return SetItemStep(name, value)
+    if isinstance(name, AttrExpr):
+        return SetAttrStep(name, value)
     return SetStep(_var_name(name), value)

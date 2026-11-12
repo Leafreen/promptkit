@@ -318,6 +318,7 @@ from promptkit.core import (  # noqa: E402
     Read,
     Return,
     Set,
+    SetAttrStep,
     SetItemStep,
     SetStep,
     SkipStep,
@@ -1338,6 +1339,33 @@ class TestVars(PromptkitTestCase):
     def test_reading_undeclared_raises(self):
         with self.assertRaises(UndefinedVariable):
             Workflow(Set("x", Var("nope") + 1)).run()
+
+    def test_newvar_default_expression_is_evaluated(self):
+        ctx = Workflow(
+            NewVar("a", default=[1, 2]),
+            NewVar("b", default=Var("a")),
+        ).run()
+        self.assertEqual(ctx["b"], [1, 2])
+
+    def test_newvar_default_expression_uses_values_at_declaration(self):
+        ctx = Workflow(
+            NewVar("n", default=1),
+            NewVar("m", default=Var("n") + 1),
+            Set("n", 10),
+        ).run()
+        self.assertEqual(ctx["m"], 2)
+
+    def test_typed_newvar_expression_default_is_coerced(self):
+        ctx = Workflow(
+            NewVar("n", default=2),
+            NewVar("s", type=Str, default=Var("n") + 1),
+        ).run()
+        self.assertEqual(ctx["s"], "3")
+
+    def test_newvar_default_not_evaluated_when_value_already_exists(self):
+        # run(x=1) 传进来的值优先；default 引用未定义变量也不该报错
+        ctx = Workflow(NewVar("x", default=Var("nope"))).run(x=1)
+        self.assertEqual(ctx["x"], 1)
 
     def test_trace(self):
         ctx = Workflow(NewVar("n", default=0), Set("n", 1)).run()
@@ -6240,6 +6268,76 @@ class TestItemAssignment(PromptkitTestCase):
     def test_inc_still_works_on_a_plain_variable(self):
         ctx = Workflow(NewVar("n", default=1), Inc("n")).run()
         self.assertEqual(ctx["n"], 2)
+
+
+class TestAttributeAssignment(PromptkitTestCase):
+    '''`Set(Var("obj").attr("next"), v)` —— 读能取属性，写也要能写。'''
+
+    class Node:
+        def __init__(self, val=0, next=None):
+            self.val = val
+            self.next = next
+
+    def _linked(self, *values):
+        head = None
+        for value in reversed(values):
+            head = self.Node(value, head)
+        return head
+
+    def test_set_simple_attribute(self):
+        ctx = Workflow(
+            NewVar("node", default=self.Node(1)),
+            Set(Var("node").attr("val"), 9),
+        ).run()
+        self.assertEqual(ctx["node"].val, 9)
+
+    def test_value_can_be_an_expression(self):
+        ctx = Workflow(
+            NewVar("node", default=self.Node(1)),
+            NewVar("n", default=2),
+            Set(Var("node").attr("val"), Var("n") + 3),
+        ).run()
+        self.assertEqual(ctx["node"].val, 5)
+
+    def test_linked_list_concat_in_pure_dsl(self):
+        ctx = Workflow(
+            NewVar("l1", default=self._linked(1, 2, 3)),
+            NewVar("l2", default=self._linked(4, 5, 6)),
+            NewVar("cur"),
+            Set("cur", Var("l1")),
+            While(Var("cur").attr("next") != None).Do(
+                Set(Var("cur"), Var("cur").attr("next")),
+            ),
+            Set(Var("cur").attr("next"), Var("l2")),
+        ).run()
+
+        values = []
+        node = ctx["l1"]
+        while node is not None:
+            values.append(node.val)
+            node = node.next
+        self.assertEqual(values, [1, 2, 3, 4, 5, 6])
+
+    def test_set_returns_an_attr_step(self):
+        step = Set(Var("x").attr("next"), 1)
+        self.assertIsInstance(step, Step)
+        self.assertIsInstance(step, SetAttrStep)
+        self.assertEqual(step.name, "set_attr")
+
+    def test_attribute_on_none_is_reported_clearly(self):
+        with self.assertRaises(TypeError) as cm:
+            Workflow(
+                NewVar("x", default=None), Set(Var("x").attr("next"), 1)
+            ).run()
+        message = str(cm.exception)
+        self.assertIn("不能给 NoneType 设置属性 'next'", message)
+        self.assertIn("Var('x')", message)
+
+    def test_step_tree_shows_the_assignment(self):
+        step = Set(Var("info").attr("name"), "小明")
+        self.assertIn(".name = ", step.describe())
+        self.assertIn("小明", step.describe())
+        self.assertIn("SetAttr", repr(step))
 
 
 class TestFileIO(PromptkitTestCase):
