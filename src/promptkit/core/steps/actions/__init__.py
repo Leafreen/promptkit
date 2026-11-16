@@ -4,6 +4,7 @@
 '''
 from promptkit.core.steps.actions.interactive import (
     DEFAULT_ENCODING,
+    INPUT_FN_KEY,
     OUTPUT_STREAM_KEY,
     Choose,
     ChooseExpr,
@@ -20,8 +21,10 @@ from promptkit.core.steps.actions.interactive import (
     SaveJSON,
     SaveHistoryStep,
     SaveStep,
+    input_reader,
     output_stream,
 )
+from promptkit.core.steps.actions.tui import EnableTUI, TuiUnavailableError
 from promptkit.core.steps.actions.llm import LLMStep, T
 from promptkit.core.steps.actions.multimodal import (
     ImageGenStep,
@@ -106,6 +109,8 @@ __all__ = [
     "EchoStep",
     "OUTPUT_STREAM_KEY",
     "DEFAULT_ENCODING",
+    "INPUT_FN_KEY",
+    "input_reader",
     "output_stream",
     # memory.py：长期记忆的 IO 原语
     "ReadMemory",
@@ -125,6 +130,9 @@ __all__ = [
     "StopTimer",
     "WaitAlarm",
     "ProactiveAlarms",
+    # tui.py：整个会话的终端界面（标记步骤）
+    "EnableTUI",
+    "TuiUnavailableError",
     "CHAT_ROLE_KEY",
     "CHAT_WANT_KEY",
     "CHAT_RULES_KEY",

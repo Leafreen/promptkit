@@ -28,6 +28,10 @@ if TYPE_CHECKING:  # 仅为类型标注，避免 core 强依赖 pydantic
 #: 输出类型参数：`LLMStep[Intent](...)`，让 IDE / mypy 知道这一步产出什么
 T = TypeVar("T", bound="BaseModel")
 
+#: Context 里的流式开关键名：`EnableTUI()` 会把它设成 True，
+#: `LLMStep.stream=None` 时读这个值决定要不要走流式。
+LLM_STREAM_KEY = "_llm_stream"
+
 
 @dataclass
 class LLMStep(Step, Generic[T]):
@@ -71,6 +75,10 @@ class LLMStep(Step, Generic[T]):
     auto_schema: Optional[bool] = None
     #: 是否合并全局默认约束（set_default_cautions 设的）
     use_default_cautions: bool = True
+    #: 是否流式调用模型：True=流式，False=一次性，None=读 Context 里的
+    #: `_llm_stream`（`EnableTUI()` 会自动设成 True）。只有纯文本输出
+    #: 生效，`output_model` 结构化输出不支持流式。
+    stream: Optional[bool] = None
 
     name: str = "llm"
 
@@ -81,6 +89,14 @@ class LLMStep(Step, Generic[T]):
     def retry_count(self) -> int:
         '''实际生效的重试次数。'''
         return settings.max_retries if self.max_retries is None else self.max_retries
+
+    def _resolve_stream(self, context: Optional[Context]) -> bool:
+        '''真正生效的流式开关：显式值 -> Context 标记 -> False。'''
+        if self.stream is not None:
+            return self.stream
+        if context is not None:
+            return bool(context.get(LLM_STREAM_KEY))
+        return False
 
     # ---------------- 提示词 ----------------
     def build_prompt(self, context: Optional[Context] = None) -> Prompt:
@@ -159,7 +175,10 @@ class LLMStep(Step, Generic[T]):
 
         if self.output_model is None:
             value: object = getattr(agent, "ask")(
-                rendered, tools=self.tools, bus=bus
+                rendered,
+                tools=self.tools,
+                bus=bus,
+                stream=self._resolve_stream(context),
             )
         else:
             value = Executor(
@@ -221,10 +240,12 @@ class LLMStep(Step, Generic[T]):
             from promptkit.core.model_action.caution_related.formatter import get_formatter
 
             bits.append(get_formatter(self.formatter).name)
+        if self.stream is True:
+            bits.append("stream")
         extra = f" [{' + '.join(bits)}]" if bits else ""
 
         content = self.prompt.content
         summary = content if isinstance(content, str) else f"[多模态 {len(content)} 部件]"
         return f"LLM({short(summary)}){model}{tools}{extra} -> {self.output_key}"
 
-__all__ = ["LLMStep", "T"]
+__all__ = ["LLMStep", "LLM_STREAM_KEY", "T"]

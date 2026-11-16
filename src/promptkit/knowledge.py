@@ -10,7 +10,7 @@
 
 典型用法：
 
-    kb = KnowledgeBase.from_dir("docs")     # 建库（默认只收 md / txt）
+    kb = KnowledgeBase.from_dir("docs")     # 建库（默认只收 md / txt，递归子目录）
     kb.sync_dir("docs")                     # 增量同步，可反复执行
     hits = kb.search("怎么退款", k=3)        # 检索
     print(kb.format(hits))                  # 拼成可直接贴进提示词的文字
@@ -75,6 +75,42 @@ def _replace_with_retry(source: str, target: str, attempts: int = 5) -> None:
                 raise
             time.sleep(delay)
             delay *= 2
+
+def _scan_dir(directory: str, pattern: str, recursive: bool) -> list[tuple[str, str]]:
+    '''扫描目录里的匹配文件，返回 `(来源名, 完整路径)` 列表，按来源名排序。
+
+    参数：
+        directory（str）：目录路径。
+        pattern（str）：匹配**文件名**的正则（不区分大小写，用 `search`）。
+        recursive（bool）：True 时递归所有子目录；False 时只扫第一层文件。
+
+    返回：
+        List[Tuple[str, str]] —— 来源名是相对 `directory` 的相对路径，
+        统一用 `/` 分隔（跨平台一致）；第一层文件的来源名就是文件名。
+
+    异常：
+        FileNotFoundError：目录不存在。
+        ValueError：`pattern` 不是合法正则（`re.compile` 抛出）。
+    '''
+    matcher = re.compile(pattern, re.IGNORECASE)
+    found: list[tuple[str, str]] = []
+    if recursive:
+        for root, dirs, files in os.walk(directory):
+            dirs.sort()  # 保证遍历顺序确定
+            for name in files:
+                if not matcher.search(name):
+                    continue
+                full = os.path.join(root, name)
+                relative = os.path.relpath(full, directory)
+                found.append((relative.replace(os.sep, "/"), full))
+    else:
+        for name in os.listdir(directory):
+            full = os.path.join(directory, name)
+            if os.path.isfile(full) and matcher.search(name):
+                found.append((name, full))
+    found.sort(key=lambda item: item[0])
+    return found
+
 
 # ---------- 分词 ----------
 _ASCII_WORD = re.compile(r"[a-zA-Z0-9_]+")
@@ -405,14 +441,24 @@ class KnowledgeBase:
         with open(path, encoding=encoding, errors="replace") as handle:
             return self.add(handle.read(), source=os.path.basename(path))
 
-    def add_dir(self, directory: str, pattern: str = r".*\.(md|txt)$") -> "KnowledgeBase":
-        '''把一个目录下的匹配文件全部灌进来（**不递归**子目录）。
+    def add_dir(
+        self,
+        directory: str,
+        pattern: str = r".*\.(md|txt)$",
+        *,
+        recursive: bool = True,
+        encoding: str = "utf-8",
+    ) -> "KnowledgeBase":
+        '''把一个目录下的匹配文件全部灌进来（默认**递归**子目录）。
 
         参数：
-            directory（str）：目录路径，只扫它的**第一层**文件。
+            directory（str）：目录路径。
             pattern（str，默认匹配 `.md` / `.txt` 结尾）：正则，编译时
                 不区分大小写，用 `search`（不是全匹配）匹配**文件名**，
                 所以默认值等价于「后缀是 md 或 txt」。
+            recursive（bool，默认 True，仅关键字）：True 时递归所有子目录；
+                False 时只扫第一层文件（旧行为）。
+            encoding（str，默认 "utf-8"，仅关键字）：读取编码，`errors="replace"`。
 
         返回：
             KnowledgeBase —— `self`。
@@ -423,14 +469,15 @@ class KnowledgeBase:
             ValueError：`pattern` 不是合法正则（`re.compile` 抛出）。
 
         注意：
-            不做增量、不删已消失的文件、也不写 `ingested` 台账 —— 反复调用
-            会重复灌。要幂等请用 `sync_dir`。
+            - 来源名是相对 `directory` 的相对路径（统一用 `/` 分隔），
+              如 `faq/refund.md`；第一层文件的来源名就是文件名，与旧行为
+              一致。这样不同子目录下的同名文件不会互相覆盖。
+            - 不做增量、不删已消失的文件、也不写 `ingested` 台账 —— 反复调用
+              会重复灌。要幂等请用 `sync_dir`。
         '''
-        matcher = re.compile(pattern, re.IGNORECASE)
-        for name in sorted(os.listdir(directory)):
-            full = os.path.join(directory, name)
-            if os.path.isfile(full) and matcher.search(name):
-                self.add_file(full)
+        for source, full in _scan_dir(directory, pattern, recursive):
+            with open(full, encoding=encoding, errors="replace") as handle:
+                self.add(handle.read(), source=source)
         return self
 
     def sync_dir(
@@ -441,11 +488,12 @@ class KnowledgeBase:
         force: bool = False,
         prune: bool = True,
         encoding: str = "utf-8",
+        recursive: bool = True,
     ) -> dict[str, int]:
         '''对着一个目录做**增量**同步，返回各项计数。
 
         参数：
-            directory（str）：目录路径，只扫第一层文件（不递归）。
+            directory（str）：目录路径，默认递归所有子目录。
             pattern（str，默认匹配 `.md` / `.txt` 结尾）：正则，不区分大小写，
                 用 `search` 匹配文件名（见 `add_dir`）。
             force（bool，默认 False，仅关键字）：True 时无视台账、把匹配到的
@@ -454,6 +502,8 @@ class KnowledgeBase:
             prune（bool，默认 True，仅关键字）：True 时把**磁盘上已不存在**的
                 来源从知识库和台账里一起删掉。
             encoding（str，默认 "utf-8"，仅关键字）：读取编码，`errors="replace"`。
+            recursive（bool，默认 True，仅关键字）：True 时递归所有子目录；
+                False 时只扫第一层文件（旧行为）。
 
         返回：
             Dict[str, int] —— 四个计数键，单位都是**文件**（不是块）：
@@ -467,29 +517,27 @@ class KnowledgeBase:
 
         注意：
             - **幂等**：同一目录重复跑，第二次全部计入 `skipped`。
+            - 来源名与台账键都是相对 `directory` 的相对路径（`/` 分隔），
+              第一层文件就是文件名（与旧台账兼容）；不同子目录下的同名
+              文件各自独立，不会互相覆盖。
             - 指纹只看 mtime + size：内容改了但大小与毫秒级 mtime 都没变
               （极少见）会被误判成没变，用 `force=True` 兜底。
             - `updated` 会先 `remove_source(name)` 再重新 `add`，所以更新过的
               文件其块会排到末尾（`Hit.index` 随之变化）。
             - `prune` 只清本台账里的名字；手工 `add()` 进来的块不受影响。
-            - 只认文件名当来源：两个目录下的同名文件会互相覆盖。
         '''
-        matcher = re.compile(pattern, re.IGNORECASE)
         stats = {"added": 0, "updated": 0, "skipped": 0, "removed": 0}
         present = set()
 
-        for name in sorted(os.listdir(directory)):
-            full = os.path.join(directory, name)
-            if not (os.path.isfile(full) and matcher.search(name)):
-                continue
-            present.add(name)
+        for source, full in _scan_dir(directory, pattern, recursive):
+            present.add(source)
 
             info = os.stat(full)
             fingerprint: dict[str, JSONValue] = {
                 "mtime": round(info.st_mtime, 3),
                 "size": info.st_size,
             }
-            previous = self.ingested.get(name)
+            previous = self.ingested.get(source)
 
             if previous == fingerprint and not force:
                 stats["skipped"] += 1
@@ -498,12 +546,12 @@ class KnowledgeBase:
             if previous is None:
                 stats["added"] += 1
             else:
-                self.remove_source(name)
+                self.remove_source(source)
                 stats["updated"] += 1
 
             with open(full, encoding=encoding, errors="replace") as handle:
-                self.add(handle.read(), source=name)
-            self.ingested[name] = fingerprint
+                self.add(handle.read(), source=source)
+            self.ingested[source] = fingerprint
 
         if prune:
             for gone in [s for s in self.ingested if s not in present]:
@@ -548,11 +596,14 @@ class KnowledgeBase:
         *,
         max_chars: int = 400,
         overlap: int = 60,
+        recursive: bool = True,
     ) -> "KnowledgeBase":
-        '''用目录建库，等价于 `cls(**kwargs).add_dir(directory)`。
+        '''用目录建库，等价于 `cls(**kwargs).add_dir(directory, recursive=...)`。
 
         参数：
-            directory（str）：目录路径，只收第一层、后缀 md / txt 的文件。
+            directory（str）：目录路径，收后缀 md / txt 的文件。
+            recursive（bool，默认 True）：True 时递归所有子目录；False 时
+                只扫第一层文件（旧行为）。
             **kwargs：透传给 `KnowledgeBase(...)`。注意 `pattern` 不在这里
                 透传 —— 要自定义扩展名就直接调 `add_dir` / `sync_dir`。
 
@@ -566,7 +617,9 @@ class KnowledgeBase:
             语义是「一次性全量灌」：重复调用会重复灌。要幂等请用
             `KnowledgeBase(**kwargs).sync_dir(directory)`。
         '''
-        return cls(max_chars=max_chars, overlap=overlap).add_dir(directory)
+        return cls(max_chars=max_chars, overlap=overlap).add_dir(
+            directory, recursive=recursive
+        )
 
     # ---------------- 检索 ----------------
     def search(self, query: str, k: int = 3, min_score: float = 0.0) -> list[Hit]:
@@ -923,6 +976,7 @@ def KNOWLEDGE_REFERENCE(
     k: int = 3,
     max_chars: int = 400,
     overlap: int = 60,
+    recursive: bool = True,
 ) -> Tool:
     '''把「目录 / 单文件 / KnowledgeBase / 现成 Tool」统一成一个检索工具。
 
@@ -936,7 +990,7 @@ def KNOWLEDGE_REFERENCE(
     参数：
         source（Any）：决定怎么建库，四种情况：
             - `str` / `PathLike` 且是**目录** → `KnowledgeBase.from_dir(...)`，
-              只收第一层、后缀 md / txt 的文件（不递归）
+              收后缀 md / txt 的文件，默认**递归**所有子目录
             - `str` / `PathLike` 且是**文件** → 整篇作为一段文本灌进去，
               不检查扩展名，来源名取文件名
             - `KnowledgeBase` → 直接 `.as_tool()`
@@ -946,6 +1000,8 @@ def KNOWLEDGE_REFERENCE(
         description（str | None，默认 None）：工具描述；`None` 时用内置文案
             （强调必须基于片段回答、要说明用哪一段、查不到就说不知道）。
         k（int，默认 3）：模型不传 `top_k` 时的默认返回条数。
+        recursive（bool，默认 True）：仅当 `source` 是目录时生效；False 时
+            只扫第一层文件（旧行为）。
         **kwargs：仅当 `source` 是路径时**透传给 `KnowledgeBase(...)`**
             （如 `max_chars` / `overlap`）；传 `KnowledgeBase` 或 `Tool` 时忽略。
 
@@ -974,7 +1030,7 @@ def KNOWLEDGE_REFERENCE(
         path = os.fspath(source)
         if os.path.isdir(path):
             kb = KnowledgeBase.from_dir(
-                path, max_chars=max_chars, overlap=overlap
+                path, max_chars=max_chars, overlap=overlap, recursive=recursive
             )
         else:
             kb = KnowledgeBase(max_chars=max_chars, overlap=overlap)

@@ -22,7 +22,7 @@ from promptkit.core.display_sys.display import (
 )
 from promptkit.core.display_sys.render import (
     HAVE_RICH,
-    HAVE_SYMPY,
+    HAVE_TEXICODE,
     RENDERERS,
     Verbosity,
     as_verbosity,
@@ -67,7 +67,7 @@ __all__ = [
     "needs_art",
     "get_console",
     "HAVE_RICH",
-    "HAVE_SYMPY",
+    "HAVE_TEXICODE",
     "install_hint",
     "RENDERERS",
     # runlog.py：事件 -> 文件

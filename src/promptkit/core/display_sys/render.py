@@ -6,7 +6,7 @@
 | 装了什么 | 得到什么 | 没装会怎样 |
 | --- | --- | --- |
 | `rich` | Markdown 排版、代码高亮、表格 | 退回纯文本（原文照打） |
-| `sympy` + `antlr4-python3-runtime` | 块级公式的多行数学排版 | 用内置的 Unicode 映射 |
+| `TeXicode`（`txc`） | 复杂公式更完整的 Unicode art | 用内置的 Unicode 映射 |
 
     pip install "promptkit[render]"
 
@@ -16,24 +16,30 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 import sys
 import unicodedata
 from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple
 
+from promptkit.core.settings import settings
+
 __all__ = [
     "Verbosity",
     "as_verbosity",
     "HAVE_RICH",
-    "HAVE_SYMPY",
+    "HAVE_TEXICODE",
     "get_console",
     "latex_to_unicode",
+    "texicode_render",
     "RENDERERS",
     "render_math",
     "render_markdown",
     "render_plain",
     "plain_text",
     "strip_markdown",
+    "substitute_math",
     "looks_like_math",
     "needs_art",
     "install_hint",
@@ -92,31 +98,8 @@ def _try_import_rich() -> Tuple[Any, Any]:
     return Console, Markdown
 
 
-def _try_import_sympy() -> bool:
-    '''sympy 的 LaTeX 解析到底能不能用。
-
-    **先查 antlr4**：sympy 的 `parse_latex` 依赖 `antlr4-python3-runtime`，
-    而且版本挑（sympy 1.14 要求 4.11）。缺了它 sympy 会在 import 时往 stderr
-    打一条 `UserWarning: antlr4.error.ErrorListener module is not installed` ——
-    看着像报错，其实只是「这个可选功能用不了」。
-
-    所以这里先挡一道：antlr 不在就根本不去 import sympy 的 latex 解析器，
-    `HAVE_SYMPY = False`，安静地走内置的 Unicode 映射。
-    '''
-    try:
-        import antlr4  # noqa: F401
-    except ImportError:
-        return False
-    try:
-        from sympy.parsing.latex import parse_latex  # noqa: F401
-    except Exception:  # noqa: BLE001 - sympy 在、但解析器起不来
-        return False
-    return True
-
-
 _Console, _Markdown = _try_import_rich()
 HAVE_RICH = _Console is not None
-HAVE_SYMPY = _try_import_sympy()
 
 #: 按输出流缓存 Console（同一个流别反复创建）
 _CONSOLES: Dict[int, Any] = {}
@@ -206,35 +189,7 @@ _SUBSCRIPT = {
 
 _IGNORED_SYMBOLS = ("\\,", "\\;", "\\!", "\\:", "\\ ", "~")
 
-_COMMAND = re.compile(r"\\([A-Za-z]+)")
 _GROUP = r"\{([^{}]*)\}"
-
-
-def _to_script(body: str, table: Dict[str, str]) -> Optional[str]:
-    '''把 `^{...}` / `_{...}` 的内容转成上下标；有转不了的就返回 None。'''
-    out = []
-    for char in body.strip():
-        mapped = table.get(char)
-        if mapped is None:
-            return None
-        out.append(mapped)
-    return "".join(out) or None
-
-
-def _unwrap_scripts(text: str, marker: str, table: Dict[str, str]) -> str:
-    '''把 `x^{2}` / `x^2` 转成上下标；转不了的**原样保留**（连同 `^`/`_`）。
-
-    以前这里用「保护起来最后删掉」的写法，结果 `\\theta^T` 变成 `\\thetaT` ——
-    把指数符号吃掉了，比不转更糟。现在整体保留，宁可难看也别改变含义。
-    '''
-    pattern = re.compile(re.escape(marker) + r"(?:\{([^{}]*)\}|(\w))")
-
-    def replace(match: "re.Match[str]") -> str:
-        body = match.group(1) if match.group(1) is not None else match.group(2)
-        mapped = _to_script(body, table)
-        return match.group(0) if mapped is None else mapped
-
-    return pattern.sub(replace, text)
 
 
 #: 常见重音：\hat{y} -> ŷ。用组合字符，靠终端自己叠。
@@ -254,127 +209,8 @@ def _apply_accents(text: str) -> str:
     return text
 
 
-def _read_group(text: str, pos: int) -> Tuple[Optional[str], int]:
-    r'''从 `pos`（应当指向 `{`）读一个括号组，返回 `(内容, 结束位置)`。
-
-    **按深度配对**，所以 `\boxed{\frac{a}{b}}` 这种嵌套也能正确取到整段。
-    以前用正则 `\{([^{}]*)\}` 匹配，遇到嵌套就整条失效。
-    '''
-    if pos >= len(text) or text[pos] != "{":
-        return None, pos
-    depth = 0
-    for index in range(pos, len(text)):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[pos + 1 : index], index + 1
-    return None, pos
-
-
-def _rewrite_command(
-    text: str, command: str, arity: int, build: Any
-) -> Tuple[str, bool]:
-    '''把 `\\command{a}{b}` 换成 `build(a, b)`，返回 `(新文本, 有没有换过)`。
-
-    括号按深度配对，所以参数里能再嵌公式。转不了的（括号不配对）原样保留。
-    '''
-    token = "\\" + command
-    token_len = len(token)
-    out: List[str] = []
-    index = 0
-    changed = False
-
-    while index < len(text):
-        if text.startswith(token, index):
-            after = index + token_len
-            # `\frac` 不能匹配到 `\fraction`；但 `\frac1` 这种紧跟数字的写法也认
-            if after >= len(text) or not text[after].isalpha():
-                cursor = after
-                args: List[str] = []
-                for _ in range(arity):
-                    while cursor < len(text) and text[cursor] in " \t\n":
-                        cursor += 1
-                    inner, cursor = _read_group(text, cursor)
-                    if inner is None:
-                        break
-                    args.append(inner)
-                if len(args) == arity:
-                    out.append(build(*args))
-                    index = cursor
-                    changed = True
-                    continue
-        out.append(text[index])
-        index += 1
-
-    return "".join(out), changed
-
-
-def _rewrite_all(text: str, command: str, arity: int, build: Any) -> str:
-    '''反复重写到不动为止 —— 嵌套时是一层层由外往内剥的。'''
-    for _ in range(8):
-        text, changed = _rewrite_command(text, command, arity, build)
-        if not changed:
-            break
-    return text
-
-
-#: 多行环境（cases / matrix / aligned …）
-_ENVIRONMENT = re.compile(r"\\begin\{(\w+\*?)\}(.*?)\\end\{\1\}", re.S)
-
-
-def _rewrite_environments(text: str) -> str:
-    '''把 `\\begin{cases}a \\\\ b\\end{cases}` 摊成多行文本。
-
-    `&`（对齐标记）丢掉，`\\\\`（换行）变真换行。矩阵会丧失对齐，
-    但至少能读 —— sympy 也处理不了这些环境，所以这是唯一的路。
-    '''
-
-    def replace(match: "re.Match[str]") -> str:
-        env = match.group(1)
-        rows = [row for row in re.split(r"\\\\", match.group(2)) if row.strip()]
-        cleaned = [row.replace("&", " ").strip() for row in rows]
-        separator = "\n" if env in _MULTILINE_ENVS else " "
-        return separator.join(cleaned)
-
-    for _ in range(4):
-        new = _ENVIRONMENT.sub(replace, text)
-        if new == text:
-            break
-        text = new
-    return text
-
-
-def normalize_latex(latex: str) -> str:
-    '''交给 sympy 之前先做一遍「翻译不认的命令」。
-
-    sympy 的 `parse_latex` 遇到不认识的命令**不报错，而是当成变量名**：
-    `\\boxed{x}` 会变成「符号 boxed 乘以 x」，输出 `boxed⋅x` —— 错得毫无征兆。
-    所以 `\\boxed` 必须在解析前拆掉。
-
-    `\\dfrac` / `\\dbinom` 是 display 版写法，sympy 认得；顺手统一一下
-    让内置映射那条路也能处理。
-    '''
-    text = _rewrite_environments(latex or "")
-    # \boxed{x} -> x（框是装饰，内容才是答案）
-    text = _rewrite_all(text, "boxed", 1, lambda inner: inner)
-    # sympy 的 parse_latex 会被 \displaystyle 噎住（直接解析失败），先去掉
-    text = re.sub(
-        r"\\(?:displaystyle|textstyle|scriptstyle)(?![A-Za-z])", "", text
-    )
-    # \dfrac / \tfrac -> \frac；\dbinom / \tbinom -> \binom
-    for alias, real in (("dfrac", "frac"), ("tfrac", "frac"),
-                        ("dbinom", "binom"), ("tbinom", "binom")):
-        text = re.sub(
-            r"\\" + alias + r"(?![A-Za-z])", "\\\\" + real, text
-        )
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
-
-
 def latex_to_unicode(latex: str) -> str:
-    '''把 LaTeX 翻译成可读的 Unicode 文本。**零依赖**，不依赖 sympy。
+    '''把 LaTeX 翻译成可读的 Unicode 文本。**零依赖**。
 
     走的是「分词 -> 递归渲染」，不是一堆积木式正则。这点很关键：
     正则只能一个个补丁（`\\frac{a}{b}` 能用、`\\frac15` 就漏），
@@ -478,7 +314,7 @@ _ACCENT_MARKS = {
     "dot": "\u0307", "ddot": "\u0308",
 }
 
-#: 函数名：原样输出（`\arctan` -> `arctan`，不改成 sympy 的 `atan`）
+#: 函数名：原样输出（`\arctan` -> `arctan`，不改写成 `atan`）
 _FUNCTIONS = frozenset(
     {"ln", "log", "lg", "exp", "sin", "cos", "tan", "cot", "sec", "csc",
      "arcsin", "arccos", "arctan", "arccot", "sinh", "cosh", "tanh", "coth",
@@ -686,61 +522,9 @@ def _render_sequence(
 
 
 
-#: 取命令名
-_COMMAND_NAMES = re.compile(r"\\([A-Za-z]+)")
-
-
-def _leaked_commands(source: str, rendered: str) -> bool:
-    '''sympy 有没有把不认识命令**当成变量名**混进结果。
-
-    `parse_latex` 遇到不认识的命令不报错，而是造一个符号：
-    `\\boxed{x}` -> `boxed⋅x`、`\\blacksquare` -> `blacksquare`。
-    屏幕上出现这种词，公式就已经错了 —— 比不渲染更糟。
-
-    检查办法：源里有 `\\cmd`，结果里却出现了裸的 `cmd` 这个词，就当泄漏。
-    '''
-    for name in set(_COMMAND_NAMES.findall(source)):
-        if re.search(r"\b" + re.escape(name) + r"\b", rendered):
-            return True
-    return False
-
-
-def _sympy_pretty(latex: str) -> Optional[str]:
-    '''用 sympy 做多行数学排版；不可用或解析失败返回 None。'''
-    global _SYMPY_BROKEN
-    if not HAVE_SYMPY or _SYMPY_BROKEN:
-        return None
-    source = normalize_latex(latex)
-    try:
-        from sympy import pretty
-        from sympy.parsing.latex import parse_latex
-
-        rendered = pretty(parse_latex(source.strip()))
-    except ImportError:
-        # sympy 在、但 antlr4 版本不对（它要求 == 4.11）。缺依赖是**环境问题**，
-        # 不是这条公式的问题 —— 关掉 sympy，别每条公式都白抛一次异常。
-        _SYMPY_BROKEN = True
-        return None
-    except Exception:  # noqa: BLE001 - 解析不了就走降级
-        return None
-
-    # sympy 是 CAS：给它一个**恒等式**它会算出 True / False。
-    # `x = x` -> 'True'，两边写法不同但等价 -> 'False'，
-    # 屏幕上就只剩一个光秃秃的 False，比不渲染糟得多。识别出来就退回内置映射。
-    if rendered.strip() in ("True", "False"):
-        return None
-    # 认不出的命令被当成变量名混进来了，结果不可信
-    if _leaked_commands(source, rendered):
-        return None
-    return rendered
-
-
-#: sympy 装了但用不了（antlr4 版本不对之类），见 `_sympy_pretty`
-_SYMPY_BROKEN = False
-
 #: 需要「多行排版」才算好看的命令。
-#: 简单公式（`y = \beta_0 + \beta_1 x_1`）sympy 会输出 `β_{0}` 这种记号，
-#: 反而比内置映射的 `β₀` 难读；所以只在这些结构出现时才请 sympy 出马。
+#: 简单公式（`y = \beta_0 + \beta_1 x_1`）不值得多开一次子进程，
+#: 内置映射的 `β₀` 反而更紧凑；所以只在这些结构出现时才请 TeXicode 出马。
 #:
 #: 注意用 `(?![A-Za-z])` 而不是 `\b`：`\int_0^1` 里 `t` 和 `_` 之间**没有**词边界
 #: （下划线算词字符），用 `\b` 会漏掉最常见的带上下限写法。
@@ -751,21 +535,51 @@ _NEEDS_ART = re.compile(
 
 
 def needs_art(latex: str) -> bool:
-    '''这条公式值不值得用 sympy 排版（多行分数 / 积分 / 求和…）。'''
+    '''这条公式值不值得请 TeXicode 排版（多行分数 / 积分 / 求和…）。'''
     return bool(_NEEDS_ART.search(latex or ""))
 
 
-def _polish_sympy(text: str) -> str:
-    '''把 sympy 输出里的 `_{0}` / `^{2}` 再转成 Unicode 上下标。
+# ============================ TeXicode 增强 ============================
+#: TeXicode（`txc`）是外部 CLI：TeX -> Unicode art，输出比内置映射更完整漂亮。
+#: 它是**可选增强**，没装完全不影响 —— 内置渲染器始终可用、作为兜底。
+_TEXICODE_BIN = "txc"
+#: 纯 Python 的转换很快，5 秒足够兜底（挂起时放弃，回退内置）。
+_TEXICODE_TIMEOUT = 5.0
 
-    sympy 的 `pretty()` 对多个字符的下标会用 `_{}` 记号，终端里不如 `₀` 紧凑。
+
+def _detect_texicode() -> bool:
+    '''TeXicode CLI（`txc` / `txc.exe`）在不在 PATH 上。'''
+    return shutil.which(_TEXICODE_BIN) is not None
+
+
+#: import 时探测一次；之后再装 TeXicode 需要重启进程才能被识别。
+HAVE_TEXICODE = _detect_texicode()
+
+
+def texicode_render(latex: str) -> Optional[str]:
+    '''用 TeXicode CLI 把一段 LaTeX 转成 Unicode art。
+
+    任何失败（不可用 / 超时 / 非零退出 / 空输出）都返回 None，
+    让调用方回退到内置渲染，绝不因一个外部工具把公式渲染弄崩。
+
+    走 `subprocess.run([...])` 传参、不开 shell，避免命令注入。
     '''
-    text = _unwrap_scripts(text, "_", _SUBSCRIPT)
-    return _unwrap_scripts(text, "^", _SUPERSCRIPT)
+    if not HAVE_TEXICODE:
+        return None
+    try:
+        proc = subprocess.run(
+            [_TEXICODE_BIN, latex],
+            capture_output=True,
+            text=True,
+            timeout=_TEXICODE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out or None
 
-
-#: 默认**不用** sympy 排版。理由见 render_math 的说明。
-PREFER_SYMPY = False
 
 #: 公式渲染结果缓存：同一份 Markdown 反复渲染时不用重复解析
 _MATH_CACHE: Dict[Tuple[str, bool, bool], str] = {}
@@ -773,37 +587,37 @@ _MATH_CACHE_LIMIT = 512
 
 
 def render_math(
-    latex: str, *, display: bool = False, prefer_sympy: Optional[bool] = None
+    latex: str,
+    *,
+    display: bool = False,
+    prefer_texicode: Optional[bool] = None,
 ) -> str:
     r'''渲染一段公式。
 
-    默认走**内置渲染器**（`latex_to_unicode`）。原因不是「sympy 太重」，
-    而是它在这个场景下会**渲染错**：
+    默认走**内置渲染器**（`latex_to_unicode`），零依赖、任何环境都能用。
+    它是 LaTeX 的**保真翻译**：`\ln` 不会变成 `log(x, E)`，`\arctan` 不会变
+    `atan`，`\frac15` 不会静默截断，恒等式也不会被算成一个布尔值。
 
-    | 输入 | sympy 输出 | 问题 |
-    | --- | --- | --- |
-    | `\ln\|x+1\|` | `log(│x + 1│, ℯ)` | 把 `ln` 换成 `log(x, E)`，不是模型写的 |
-    | `\arctan x` | `atan(x)` | 把 `arctan` 换成 `atan` |
-    | `\frac15\sqrt{...}` | `1/5` | **静默截断**，后半截丢了 |
-    | `\frac{\sqrt5-1}{20}\ln(...)` | `None` | `\sqrt5` 没花括号就解析失败 |
-    | 多行公式 | `None` | 带 `\\` 的直接放弃 |
-    | 恒等式 `x = x` | `True` | 当成 CAS 算成了布尔值 |
-    | `\boxed{x}` / `\blacksquare` | `boxed⋅x` / `blacksquare` | 不认识就**当变量名** |
+    TeXicode 是可选增强：`prefer_texicode=True` 且本机装了 `txc` 时，
+    复杂公式交给它渲染出更完整的 Unicode art；失败 / 没装都自动回退内置。
+    也可以全局 `settings.prefer_texicode = True`。
 
-    它是 CAS，不是 LaTeX 渲染器：解析是有损的，而且错得没声音。
-    想试多行数学排版可以显式打开：`render_math(x, display=True, prefer_sympy=True)`，
-    或者全局 `render.PREFER_SYMPY = True`（仍然受上面那些护栏保护）。
+    `prefer_texicode` 参数显式传值时优先；传 `None` 时读
+    `settings.prefer_texicode`。
     '''
-    use_sympy = PREFER_SYMPY if prefer_sympy is None else prefer_sympy
-    key = (latex, display, use_sympy)
+    use_texicode = (
+        settings.prefer_texicode if prefer_texicode is None else prefer_texicode
+    )
+    key = (latex, display, use_texicode)
     cached = _MATH_CACHE.get(key)
     if cached is not None:
         return cached
 
     result = ""
-    if use_sympy and display and needs_art(latex):
-        pretty = _sympy_pretty(latex)
-        result = _polish_sympy(pretty) if pretty else ""
+    # TeXicode 优先：输出最忠实原式。只在「复杂公式 + 已开启 + 装了 CLI」时才
+    # 请它出马，简单公式（x^2、\beta_0）用内置映射更快，也省一次子进程。
+    if use_texicode and HAVE_TEXICODE and needs_art(latex):
+        result = texicode_render(latex) or ""
     if not result:
         result = latex_to_unicode(latex) or latex.strip()
 
@@ -878,7 +692,9 @@ def _replace_standalone(text: str) -> str:
     return _STANDALONE.sub(lambda m: _STANDALONE_SYMBOLS[m.group(1)], text)
 
 
-def _substitute_math(text: str, *, fence: bool = True) -> str:
+def _substitute_math(
+    text: str, *, fence: bool = True, prefer_texicode: Optional[bool] = None
+) -> str:
     '''把 Markdown 里的公式定界符换成终端能显示的文本。
 
     支持四种写法：
@@ -898,7 +714,9 @@ def _substitute_math(text: str, *, fence: bool = True) -> str:
     '''
 
     def display(match: "re.Match[str]") -> str:
-        body = render_math(match.group(1), display=True)
+        body = render_math(
+            match.group(1), display=True, prefer_texicode=prefer_texicode
+        )
         # 包成代码块：rich 会用等宽字体原样输出（数学排版本来就依赖对齐）
         return f"\n```\n{body}\n```\n" if fence else f"\n{body}\n"
 
@@ -906,7 +724,7 @@ def _substitute_math(text: str, *, fence: bool = True) -> str:
         raw = match.group(1)
         if not looks_like_math(raw):
             return match.group(0)  # 不是公式，连 $ 一起原样留着
-        return f"`{render_math(raw)}`"
+        return f"`{render_math(raw, prefer_texicode=prefer_texicode)}`"
 
     # 先处理「写在公式外面也合法」的符号（\blacksquare 之类）
     text = _replace_standalone(text)
@@ -914,11 +732,23 @@ def _substitute_math(text: str, *, fence: bool = True) -> str:
     # LaTeX 正统定界符：无歧义，直接转
     text = _BACKSLASH_DISPLAY_MATH.sub(display, text)
     text = _BACKSLASH_INLINE_MATH.sub(
-        lambda m: f"`{render_math(m.group(1))}`", text
+        lambda m: f"`{render_math(m.group(1), prefer_texicode=prefer_texicode)}`",
+        text,
     )
     # Markdown 习惯的美元符号
     text = _DISPLAY_MATH.sub(display, text)
     return _INLINE_MATH.sub(inline, text)
+
+
+def substitute_math(
+    text: str, *, fence: bool = True, prefer_texicode: Optional[bool] = None
+) -> str:
+    '''公开入口：把 Markdown 里的公式定界符替换成终端可读文本。
+
+    `_substitute_math` 的公开包装，供 TUI 等外部模块调用。默认 `fence=True`
+    （块级公式包成代码块）；`prefer_texicode=True` 开启 TeXicode 增强。
+    '''
+    return _substitute_math(text, fence=fence, prefer_texicode=prefer_texicode)
 
 
 def strip_markdown(text: str) -> str:

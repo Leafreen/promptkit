@@ -7,7 +7,7 @@
     日志文件        全量事件（步骤耗时、工具参数、token 用量）
     输出文件        结果 Markdown + 对话历史 JSON
 
-`rich` 和 `sympy` 都是**可选**的，没装也能跑（退回纯文本 + 内置公式映射）：
+`rich` 是**可选**的，没装也能跑（退回纯文本 + 内置公式映射）：
 
     pip install "promptkit[render]"
 
@@ -23,7 +23,7 @@ from promptkit.agent import Agent  # noqa: E402
 from promptkit.cautions import TUTOR  # noqa: E402
 from promptkit.core import (  # noqa: E402
     HAVE_RICH,
-    HAVE_SYMPY,
+    HAVE_TEXICODE,
     Break,
     Echo,
     If,
@@ -101,7 +101,7 @@ wf = build_workflow()
 
 
 if __name__ == "__main__":
-    print(f"rich = {HAVE_RICH} | sympy = {HAVE_SYMPY}")
+    print(f"rich = {HAVE_RICH} | texicode = {HAVE_TEXICODE}")
     if not HAVE_RICH:
         print('提示：装了 rich 才有排版效果 -> pip install "promptkit[render]"')
 

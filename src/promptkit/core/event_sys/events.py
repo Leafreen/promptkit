@@ -33,6 +33,11 @@ class EventType(str, Enum):
     MESSAGE_DELTA = "message_delta"
     MESSAGE_END = "message_end"
 
+    # ---- 用户这一轮真正发出去的消息 ----
+    #: 一轮对话开始、真正要调模型时发一次。多行输入 / 回退改写之后
+    #: 的最终文本都在这里，TUI 用它渲染「你」的那条气泡。
+    USER_MESSAGE = "user_message"
+
     # ---- 工作流步骤 ----
     STEP_START = "step_start"
     STEP_END = "step_end"
@@ -59,6 +64,7 @@ TOOL_CALL_END = EventType.TOOL_CALL_END
 TOOL_RESULT = EventType.TOOL_RESULT
 MESSAGE_DELTA = EventType.MESSAGE_DELTA
 MESSAGE_END = EventType.MESSAGE_END
+USER_MESSAGE = EventType.USER_MESSAGE
 STEP_START = EventType.STEP_START
 STEP_END = EventType.STEP_END
 USAGE = EventType.USAGE

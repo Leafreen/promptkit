@@ -50,7 +50,7 @@ from promptkit.core.display_sys import (
     DEFAULT_FORMAT,
     DEFAULT_LOG_PATH,
     HAVE_RICH,
-    HAVE_SYMPY,
+    HAVE_TEXICODE,
     LOGGER_NAME,
     RENDERERS,
     Node,
@@ -207,6 +207,8 @@ from promptkit.core.steps import (
     DoWhileStep,
     Echo,
     EchoStep,
+    EnableTUI,
+    TuiUnavailableError,
     For,
     ForEach,
     ForEachStep,
@@ -470,7 +472,7 @@ __all__ = [
     "get_console",
     "RENDERERS",
     "HAVE_RICH",
-    "HAVE_SYMPY",
+    "HAVE_TEXICODE",
     "install_hint",
     # 日志
     "setup_logging",
@@ -559,5 +561,7 @@ __all__ = [
     "StopTimer",
     "WaitAlarm",
     "ProactiveAlarms",
-
+    # TUI（可选依赖）
+    "EnableTUI",
+    "TuiUnavailableError",
 ]

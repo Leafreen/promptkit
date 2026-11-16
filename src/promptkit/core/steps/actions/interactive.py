@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, TextIO, Union, cast
+from typing import TYPE_CHECKING, Callable, List, Optional, TextIO, Union, cast
 
 if TYPE_CHECKING:  # 只用于类型标注：steps 层不该在运行时依赖 model_action
     from promptkit.core.context import Context
@@ -27,6 +27,19 @@ OUTPUT_STREAM_KEY = "_output_stream"
 
 #: 当前显示分级挂在 Context 上的键名（Workflow.run(verbose=...) 会写进来）
 VERBOSITY_KEY = "_verbosity"
+
+#: 注入的输入函数挂在 Context 上的键名（`EnableTUI()` 会写进来）
+INPUT_FN_KEY = "_input_fn"
+
+
+def input_reader(context: Context) -> Callable[[str], str]:
+    '''当前上下文注入的输入函数；没注入就退回内置 `input()`。
+
+    注入方的契约和 `input()` 完全一致：收提示符、返回字符串，EOF 抛
+    `EOFError`、Ctrl+C 抛 `KeyboardInterrupt` —— 这样 `Read` 原有的
+    `on_eof` 分流逻辑（抛异常 / 转成 BreakSignal）一行都不用改。
+    '''
+    return cast(Callable[[str], str], context.get(INPUT_FN_KEY) or input)
 
 
 def verbosity_of(context: Context) -> "Verbosity":
@@ -138,19 +151,21 @@ class ReadExpr(Expr):
 
     def eval(self, context: Context) -> str:
         if self.until is not None:
-            return self._read_block()
+            return self._read_block(context)
+        read = input_reader(context)
         try:
-            text = input(self.prompt)
+            text = read(self.prompt)
         except (EOFError, KeyboardInterrupt) as exc:
             self._on_interrupt(exc)  # 必然抛出：原样 re-raise 或 BreakSignal
         return text.strip() if self.strip else text
 
-    def _read_block(self) -> str:
+    def _read_block(self, context: Context) -> str:
         '''多行模式：读到 `until` 行为止，返回拼好的文本（结束行不算）。'''
+        read = input_reader(context)
         lines: List[str] = []
         while True:
             try:
-                line = input(self.prompt)
+                line = read(self.prompt)
             except EOFError:
                 if self.on_eof != "break":
                     raise

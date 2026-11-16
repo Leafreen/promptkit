@@ -92,8 +92,8 @@ pip install -r requirements.txt
 | extra | 装上得到                           | 不装会怎样                          |
 | ------- | ------------------------------------ | ------------------------------------- |
 | `rich`      | 终端 Markdown 排版、代码高亮、表格 | 退回纯文本（去掉标记）              |
-| `math`      | sympy 多行数学排版【弃用】         | 用内置的零依赖 Unicode 渲染（默认） |
-| `render`      | `rich` + `sympy`                                | 同上                                |
+| `render`      | `rich` 排版 + 公式渲染增强         | 退回纯文本 / 内置 Unicode 公式渲染  |
+| `tui`      | 终端对话界面（`rich` + `prompt_toolkit` + `textual`） | 用不了 `EnableTUI()` |
 | `yaml`      | `YamlFormatter`                                   | 用别的解析器                        |
 | `mcp`      | MCP 客户端（`mcp>=1.0`）                     | 无法连接 MCP Server                 |
 | `dev`      | `pytest`、`mypy`                                 | 无法跑测试 / 类型检查               |
@@ -103,8 +103,16 @@ pip install -e ".[render]"   # 终端排版 + 数学公式
 pip install -e ".[mcp]"      # 接 MCP Server
 ```
 
-⚠️ `math` extra 里 sympy 的 `parse_latex` 还要求 **antlr4 运行时**且版本挑剔
-（sympy 1.14 硬性要求 `antlr4-python3-runtime==4.11`），见 [常见问题](#常见问题-faq)。
+公式渲染**零依赖**：内置 LaTeX -> Unicode 映射，任何环境都能用。
+装了 [TeXicode](https://github.com/alvinwan/texicode)（`txc` 命令）后可开启
+增强，复杂公式会渲染出更完整的 Unicode art：
+
+```python
+from promptkit.core import using_settings
+
+with using_settings(prefer_texicode=True):   # 没装 txc 时自动回退内置
+    wf.run()
+```
 
 ### 配置API key（.env）
 
@@ -1043,12 +1051,11 @@ promptkit/
 `promptkit.mcp` **只支持 Streamable HTTP 传输**（规格约束），不支持
 stdio / sse。`load_mcp_tools(..., transport=...)` 传别的会直接报错。
 
-**Q：【弃用】 装了** **`math`** **extra 后 sympy 报错 / 公式被改错？** 
-sympy 的 `parse_latex` 需要 `antlr4-python3-runtime` 且版本挑剔（sympy
-1.14 硬性要求 `==4.11`），装上后按它报错里的版本号补装即可。另外 sympy
-解析是有损的（`ln` 变 `log(x, E)`、`\sqrt5` 解析失败、多行公式放弃），
-所以默认走内置的零依赖 Unicode 渲染；要 sympy 排版显式
-`render_math(..., prefer_sympy=True)`。
+**Q：公式渲染是怎么做的？要不要装依赖？** 
+不需要。默认走内置的零依赖 LaTeX -> Unicode 映射，任何环境都能用，
+而且是保真翻译（`\ln` 不会变成 `log(x, E)`，`\frac15` 不会截断）。
+装了 TeXicode（`txc` 命令）后可以用 `using_settings(prefer_texicode=True)`
+开启增强，复杂公式会渲染出更完整的多行 Unicode art；失败 / 没装都自动回退内置。
 
 **Q：** **`python examples/xxx.py`** **报 9009 / 「不是内部或外部命令」？** 
 这是环境 PATH 问题（终端找不到 `python`），不是项目问题。Windows 上先确认

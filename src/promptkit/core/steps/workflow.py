@@ -38,6 +38,7 @@ from promptkit.core.settings import (
     validate_settings,
 )
 from promptkit.core.steps.actions.interactive import OUTPUT_STREAM_KEY, VERBOSITY_KEY
+from promptkit.core.steps.actions.tui import TUI_ACTIVE_KEY, wants_fullscreen
 from promptkit.core.steps.logics.goto import collect_labels
 from promptkit.core.steps.interface import (
     DUMP_TRACE_KEY,
@@ -148,6 +149,23 @@ class Workflow(Step):
         '''
         with scoped(context, self._overrides):
             self._execute(context)
+
+    def _execute_maybe_fullscreen(self, context: Context) -> None:
+        '''树里有 `EnableTUI(fullscreen=True)` 就让全屏应用包住整个工作流。
+
+        全屏应用做的是「接管输入 / 输出」这件事，天然属于一次完整运行，
+        而不只是对话循环：`ChatLoop` 前面的开场白（读记忆）和后面的收尾
+        （写记忆）也该显示在同一个界面里。所以标记虽然在 `ChatLoop` 里，
+        这里把它提升到最外层启动；内层 `ChatLoopWorkflow` 看到
+        `TUI_ACTIVE_KEY` 就不再重复启动。
+        '''
+        if context.get(TUI_ACTIVE_KEY) or not wants_fullscreen(self):
+            self.execute(context)
+            return
+
+        from promptkit.tui.textual_app import run_fullscreen
+
+        run_fullscreen(context, self.execute)
 
     def _execute(self, context: Context) -> None:
         context.setdefault("messages", [])
@@ -320,7 +338,7 @@ class Workflow(Step):
         # 总线一个 handler 都没有时不挂上去，省掉所有事件开销
 
         try:
-            self.execute(context)
+            self._execute_maybe_fullscreen(context)
         except GotoSignal as signal:
             known = ", ".join(sorted(self.labels())) or "（一个都没有）"
             raise UnknownLabel(

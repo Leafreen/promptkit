@@ -9,7 +9,10 @@
 '''
 from promptkit.core.steps.actions import (
     DEFAULT_ENCODING,
+    EnableTUI,
+    INPUT_FN_KEY,
     OUTPUT_STREAM_KEY,
+    TuiUnavailableError,
     Choose,
     ChooseExpr,
     Confirm,
@@ -39,6 +42,7 @@ from promptkit.core.steps.actions import (
     T,
     WriteMemory,
     format_recalled,
+    input_reader,
     output_stream,
 )
 from promptkit.core.steps.interface import SkipStep, Step, coerce_steps, execute_step
@@ -215,7 +219,12 @@ __all__ = [
     "MessageStep",
     "OUTPUT_STREAM_KEY",
     "DEFAULT_ENCODING",
+    "INPUT_FN_KEY",
+    "input_reader",
     "output_stream",
+    # tui.py：整个会话的终端界面（标记步骤）
+    "EnableTUI",
+    "TuiUnavailableError",
     # memory：长期记忆的读 / 写 / 忘 / 召回 / 组合
     "ReadMemory",
     "WriteMemory",

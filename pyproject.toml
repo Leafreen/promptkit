@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "promptkit"
+name = "aipykit"
 version = "0.1.0"
 description = "极简的大模型提示词 / 工作流 DSL：把逻辑写成步骤树，让 Agent 自己调工具"
 readme = "README.md"
@@ -29,14 +29,12 @@ dependencies = [
 # 终端 Markdown 排版、代码高亮、表格。没装就退回纯文本，功能不缺。
 rich = ["rich>=13"]
 
-# 块级公式的多行数学排版（\frac \int \sum …）。
-# ⚠️ sympy 的 parse_latex 还需要 antlr4-python3-runtime，而且**版本挑**：
-#    sympy 1.14 要求 == 4.11，新版本会被拒绝。所以这里不写死，
-#    装了 sympy 之后按它报错里的版本号补装即可。没装也能用内置的 Unicode 映射。
-math = ["sympy>=1.12"]
+# 终端渲染（rich）。
+# 公式渲染内置零依赖的 Unicode 映射；装了 TeXicode（`txc`）会自动增强。
+render = ["rich>=13"]
 
-# 两个都装
-render = ["rich>=13", "sympy>=1.12"]
+# 终端对话界面：EnableTUI() 用 rich + prompt_toolkit，fullscreen=True 用 Textual。
+tui = ["rich>=13", "prompt_toolkit>=3.0", "textual>=1.0"]
 
 # YamlFormatter 需要 pyyaml，其余地方零依赖
 yaml = ["pyyaml>=6"]

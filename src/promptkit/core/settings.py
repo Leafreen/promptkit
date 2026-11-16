@@ -81,6 +81,10 @@ class Settings:
     #: Save / ReadFile / SaveHistory 用的编码
     encoding: str = "utf-8"
 
+    # ---- 渲染 ----
+    #: 公式渲染是否优先用 TeXicode（`txc` CLI）增强。没装 `txc` 时自动回退内置。
+    prefer_texicode: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 

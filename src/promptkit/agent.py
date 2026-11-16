@@ -164,7 +164,62 @@ def normalize_history(records: object) -> List[Message]:
             call_id = message.get("tool_call_id")
             if call_id:
                 pending_calls.discard(str(call_id))
-    return cleaned
+    return _drop_incomplete_tool_calls(cleaned)
+
+
+def _drop_incomplete_tool_calls(messages: List[Message]) -> List[Message]:
+    '''丢掉「说自己要调工具、但没被完整应答」的 assistant 消息。
+
+    上面的第一遍只清掉了孤儿 `tool` 消息（找不到对应调用）。反过来那种更棘手：
+    assistant 声明了 3 个工具调用，历史里却只剩 1 条结果（进程在工具执行中途
+    被杀 / 被打断，或者会话文件本来就残）。OpenAI / DeepSeek 会直接 400：
+
+        An assistant message with 'tool_calls' must be followed by tool messages
+        responding to each 'tool_call_id'.
+
+    缺任何一条都整组丢掉 —— 模型少看一轮工具调用，好过整段对话开不起来。
+    '''
+    repaired: List[Message] = []
+    index = 0
+    total = len(messages)
+    while index < total:
+        message = messages[index]
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if not calls:
+            repaired.append(message)
+            index += 1
+            continue
+
+        expected = {
+            str(call.get("id"))
+            for call in calls
+            if isinstance(call, dict) and call.get("id")
+        }
+        # 紧随其后的 tool 消息就是这组调用的应答
+        follow = index + 1
+        answered: set[str] = set()
+        while follow < total and messages[follow].get("role") in ("tool", "function"):
+            call_id = messages[follow].get("tool_call_id")
+            if call_id and str(call_id) in expected:
+                answered.add(str(call_id))
+            follow += 1
+
+        if expected <= answered:
+            repaired.append(message)
+            repaired.extend(messages[index + 1 : follow])
+        index = follow
+    return repaired
+
+
+def _interrupted_tool_replies(
+    call_ids: Iterable[str], answered: set[str], reason: str
+) -> List[Message]:
+    '''给「没来得及跑完」的工具调用补一条错误结果，保持历史合法。'''
+    return [
+        {"role": "tool", "content": f"错误：{reason}", "tool_call_id": call_id}
+        for call_id in call_ids
+        if call_id and call_id not in answered
+    ]
 
 
 def _load_history_source(records: object) -> object:
@@ -648,6 +703,7 @@ class Agent(AgentLike):
             self.history = clean
             self.messages = self._build_messages()
             replies: List[Message] = []
+            interrupted = False
             try:
                 for call in calls:
                     function = getattr(call, "function", None)
@@ -678,9 +734,24 @@ class Agent(AgentLike):
                         )
                     )
                     replies.append(reply)
+            except BaseException:
+                # 工具执行到一半被打断（Ctrl+C / 事件处理报错）。历史里已经有
+                # assistant(tool_calls)，不补全结果的话下次请求直接 400。
+                interrupted = True
+                raise
             finally:
                 self.history = saved_history
                 self.messages = saved_messages
+                if interrupted:
+                    for reply in [
+                        *replies,
+                        *_interrupted_tool_replies(
+                            [str(getattr(call, "id", "") or "") for call in calls],
+                            {str(reply["tool_call_id"]) for reply in replies},
+                            "工具调用被中断，未拿到结果",
+                        ),
+                    ]:
+                        self._append_message(reply)
 
             for reply in replies:
                 self._append_message(reply)
@@ -847,24 +918,37 @@ class Agent(AgentLike):
                 yield Event(EventType.MESSAGE_END, {"text": content})
                 return
 
-            for call in calls:
-                name = call["function"]["name"]
-                arguments = call["function"]["arguments"]
-                yield Event(
-                    EventType.TOOL_CALL_END, {"name": name, "arguments": arguments}
-                )
+            answered: set[str] = set()
+            try:
+                for call in calls:
+                    name = call["function"]["name"]
+                    arguments = call["function"]["arguments"]
+                    yield Event(
+                        EventType.TOOL_CALL_END, {"name": name, "arguments": arguments}
+                    )
 
-                reply = self._run_tool(by_name, _SimpleCall(call))
-                yield Event(
-                    EventType.TOOL_RESULT,
-                    {
-                        "name": name,
-                        "arguments": arguments,
-                        "result": reply["content"],
-                        "tool_call_id": reply["tool_call_id"],
-                    },
-                )
-                self._append_message(reply)
+                    reply = self._run_tool(by_name, _SimpleCall(call))
+                    yield Event(
+                        EventType.TOOL_RESULT,
+                        {
+                            "name": name,
+                            "arguments": arguments,
+                            "result": reply["content"],
+                            "tool_call_id": reply["tool_call_id"],
+                        },
+                    )
+                    self._append_message(reply)
+                    answered.add(str(reply["tool_call_id"]))
+            except BaseException:
+                # 工具执行到一半被打断 / 生成器被提前关闭（Ctrl+C、调用方停止迭代）。
+                # assistant(tool_calls) 已经在历史里了，缺了 tool 结果下次请求会 400。
+                for reply in _interrupted_tool_replies(
+                    [str(call["id"]) for call in calls],
+                    answered,
+                    "工具调用被中断，未拿到结果",
+                ):
+                    self._append_message(reply)
+                raise
 
         raise ToolLoopExceeded(
             f"连续 {max_tool_rounds} 轮工具调用后模型还在要工具，已中止；"

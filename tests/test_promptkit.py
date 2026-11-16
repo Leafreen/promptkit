@@ -141,19 +141,20 @@ from promptkit.core.settings import (  # noqa: E402
 )
 from promptkit.core.display_sys.render import (  # noqa: E402
     HAVE_RICH,
-    HAVE_SYMPY,
+    HAVE_TEXICODE,
     Verbosity,
     as_verbosity,
     install_hint,
     latex_to_unicode,
     looks_like_math,
     needs_art,
-    normalize_latex,
     plain_text,
     render_markdown,
     render_math,
     render_plain,
     strip_markdown,
+    substitute_math,
+    texicode_render,
     get_console,
 )
 from promptkit.core.display_sys.runlog import (  # noqa: E402
@@ -3925,6 +3926,74 @@ class TestTools(PromptkitTestCase):
         self.assertEqual(tool_message["tool_call_id"], "call_1")
         self.assertEqual(tool_message["content"], "晴")
 
+    def test_interrupted_tool_loop_leaves_valid_history(self):
+        '''工具执行中途被打断时，要把没跑完的调用补成错误结果。
+
+        否则历史里只剩 assistant(tool_calls)、没有对应的 tool 消息，
+        下一次请求 OpenAI / DeepSeek 直接 400。
+        '''
+
+        def boom() -> str:
+            """永远失败。"""
+            return ""
+
+        agent = fake_agent(
+            [
+                fake_message(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        tool_call("boom", "{}", "call_1"),
+                        tool_call("boom", "{}", "call_2"),
+                    ],
+                ),
+            ]
+        )
+
+        def stop_on_result(event):
+            if event.type == EventType.TOOL_RESULT:
+                raise RuntimeError("中断")
+
+        with self.assertRaises(RuntimeError):
+            agent.ask("跑一下", tools=[boom], on_event=stop_on_result)
+
+        history = agent.get_history()
+        self.assertEqual(
+            [message["role"] for message in history],
+            ["user", "assistant", "tool", "tool"],
+        )
+        self.assertEqual(
+            [message["tool_call_id"] for message in history[-2:]],
+            ["call_1", "call_2"],
+        )
+
+    def test_interrupted_streaming_tool_loop_leaves_valid_history(self):
+        '''流式路径同理：被打断后历史里每条 tool_calls 都要有应答。'''
+
+        def boom() -> str:
+            """永远失败。"""
+            return ""
+
+        agent = fake_agent(
+            [stream_chunks([], tool_call_pieces=[(0, "call_1", "boom", "{}")])]
+        )
+
+        def stop_on_result(event):
+            if event.type == EventType.TOOL_RESULT:
+                raise RuntimeError("中断")
+
+        with self.assertRaises(RuntimeError):
+            agent.ask(
+                "跑一下", tools=[boom], on_event=stop_on_result, stream=True
+            )
+
+        history = agent.get_history()
+        self.assertEqual(
+            [message["role"] for message in history],
+            ["user", "assistant", "tool"],
+        )
+        self.assertEqual(history[-1]["tool_call_id"], "call_1")
+
     def test_reasoning_content_is_passed_back(self):
         # 带 tools 时 DeepSeek 要求把 reasoning_content 原样传回，否则 400
         def get_weather(city: str) -> str:
@@ -5241,6 +5310,53 @@ class TestKnowledgeBase(PromptkitTestCase):
         self.assertEqual(len(kb), 1)
         self.assertIn("退款", kb.chunks[0])
 
+    def test_from_dir_recurses_into_subdirectories(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "faq", "refund"))
+            with open(os.path.join(folder, "a.md"), "w", encoding="utf-8") as handle:
+                handle.write("配送范围说明")
+            with open(os.path.join(folder, "faq", "b.md"), "w", encoding="utf-8") as handle:
+                handle.write("退款政策在子目录里")
+            with open(
+                os.path.join(folder, "faq", "refund", "c.txt"), "w", encoding="utf-8"
+            ) as handle:
+                handle.write("更深一层的售后条款")
+            kb = KnowledgeBase.from_dir(folder)
+        self.assertEqual(len(kb), 3)
+        self.assertIn("faq/b.md", kb.sources)
+        self.assertIn("faq/refund/c.txt", kb.sources)
+        self.assertEqual(kb.search("售后条款")[0].source, "faq/refund/c.txt")
+        self.assertEqual(kb.search("退款政策")[0].source, "faq/b.md")
+
+    def test_from_dir_non_recursive_keeps_old_behavior(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "sub"))
+            with open(os.path.join(folder, "a.md"), "w", encoding="utf-8") as handle:
+                handle.write("第一层文件")
+            with open(os.path.join(folder, "sub", "b.md"), "w", encoding="utf-8") as handle:
+                handle.write("子目录文件不该进来")
+            kb = KnowledgeBase.from_dir(folder, recursive=False)
+        self.assertEqual(len(kb), 1)
+        self.assertEqual(kb.sources, ["a.md"])
+
+    def test_add_dir_same_filename_in_subdirectories_does_not_collide(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "x"))
+            os.makedirs(os.path.join(folder, "y"))
+            with open(os.path.join(folder, "x", "a.md"), "w", encoding="utf-8") as handle:
+                handle.write("甲目录的同名文件")
+            with open(os.path.join(folder, "y", "a.md"), "w", encoding="utf-8") as handle:
+                handle.write("乙目录的同名文件")
+            kb = KnowledgeBase().add_dir(folder)
+        self.assertEqual(len(kb), 2)
+        self.assertEqual(sorted(set(kb.sources)), ["x/a.md", "y/a.md"])
+
     def test_as_tool_is_callable_by_the_model(self):
         tool = self.kb().as_tool()
         self.assertEqual(tool.name, "search_knowledge_base")
@@ -5425,6 +5541,33 @@ class TestKnowledgeBasePersistence(PromptkitTestCase):
         stats = kb.sync_dir(self.docs)
         self.assertEqual(stats["added"], 1)
         self.assertEqual(len(kb), 2)
+
+    def test_sync_recurses_into_subdirectories(self):
+        kb = self.build()
+        nested = os.path.join(self.docs, "faq")
+        os.makedirs(nested)
+        self.write(os.path.join("faq", "after_sale.md"), "子目录里的售后条款。")
+        stats = kb.sync_dir(self.docs)
+        self.assertEqual(stats["added"], 1)
+        self.assertEqual(stats["skipped"], 1)  # 第一层文件不受影响
+        self.assertIn("faq/after_sale.md", kb.ingested)
+        self.assertEqual(kb.search("售后条款")[0].source, "faq/after_sale.md")
+        # 幂等：再跑一次全部 skipped
+        stats = kb.sync_dir(self.docs)
+        self.assertEqual(stats, {"added": 0, "updated": 0, "skipped": 2, "removed": 0})
+        # 子目录文件被删后 prune 同样生效
+        os.remove(os.path.join(nested, "after_sale.md"))
+        stats = kb.sync_dir(self.docs)
+        self.assertEqual(stats["removed"], 1)
+        self.assertNotIn("faq/after_sale.md", kb.ingested)
+
+    def test_sync_non_recursive_keeps_old_behavior(self):
+        kb = self.build()
+        os.makedirs(os.path.join(self.docs, "sub"))
+        self.write(os.path.join("sub", "hidden.md"), "子目录文件不该进来。")
+        stats = kb.sync_dir(self.docs, recursive=False)
+        self.assertEqual(stats["added"], 0)
+        self.assertNotIn("sub/hidden.md", kb.ingested)
 
     def test_sync_replaces_a_changed_file(self):
         kb = self.build()
@@ -7138,7 +7281,7 @@ class TestMathRendering(PromptkitTestCase):
     def test_inline_math_is_converted(self):
         self.assertIn("β₀", plain_text(r"其中 $\beta_0$ 是截距"))
 
-    # ---------------- 要不要请 sympy ----------------
+    # ---------------- 要不要请 TeXicode ----------------
     def test_needs_art(self):
         self.assertTrue(needs_art(r"\frac{a}{b}"))
         self.assertTrue(needs_art(r"\int_0^1 x dx"))     # 回归：\b 匹配不到
@@ -7156,6 +7299,83 @@ class TestMathRendering(PromptkitTestCase):
         text = plain_text("公式：\n$$\ny = \\beta_0 + \\beta_1 x_1\n$$\n完")
         self.assertIn("β₀", text)
         self.assertIn("完", text)
+
+    # ---------------- TeXicode 增强 ----------------
+    def test_texicode_render_returns_none_when_unavailable(self):
+        with mock.patch("promptkit.core.display_sys.render.HAVE_TEXICODE", False):
+            self.assertIsNone(texicode_render(r"\frac{a}{b}"))
+
+    def test_texicode_render_runs_cli_and_returns_stdout(self):
+        proc = mock.Mock(returncode=0, stdout="a\n─\nb\n")
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ) as run:
+            self.assertEqual(texicode_render(r"\frac{a}{b}"), "a\n─\nb")
+            self.assertEqual(run.call_args.args[0][0], "txc")
+            self.assertEqual(run.call_args.args[0][1], r"\frac{a}{b}")
+
+    def test_texicode_render_returns_none_on_failure(self):
+        cases = [
+            mock.Mock(returncode=1, stdout=""),        # 非零退出
+            mock.Mock(returncode=0, stdout="   \n  "),  # 空输出
+        ]
+        for proc in cases:
+            with mock.patch(
+                "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+            ), mock.patch(
+                "promptkit.core.display_sys.render.subprocess.run",
+                return_value=proc,
+            ):
+                self.assertIsNone(texicode_render(r"\frac{a}{b}"))
+
+    def test_texicode_render_returns_none_on_exception(self):
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            side_effect=OSError("boom"),
+        ):
+            self.assertIsNone(texicode_render(r"\frac{a}{b}"))
+
+    def test_render_math_prefers_texicode_for_complex(self):
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.texicode_render",
+            return_value="ART",
+        ):
+            self.assertEqual(
+                render_math(r"\frac{1}{x}", prefer_texicode=True), "ART"
+            )
+
+    def test_render_math_falls_back_when_texicode_fails(self):
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.texicode_render",
+            return_value=None,
+        ):
+            self.assertEqual(
+                render_math(r"\frac{a}{b}", prefer_texicode=True), "(a)/(b)"
+            )
+
+    def test_render_math_skips_texicode_for_simple(self):
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.texicode_render",
+            side_effect=AssertionError("不该调用 TeXicode"),
+        ):
+            self.assertEqual(
+                render_math(r"\beta_0 + \beta_1 x_1", prefer_texicode=True),
+                "β₀ + β₁ x₁",
+            )
+
+    def test_substitute_math_is_public(self):
+        self.assertIn("β₀", substitute_math(r"其中 $\beta_0$ 是截距"))
 
 
 class TestRenderFallback(PromptkitTestCase):
@@ -7234,7 +7454,6 @@ class TestRenderFallback(PromptkitTestCase):
 
     def test_rich_availability_flags_are_booleans(self):
         self.assertIsInstance(HAVE_RICH, bool)
-        self.assertIsInstance(HAVE_SYMPY, bool)
 
 
 class TestVerbosity(PromptkitTestCase):
@@ -7663,7 +7882,6 @@ class TestRenderExports(PromptkitTestCase):
             "strip_markdown",
             "latex_to_unicode",
             "HAVE_RICH",
-            "HAVE_SYMPY",
             "install_hint",
             "setup_logging",
             "close_logging",
@@ -7889,11 +8107,7 @@ class TestLatexDelimiters(PromptkitTestCase):
             self.assertTrue(looks_like_math(body), body)
 
     def test_boxed_is_stripped_not_leaked(self):
-        '''`\\boxed{x}` 只保留内容。
-
-        回归：sympy 不认识 `\\boxed`，会把它当成**变量名**，输出 `boxed⋅x`。
-        所以必须在解析前就拆掉，两条路径行为一致。
-        '''
+        '''`\\boxed{x}` 只保留内容，命令名不能漏进结果。'''
         text = latex_to_unicode(r"\boxed{\displaystyle C_n=\frac{1}{n+1}\binom{2n}{n}}")
         self.assertNotIn("\\boxed", text)
         self.assertNotIn("boxed", text)
@@ -7929,28 +8143,8 @@ class TestLatexDelimiters(PromptkitTestCase):
         self.assertIn("u-d=2", text)
         self.assertIn("\n", text)   # 两行
 
-    def test_sympy_boolean_results_are_rejected(self):
-        '''回归：恒等式会被 sympy 算成 True / False，屏幕上只剩一个 False。'''
-        if not HAVE_SYMPY:  # pragma: no cover
-            self.skipTest("没装 sympy")
-        self.assertEqual(render_math("x = x", display=True), "x = x")
-        self.assertNotIn("True", render_math("x = x", display=True))
-
-    def test_sympy_leaked_command_names_are_rejected(self):
-        '''回归：`\\boxed` / `\\blacksquare` 会被 sympy 当变量名。'''
-        if not HAVE_SYMPY:  # pragma: no cover
-            self.skipTest("没装 sympy")
-        rendered = render_math(r"\blacksquare \frac{a}{b}", display=True)
-        self.assertNotIn("blacksquare", rendered)
-        self.assertIn("■", rendered)
-
     def test_full_catalan_answer(self):
-        '''用户那条回答的完整端到端片段。
-
-        只断言「不再漏 LaTeX」这类**跟环境无关**的不变量 ——
-        装了 sympy 会输出多行数学排版，没装是 `C(2n, n)` 这种平铺写法，
-        两边都对，不该让测试依赖装没装 sympy。
-        '''
+        '''用户那条回答的完整端到端片段：只断言与环境无关的不变量。'''
         source = (
             r"因此合法出栈顺序总数为" "\n"
             r"\[ \binom{2n}{n}-\binom{2n}{n-1}. \]" "\n"
@@ -7963,7 +8157,7 @@ class TestLatexDelimiters(PromptkitTestCase):
         # 定界符和命令都不能漏出去
         for leaked in ("\\[", "\\]", "\\binom", "\\boxed", "\\displaystyle", "\\frac"):
             self.assertNotIn(leaked, out, f"{leaked} 漏出来了")
-        # 内容还在（sympy 会写成 2⋅n，降级路径是 2n，两边都算对）
+        # 内容还在
         squashed = out.replace("⋅", "").replace("*", "").replace(" ", "")
         self.assertIn("2n", squashed)
         self.assertIn("n-1", squashed)
@@ -7977,11 +8171,11 @@ class TestLatexDelimiters(PromptkitTestCase):
         # 不能误伤同前缀的命令
         self.assertIn("\\blacksquarefoo", plain_text("\\blacksquarefoo"))
 
-    def test_displaystyle_does_not_break_sympy(self):
-        '''回归：`\\displaystyle` 会让 sympy 的 parse_latex 直接失败，
-        于是同一个文档里有的公式走了 sympy、有的走了降级，前后不一致。'''
-        self.assertEqual(normalize_latex(r"\displaystyle x"), "x")
-        self.assertNotIn("displaystyle", render_math(r"\displaystyle \frac{a}{b}", display=True))
+    def test_displaystyle_never_leaks(self):
+        '''`\\displaystyle` 只是排版提示，渲染结果里不该残留。'''
+        self.assertNotIn(
+            "displaystyle", render_math(r"\displaystyle \frac{a}{b}", display=True)
+        )
 
 
 class TestLatexRenderer(PromptkitTestCase):
@@ -8039,7 +8233,7 @@ class TestLatexRenderer(PromptkitTestCase):
 
     # ---------------- 保真：不能改模型的写法 ----------------
     def test_ln_is_not_rewritten_to_log(self):
-        '''sympy 会把 `\\ln` 渲染成 `log(x, E)`，那不是模型写的东西。'''
+        '''`\\ln` 必须原样保留，不能变成 `log(x, E)`。'''
         self.assertEqual(latex_to_unicode(r"\ln|x+1|"), "ln|x+1|")
         self.assertNotIn("log", latex_to_unicode(r"\ln x"))
 
@@ -8063,23 +8257,11 @@ class TestLatexRenderer(PromptkitTestCase):
         self.assertIn("a", text)
         self.assertIn("\n", text)
 
-    # ---------------- sympy 默认关闭 ----------------
-    def test_sympy_is_off_by_default(self):
-        '''sympy 会渲染错（截断 / 改函数名 / 算成布尔值），所以默认不用它。'''
-        from promptkit.core.display_sys.render import PREFER_SYMPY
-        self.assertFalse(PREFER_SYMPY)
-
-    def test_sympy_output_never_leaks_log_or_atan(self):
-        text = render_math(r"\frac{\sqrt5-1}{20}\ln(x^2+\alpha x+1)", display=True)
-        self.assertNotIn("log(", text)
-        self.assertNotIn("atan(", text)
-
-    def test_sympy_can_still_be_opted_into(self):
-        if not HAVE_SYMPY:  # pragma: no cover
-            self.skipTest("没装 sympy")
-        # 显式打开：多行排版（分数会叠起来）
-        art = render_math(r"\frac{a}{b}", display=True, prefer_sympy=True)
-        self.assertTrue(art)                       # 不崩就行，具体形状由 sympy 决定
+    # ---------------- TeXicode 默认关闭 ----------------
+    def test_texicode_is_off_by_default(self):
+        '''TeXicode 默认关闭，需显式 settings.prefer_texicode=True 才启用。'''
+        from promptkit.core.settings import settings
+        self.assertFalse(settings.prefer_texicode)
 
     # ---------------- 用户的整段推导 ----------------
     def test_the_integral_derivation_renders_cleanly(self):
@@ -8103,7 +8285,7 @@ class TestLatexRenderer(PromptkitTestCase):
         for leaked in ("\\frac", "\\ln", "\\arctan", "\\sqrt", "\\left",
                        "\\right", "\\[", "\\]", "[2mm]", "{}"):
             self.assertNotIn(leaked, out, f"{leaked} 漏出来了")
-        # 也不能被 sympy 改样
+        # 函数名也不能被改样
         self.assertNotIn("atan(", out)
         self.assertNotIn("log(", out)
         # 该有的都在
@@ -9322,6 +9504,52 @@ class TestHistoryRoundTrip(PromptkitTestCase):
             [message["role"] for message in cleaned], ["user", "assistant", "tool"]
         )
         self.assertEqual(cleaned[-1]["tool_call_id"], "call_2")
+
+    def test_normalize_history_drops_unanswered_tool_calls(self):
+        '''assistant 声明了两个调用、只回来一条结果时，整组丢掉。
+
+        否则续聊的第一条请求就会 400：
+        insufficient tool messages following tool_calls message。
+        '''
+        cleaned = normalize_history(
+            [
+                {"role": "user", "content": "查一下"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "f"}},
+                        {"id": "call_2", "type": "function", "function": {"name": "g"}},
+                    ],
+                },
+                {"role": "tool", "content": "结果", "tool_call_id": "call_1"},
+                {"role": "assistant", "content": "好了"},
+            ]
+        )
+        self.assertEqual(
+            [message["role"] for message in cleaned], ["user", "assistant"]
+        )
+        self.assertEqual(cleaned[-1]["content"], "好了")
+
+    def test_normalize_history_keeps_fully_answered_tool_calls(self):
+        cleaned = normalize_history(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "f"}},
+                        {"id": "call_2", "type": "function", "function": {"name": "g"}},
+                    ],
+                },
+                {"role": "tool", "content": "1", "tool_call_id": "call_1"},
+                {"role": "tool", "content": "2", "tool_call_id": "call_2"},
+            ]
+        )
+        self.assertEqual(
+            [message["role"] for message in cleaned],
+            ["assistant", "tool", "tool"],
+        )
 
 
 class TestSession(PromptkitTestCase):

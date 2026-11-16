@@ -53,6 +53,7 @@ from promptkit.core.errors import (
     GotoSignal,
     ReturnSignal,
 )
+from promptkit.core.event_sys import EventType, emit
 from promptkit.core.steps.interface import Step, StepLike, coerce_steps, execute_step
 from promptkit.core.steps.logics.expr_sys.expr import VarExpr
 
@@ -506,6 +507,27 @@ class ChatTurn(Step):
         return f"ChatTurn(-> {self.output_key})"
 
 
+class _EmitUserMessage(Step):
+    '''把这一轮**真正发出去**的文本广播给界面。
+
+    多行输入是在循环体里用若干次 `Read` 拼出来的，按每次提交显示就会变成
+    好几条「你」的气泡（连 `ml` / `end` 这种协议词都算一条）。这里在调模型
+    之前只发一次最终文本，界面按一条消息渲染。
+    '''
+
+    name = "user_message"
+
+    def __init__(self, input_key: str) -> None:
+        self.input_key = input_key
+
+    def execute(self, context: Context) -> None:
+        emit(
+            context,
+            EventType.USER_MESSAGE,
+            text=str(context.get(self.input_key) or ""),
+        )
+
+
 def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
     *steps: object,
     behavior: Optional[Sequence[object]] = None,
@@ -606,12 +628,19 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             *steps: object,
             chat_turn: ChatTurn,
             proactive: bool = False,
+            tui: bool = False,
+            tui_fullscreen: bool = False,
             **kwargs,
         ):
             super().__init__(*cast(Sequence[StepLike], steps), **kwargs)
             self._chat_turn = chat_turn
             self._finally: List[Step] = []
             self._proactive = proactive
+            self._tui = tui
+            self._tui_fullscreen = tui_fullscreen
+            # 给 `Workflow.run()` 的树遍历用：它会把全屏应用提升到整个
+            # 工作流外层，这样 ChatLoop 前（开场白）后（收尾）的步骤也在界面里。
+            self.requests_fullscreen = tui_fullscreen
 
         def Template(self, text: str) -> "ChatLoopWorkflow":  # noqa: N802
             '''换掉每轮发给模型的内容（支持 `{{var}}` 占位）。'''
@@ -633,11 +662,33 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             # 到点提醒要「抢断」进模型：起一个后台线程守 ALARMS，
             # 循环结束（正常 / 异常）时一定要停，否则线程会活到进程结束。
             runner = self._start_alarm_runner(context)
+            from promptkit.core.steps.actions.tui import TUI_ACTIVE_KEY
+
+            # 外层已经开了全屏（TUI 覆盖整个工作流）：直接跑循环，
+            # 输入 / 输出 / 流式都已经由那个应用接好了。
+            active = bool(context.get(TUI_ACTIVE_KEY))
+            if self._tui_fullscreen and not active:
+                # 全屏：Textual 在主线程跑事件循环，对话循环放进它的 worker
+                # 线程；输入经队列桥接，模型事件跨线程回 UI。run_fullscreen
+                # 会阻塞到应用退出，再把循环里的异常抛回来。
+                from promptkit.tui.textual_app import run_fullscreen
+
+                try:
+                    run_fullscreen(context, self._run_loop)
+                finally:
+                    if runner is not None:
+                        runner.stop()
+                return
+            # TUI 同理：整个循环只装一次，退出时必须还原输入函数、摘掉 handler。
+            # 放在 alarm 之后停，这样 `.Finally()` 里的 Echo 还走在 TUI 的流里。
+            session = None if active else self._start_tui(context)
             try:
                 self._run_loop(context)
             finally:
                 if runner is not None:
                     runner.stop()
+                if session is not None:
+                    session.stop()
 
         def _start_alarm_runner(self, context: Context):
             if not self._proactive:
@@ -648,6 +699,18 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             from promptkit.core.tool.builtin.clock import AlarmRunner
 
             return AlarmRunner(agent).start()
+
+        def _start_tui(self, context: Context):
+            '''装上 TUI（懒导入）；没写 `EnableTUI()` 时什么都不做。
+
+            依赖缺失 / 非终端由 `start_tui` 抛 `TuiUnavailableError`，
+            这里不吞异常 —— 显式要求 TUI 就该显式失败。
+            '''
+            if not self._tui:
+                return None
+            from promptkit.tui import start_tui
+
+            return start_tui(context)
 
         def _run_loop(self, context: Context) -> None:
             failure: Optional[BaseException] = None
@@ -680,6 +743,20 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
             "或者关键字 behavior=[...]，不要同时给"
         )
     loop_body = tuple(steps) if steps else tuple(behavior or ())
+
+    # `EnableTUI()` 也是标记：不属于每轮动作，摘出来交给整个循环起停。
+    # 每轮执行会重复挂事件 handler，所以这里必须摘掉而不是就地执行。
+    from promptkit.core.steps.actions.tui import EnableTUI
+
+    tui_step = next(
+        (step for step in loop_body if isinstance(step, EnableTUI)), None
+    )
+    tui = tui_step is not None
+    tui_fullscreen = bool(tui_step is not None and tui_step.fullscreen)
+    if tui:
+        loop_body = tuple(
+            step for step in loop_body if not isinstance(step, EnableTUI)
+        )
 
     # 循环体里的原语等价于关键字（和 `Compact(...)` 同一种写法）：
     #   ChatLoop(TimeStamp())        == ChatLoop(timestamps=True)
@@ -778,6 +855,8 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         # 压缩放在调模型**之前**（没配 compact_after 就没有这一步）
         *(() if compact_step is None else (compact_step,)),
         *stamp,
+        # 多行输入拼好之后再广播一次「用户到底发了什么」，界面只渲染一条
+        _EmitUserMessage(input_key),
         turn,
         Echo(Var(output_key), render=render),
         *coerce_steps(*resolved_after_turn),
@@ -794,6 +873,8 @@ def ChatLoop(  # noqa: N802 - 跟随 DSL 命名（工厂，返回 Step）
         *coerce_steps(*cast(Sequence[StepLike], after_end)),
         chat_turn=turn,
         proactive=proactive,
+        tui=tui,
+        tui_fullscreen=tui_fullscreen,
         name="chat_loop",
     )
 
