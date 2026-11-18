@@ -1,11 +1,11 @@
-'''阶段 4：frontmatter 字段补齐（entrypoint / tools 白名单 / 依赖并集）。'''
+﻿'''阶段 4：frontmatter 字段补齐（entrypoint / tools 白名单 / 依赖并集）。'''
 import logging
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from promptkit.skill import SkillPackage, as_skill_package
+from aipykit.skill import SkillPackage, as_skill_package
 
 
 @pytest.fixture

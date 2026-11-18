@@ -1,18 +1,18 @@
-'''多模态生成 / 理解步骤：ImageGenStep / VideoGenStep / STTStep / TTSStep。'''
+﻿'''多模态生成 / 理解步骤：ImageGenStep / VideoGenStep / STTStep / TTSStep。'''
 import pytest
 
-from promptkit.client_sys.client import UnsupportedModality
-from promptkit.client_sys.multimodal import Media
-from promptkit.core.content import AudioPart, ImagePart, TextPart, VideoPart
-from promptkit.core.context import Context
-from promptkit.core.steps.actions.multimodal import (
+from aipykit.client_sys.client import UnsupportedModality
+from aipykit.client_sys.multimodal import Media
+from aipykit.core.content import AudioPart, ImagePart, TextPart, VideoPart
+from aipykit.core.context import Context
+from aipykit.core.steps.actions.multimodal import (
     ImageGenStep,
     STTStep,
     TTSStep,
     VideoGenStep,
 )
-from promptkit.core.steps.logics.var import Var
-from promptkit.prompt import Prompt
+from aipykit.core.steps.logics.var import Var
+from aipykit.prompt import Prompt
 
 from .conftest import FakeMultimodalClient
 

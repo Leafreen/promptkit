@@ -1,4 +1,4 @@
-# tests/mcp/test_config.py
+﻿# tests/mcp/test_config.py
 '''load_mcp_from_config 单测 — 用 asyncio.run 手动驱动 async，不用 pytest-asyncio。
 
 真实 MCP SDK 未安装也能跑 —— 把 load_mcp_from_config 内部调的 load_mcp_tools
@@ -12,10 +12,10 @@ import sys
 
 import pytest
 
-from promptkit.core.tool.registry import ToolRegistry
-from promptkit.mcp.config import load_mcp_from_config
-from promptkit.mcp.exceptions import MCPConnectionError
-from promptkit.mcp.tool import build_mcp_tools
+from aipykit.core.tool.registry import ToolRegistry
+from aipykit.mcp.config import load_mcp_from_config
+from aipykit.mcp.exceptions import MCPConnectionError
+from aipykit.mcp.tool import build_mcp_tools
 from tests.mcp.conftest import FakeMCPToolDef
 
 

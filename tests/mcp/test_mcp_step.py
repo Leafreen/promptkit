@@ -1,12 +1,12 @@
-# tests/mcp/test_mcp_step.py
+﻿# tests/mcp/test_mcp_step.py
 '''MCPToolStep 单测 —— 显式调用 + Context 交互 + trace 脱敏。'''
 from __future__ import annotations
 
 import pytest
 
-from promptkit.core.context import Context
-from promptkit.core.tool.base import Tool
-from promptkit.core.steps.actions.mcp_step import MCPToolStep, _sanitize_args
+from aipykit.core.context import Context
+from aipykit.core.tool.base import Tool
+from aipykit.core.steps.actions.mcp_step import MCPToolStep, _sanitize_args
 
 
 # ---------------------------------------------------------------------------

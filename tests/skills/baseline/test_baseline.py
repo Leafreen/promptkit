@@ -1,4 +1,4 @@
-'''阶段 0 基线：示例包能加载、工具清单正确、最小工作流真能调到工具。
+﻿'''阶段 0 基线：示例包能加载、工具清单正确、最小工作流真能调到工具。
 
 跑在现有实现（as_skill_package）之上；阶段 1 落地 SkillPackage.load()
 后切换门面 API，本文件作为回归基线保留。
@@ -7,8 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from promptkit.core import LLMStep, Prompt, Workflow
-from promptkit.skill import as_skill_package
+from aipykit.core import LLMStep, Prompt, Workflow
+from aipykit.skill import as_skill_package
 
 from tests.skills.baseline.fake_tool_client import (
     make_tool_agent,

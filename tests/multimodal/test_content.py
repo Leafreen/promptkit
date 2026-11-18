@@ -1,9 +1,9 @@
-'''ContentPart：构造、to_base64、序列化与部件推断。'''
+﻿'''ContentPart：构造、to_base64、序列化与部件推断。'''
 import base64
 
 import pytest
 
-from promptkit.core.content import (
+from aipykit.core.content import (
     AudioPart,
     FilePart,
     ImagePart,

@@ -1,10 +1,10 @@
-'''Var 的可选类型标注：render 时校验，不匹配抛 TypeError。'''
+﻿'''Var 的可选类型标注：render 时校验，不匹配抛 TypeError。'''
 import pytest
 
-from promptkit.core.content import ImagePart, TextPart
-from promptkit.core.steps.logics.expr_sys.expr import VarExpr
-from promptkit.core.steps.logics.var import Var
-from promptkit.prompt import Prompt
+from aipykit.core.content import ImagePart, TextPart
+from aipykit.core.steps.logics.expr_sys.expr import VarExpr
+from aipykit.core.steps.logics.var import Var
+from aipykit.prompt import Prompt
 
 
 def test_var_without_type_accepts_anything():

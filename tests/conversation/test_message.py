@@ -1,9 +1,9 @@
-'''Message 单元测试：不可变、id、content 形状、dict 互转。'''
+﻿'''Message 单元测试：不可变、id、content 形状、dict 互转。'''
 import dataclasses
 
 import pytest
 
-from promptkit.conversation.message import Message
+from aipykit.conversation.message import Message
 
 
 def test_id_is_uuid4_hex_and_unique():

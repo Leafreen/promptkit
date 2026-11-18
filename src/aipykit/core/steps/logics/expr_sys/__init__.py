@@ -1,0 +1,62 @@
+﻿'''表达式与变量类型：惰性 Expr、变量引用、Number / Str。
+
+这一层是纯语言层，不包含任何 Step：
+
+    from aipykit.core.steps.logics.expr_sys import Expr, Var, Number, Str
+'''
+from aipykit.core.steps.logics.expr_sys.expr import (
+    AgentReplyExpr,
+    AttrExpr,
+    BinaryExpr,
+    Call,
+    CallExpr,
+    Const,
+    Expr,
+    ItemExpr,
+    Len,
+    UnaryExpr,
+    VarExpr,
+    as_expr,
+)
+from aipykit.core.steps.logics.expr_sys.transforms import (
+    Transform,
+    get_transform,
+    register_transform,
+    registered_transforms,
+    transform,
+    transform_name,
+)
+from aipykit.core.steps.logics.expr_sys.vartypes import (
+    Number,
+    Str,
+    VarType,
+    var_type_name,
+)
+
+__all__ = [
+    # expr.py
+    "Expr",
+    "Const",
+    "VarExpr",
+    "BinaryExpr",
+    "UnaryExpr",
+    "AgentReplyExpr",
+    "Call",
+    "CallExpr",
+    "ItemExpr",
+    "AttrExpr",
+    "Len",
+    "as_expr",
+    # transforms.py
+    "Transform",
+    "transform",
+    "register_transform",
+    "get_transform",
+    "transform_name",
+    "registered_transforms",
+    # vartypes.py
+    "VarType",
+    "Number",
+    "Str",
+    "var_type_name",
+]

@@ -1,13 +1,13 @@
-'''LLMStep 能力协商：客户端不支持的模态抛 UnsupportedModality，不静默降级。'''
+﻿'''LLMStep 能力协商：客户端不支持的模态抛 UnsupportedModality，不静默降级。'''
 from types import SimpleNamespace
 
 import pytest
 
-from promptkit.client_sys.client import UnsupportedModality
-from promptkit.core.content import ImagePart, TextPart
-from promptkit.core.context import Context
-from promptkit.core.steps.actions.llm import LLMStep
-from promptkit.prompt import Prompt
+from aipykit.client_sys.client import UnsupportedModality
+from aipykit.core.content import ImagePart, TextPart
+from aipykit.core.context import Context
+from aipykit.core.steps.actions.llm import LLMStep
+from aipykit.prompt import Prompt
 
 from .conftest import client_of, make_agent
 

@@ -104,13 +104,13 @@ pip install -e ".[mcp]"      # 接 MCP Server
 ```
 
 公式渲染**零依赖**：内置 LaTeX -> Unicode 映射，任何环境都能用。
-装了 [TeXicode](https://github.com/alvinwan/texicode)（`txc` 命令）后可开启
-增强，复杂公式会渲染出更完整的 Unicode art：
+装了 [TeXicode](https://github.com/alvinwan/TeXicode)（`txc` 命令）后**自动启用**
+增强：复杂公式（分式 / 积分 / 求和）会渲染成二维 Unicode art，失败的自动回退内置。
 
 ```python
 from promptkit.core import using_settings
 
-with using_settings(prefer_texicode=True):   # 没装 txc 时自动回退内置
+with using_settings(prefer_texicode=False):   # 想强制用内置渲染
     wf.run()
 ```
 
@@ -1054,8 +1054,7 @@ stdio / sse。`load_mcp_tools(..., transport=...)` 传别的会直接报错。
 **Q：公式渲染是怎么做的？要不要装依赖？** 
 不需要。默认走内置的零依赖 LaTeX -> Unicode 映射，任何环境都能用，
 而且是保真翻译（`\ln` 不会变成 `log(x, E)`，`\frac15` 不会截断）。
-装了 TeXicode（`txc` 命令）后可以用 `using_settings(prefer_texicode=True)`
-开启增强，复杂公式会渲染出更完整的多行 Unicode art；失败 / 没装都自动回退内置。
+装了 TeXicode（`txc` 命令）会自动用它渲染二维 art；没装 / 调用失败都自动回退内置。
 
 **Q：** **`python examples/xxx.py`** **报 9009 / 「不是内部或外部命令」？** 
 这是环境 PATH 问题（终端找不到 `python`），不是项目问题。Windows 上先确认

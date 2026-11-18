@@ -1,4 +1,4 @@
-# tests/baseline/test_tutor_flow.py
+﻿# tests/baseline/test_tutor_flow.py
 '''基线：课程学习助手（tutor 场景）不依赖真实 API 的核心流程。'''
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from unittest import mock
 
 import pytest
 
-from promptkit.core import Verbosity
-from promptkit.memory.base import InMemoryMemory
+from aipykit.core import Verbosity
+from aipykit.memory.base import InMemoryMemory
 from tests.baseline.fake_agent import FakeAgent
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "course_assistant.py"

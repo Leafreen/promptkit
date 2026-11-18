@@ -1,15 +1,15 @@
-'''语义 Step 测试：Snapshot / Restore / Fork / Branch / Branches / Merge。'''
+﻿'''语义 Step 测试：Snapshot / Restore / Fork / Branch / Branches / Merge。'''
 import pytest
 
-from promptkit.conversation.config import RewindConfig
-from promptkit.conversation.exceptions import (
+from aipykit.conversation.config import RewindConfig
+from aipykit.conversation.exceptions import (
     BranchLimitExceeded,
     RewindBeyondCompression,
     RewindBeyondLimit,
     SessionError,
     SnapshotReadonly,
 )
-from promptkit.conversation.semantic import (
+from aipykit.conversation.semantic import (
     BRANCH_COUNT_KEY,
     Branch,
     Branches,
@@ -19,10 +19,10 @@ from promptkit.conversation.semantic import (
     Snapshot,
     branch_key,
 )
-from promptkit.conversation.session import Session
-from promptkit.conversation.steps import SESSION_KEY, session_from_context
-from promptkit.core.context import Context
-from promptkit.core.steps.interface import Step
+from aipykit.conversation.session import Session
+from aipykit.conversation.steps import SESSION_KEY, session_from_context
+from aipykit.core.context import Context
+from aipykit.core.steps.interface import Step
 
 
 class MarkStep(Step):

@@ -1,9 +1,9 @@
-'''阶段 4 验收：`Function` 改位置形参，`$` 只是声明记号。'''
+﻿'''阶段 4 验收：`Function` 改位置形参，`$` 只是声明记号。'''
 import re
 
 import pytest
 
-from promptkit.core import (
+from aipykit.core import (
     ArgumentError,
     Function,
     Return,

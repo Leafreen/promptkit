@@ -1,4 +1,4 @@
-# tests/mcp/test_loader.py
+﻿# tests/mcp/test_loader.py
 '''load_mcp_tools / build_mcp_tools 单测 — FakeMCPClient，不连真实 MCP Server。
 
 注意：测试用 build_mcp_tools 构造 MCPTool 实例 + ToolRegistry.register 集成验证，
@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-from promptkit.core.tool.base import Tool
-from promptkit.core.tool.registry import ToolRegistry
-from promptkit.mcp.tool import MCPTool, build_mcp_tools
+from aipykit.core.tool.base import Tool
+from aipykit.core.tool.registry import ToolRegistry
+from aipykit.mcp.tool import MCPTool, build_mcp_tools
 from tests.mcp.conftest import FakeMCPToolDef
 
 

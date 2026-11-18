@@ -1,4 +1,4 @@
-# tests/mcp/test_security.py
+﻿# tests/mcp/test_security.py
 '''安全层单测：默认拒绝 / allowlist 放行 / hook 注册 / 脱敏。'''
 from __future__ import annotations
 
@@ -7,20 +7,20 @@ from typing import Any, Dict
 
 import pytest
 
-from promptkit.core.tool.base import Tool
-from promptkit.mcp.exceptions import MCPToolNotFound
-from promptkit.mcp.hooks import (
+from aipykit.core.tool.base import Tool
+from aipykit.mcp.exceptions import MCPToolNotFound
+from aipykit.mcp.hooks import (
     HookRegistry,
     ToolHookResult,
     get_default_hook_registry,
     set_default_hook_registry,
 )
-from promptkit.mcp.security import (
+from aipykit.mcp.security import (
     _sanitize_args,
     mcp_permission_gate,
     register_mcp_security,
 )
-from promptkit.mcp.tool import MCPTool, build_mcp_tools
+from aipykit.mcp.tool import MCPTool, build_mcp_tools
 from tests.mcp.conftest import FakeCallToolResult, FakeMCPClient, FakeMCPToolDef
 
 

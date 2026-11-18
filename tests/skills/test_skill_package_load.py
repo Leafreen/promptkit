@@ -1,11 +1,11 @@
-'''阶段 1：SkillPackage.load() 门面 + 严格 frontmatter 校验 + 异常体系。'''
+﻿'''阶段 1：SkillPackage.load() 门面 + 严格 frontmatter 校验 + 异常体系。'''
 import tempfile
 from pathlib import Path
 
 import pytest
 
-import promptkit.skill.package as package_mod
-from promptkit.skill import (
+import aipykit.skill.package as package_mod
+from aipykit.skill import (
     DependencyInstallError,
     InvalidSkillPackageError,
     SkillPackage,

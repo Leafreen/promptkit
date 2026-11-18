@@ -1,13 +1,13 @@
-'''端到端：图片理解 -> 生成报告（FakeClient，不调真实 API）。'''
+﻿'''端到端：图片理解 -> 生成报告（FakeClient，不调真实 API）。'''
 import pytest
 
-from promptkit.client_sys.client import UnsupportedModality
-from promptkit.core.content import TextPart
-from promptkit.core.display_sys.render import Verbosity
-from promptkit.core.steps.actions.llm import LLMStep
-from promptkit.core.steps.logics.var import Var
-from promptkit.core.steps.workflow import Workflow
-from promptkit.prompt import Prompt
+from aipykit.client_sys.client import UnsupportedModality
+from aipykit.core.content import TextPart
+from aipykit.core.display_sys.render import Verbosity
+from aipykit.core.steps.actions.llm import LLMStep
+from aipykit.core.steps.logics.var import Var
+from aipykit.core.steps.workflow import Workflow
+from aipykit.prompt import Prompt
 
 from .conftest import client_of, make_agent
 

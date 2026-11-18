@@ -1,11 +1,11 @@
-'''阶段 3：system_prompt 环境事实、批量加载、多包合并去重。'''
+﻿'''阶段 3：system_prompt 环境事实、批量加载、多包合并去重。'''
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from promptkit.skill import (
+from aipykit.skill import (
     DuplicateToolError,
     SkillPackage,
     load_skills_from_dir,

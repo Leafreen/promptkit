@@ -1,16 +1,16 @@
-'''解释器解析：优先级、错误处理与技能包虚拟环境探测。'''
+﻿'''解释器解析：优先级、错误处理与技能包虚拟环境探测。'''
 import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from promptkit.skill import (
+from aipykit.skill import (
     PythonInterpreterError,
     as_skill_package,
     resolve_python,
 )
-from promptkit.skill.python import ENV_VAR
+from aipykit.skill.python import ENV_VAR
 
 
 @pytest.fixture(autouse=True)

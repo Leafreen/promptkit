@@ -1,4 +1,4 @@
-'''目录式技能包：资源读取、脚本执行、依赖检查、allowed-tools。'''
+﻿'''目录式技能包：资源读取、脚本执行、依赖检查、allowed-tools。'''
 import json
 import sys
 import tempfile
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from promptkit.skill import (
+from aipykit.skill import (
     PathEscapeError,
     ScriptNotFoundError,
     SkillDependencyError,

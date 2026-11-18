@@ -1,4 +1,4 @@
-'''共享工具：多模态测试用的假客户端（不打网络）。
+﻿'''共享工具：多模态测试用的假客户端（不打网络）。
 
 - `FakeChatClient`：对话客户端（`BaseClient` 的鸭子类型），`supports(modality)`
   可配置，`create()` 记录请求、按队列返回固定回复。
@@ -12,8 +12,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
 
-from promptkit.agent import Agent
-from promptkit.client_sys.multimodal import Media, MultimodalResult
+from aipykit.agent import Agent
+from aipykit.client_sys.multimodal import Media, MultimodalResult
 
 
 class _Completion:

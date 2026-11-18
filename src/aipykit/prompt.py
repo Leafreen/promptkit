@@ -1,0 +1,322 @@
+﻿from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Union
+import re
+
+# 注意：core.content / VarExpr 在 _render_part 里惰性 import ——
+# core/__init__.py 会 import 本模块，顶层 import 回去就成循环了。
+# 类型标注走 TYPE_CHECKING，运行时不需要真身。
+if TYPE_CHECKING:
+    from aipykit.core.content import ContentPart
+    from aipykit.core.steps.logics.expr_sys.expr import Expr, VarExpr
+
+#: 没传 content 的哨兵（不能 import core._missing：那会触发 core/__init__ 循环）
+_UNSET = object()
+
+# 可用的提示词角色
+SUPPORTED_ROLES = ("system", "user", "assistant")
+
+# 变量占位符。两种语法的**严格程度不一样**：
+#
+#   {{key}}    规范写法，严格：变量不存在就报错（支持点路径 {{answer.text}}）
+#   ${key}     $$key   兼容写法，宽松：变量不存在就**原样留着**
+#
+# 为什么美元符号要宽松 —— 它和这些东西天生冲突：
+#
+#   LaTeX 公式      $x_1$ / $$y = ax + b$$      （现在是常见需求）
+#   价格            $100 / $1.5
+#   普通文字        「请用 $ 或 $$ 包裹公式」      （$或$ 会被当成变量 `或`）
+#
+# 只要 $ 后面跟着一个词，就必然有歧义。硬报错会让这些完全正常的提示词
+# 直接跑不起来，所以「找不到就不动它」。想要「写错立刻报错」就用 {{}}。
+_VAR_PATTERN = re.compile(
+    r"\{\{\s*([\w.]+)\s*\}\}"      # {{key}}  严格
+    r"|\$\{(\w+)\}"                # ${key}   宽松
+    r"|\$(\w+)(?![\w$])"           # $key     宽松；后面紧跟 $ 的当公式，不认
+)
+
+# 只认 {{key}}：给普通文本用（$ 后面的数字很容易是「价格」而不是变量名）
+_BRACE_PATTERN = re.compile(r"\{\{\s*([\w.]+)\s*\}\}")
+
+
+def _walk(value: object, part: str, full_key: str) -> object:
+    '''从对象 / 字典 / 列表里取出一个路径片段。'''
+    if isinstance(value, dict):
+        if part in value:
+            return value[part]
+    elif isinstance(value, (list, tuple)):
+        index = part[1:] if part.startswith("-") else part
+        if index.isdigit():
+            position = int(part)
+            if -len(value) <= position < len(value):
+                return value[position]
+    elif not part.startswith("_") and hasattr(value, part):
+        # 下划线开头的挡掉，避免 {{x.__class__}} 这种意外
+        return getattr(value, part)
+
+    raise KeyError(
+        f"变量 {full_key!r} 里的 {part!r} 取不到："
+        f"{type(value).__name__} 上没有这个字段"
+    )
+
+
+def resolve_variable(key: str, variables: Mapping[str, object]) -> object:
+    '''按名字取变量，支持点路径。
+
+    `key` 精确命中就用它（所以真的有个 key 叫 "a.b" 也不会被拆开）；
+    否则按 `.` 拆开逐段走属性 / 字典键 / 列表下标：
+
+        {{intent}}            整个对象
+        {{intent.label}}      Pydantic 字段 / 对象属性
+        {{hits.0.text}}       列表下标
+    '''
+    if key in variables:
+        return variables[key]
+
+    if "." in key:
+        head, _, rest = key.partition(".")
+        if head in variables:
+            value: object = variables[head]
+            for part in rest.split("."):
+                if part:
+                    value = _walk(value, part, key)
+            return value
+
+    available = ", ".join(sorted(map(str, variables))) or "（空）"
+    raise KeyError(f"变量 {key!r} 不存在；当前可用：{available}")
+
+
+def render_text(
+    text: str, variables: Mapping[str, object], *, allow_dollar: bool = True
+) -> str:
+    '''把文本里的变量占位符替换成变量的值。
+
+    两种语法的严格程度不同（见 `_VAR_PATTERN` 上面的说明）：
+
+    - `{{key}}`：变量不存在 -> 抛 `KeyError`（带上可用变量名）
+    - `$key` / `${key}`：变量不存在 -> **原样留着**，因为 `$` 和公式 / 价格冲突
+
+    `allow_dollar=False` 时不认任何 `$` 写法，只认 `{{key}}`。
+    '''
+    pattern = _VAR_PATTERN if allow_dollar else _BRACE_PATTERN
+
+    def replace(match: "re.Match[str]") -> str:
+        braced = match.group(1)
+        if braced is not None:
+            return str(resolve_variable(braced, variables))
+
+        # 美元符号写法：拿不准就放过，别把公式和价格搅碎
+        key = match.group(2) or match.group(3)
+        if key not in variables:
+            return match.group(0)
+        return str(variables[key])
+
+    return pattern.sub(replace, text)
+
+
+@dataclass(frozen=True, init=False)
+class Prompt:
+    '''
+    提示词对象，支持可变提示词和多模态内容。
+
+    - 变量使用 {{key}} 表示，key 是变量名（也兼容 ${key} / $key）
+    - 支持点路径：{{user.name}} / {{hits.0.text}}
+    - 使用 render(**kwargs) 渲染该对象，返回 OpenAI 支持的消息格式
+    - `content` 为字符串时行为不变；为列表时按部件渲染（见 `_render_part`）
+
+    构造方式（role 省略时默认 "user"）：
+
+        Prompt(role="user", content="你好，{{name}}")
+        Prompt("user", "你好，{{name}}")          # 角色在前，兼容位置参数
+        Prompt(content=ImagePart(Var("img")))     # 单个部件
+        Prompt(TextPart("描述这张图"), ImagePart(Var("img")))   # 多个部件
+        Prompt(ImagePart(Var("img")))             # 只有一个图片部件
+
+    示例：
+        >>> Prompt(role="user", content="你好，{{name}}").render(name="小明")
+        {'role': 'user', 'content': '你好，小明'}
+
+        >>> Prompt(role="user", content=[
+        ...     TextPart("描述这张图"),
+        ...     Var("photo", type=ImagePart),
+        ... ]).render(photo="cat.png")
+        {'role': 'user', 'content': [{'type': 'text', 'text': '描述这张图'},
+                                     {'type': 'image', 'source': 'cat.png', ...}]}
+
+        >>> Prompt(ImagePart(Var("img"))).render(img="cat.png")
+        {'role': 'user', 'content': [{'type': 'image', 'source': 'cat.png', ...}]}
+    '''
+
+    role: str
+    # 注意：列表里 Expr 是宽类型（包含 VarExpr + CallExpr + 纯 Var(...) 的 SetStep 等），
+    # 方便用户写 Prompt(content=[TextPart(...), Var("x")])；
+    # 运行时 _render_part 只处理 VarExpr 和 ContentPart，其他的进来直接 TypeError。
+    content: "Union[str, List[Union[str, ContentPart, Expr]]]"
+
+    def __init__(
+        self,
+        *args: object,
+        role: Optional[str] = None,
+        content: object = _UNSET,
+    ) -> None:
+        '''支持三种写法：`(role, content)` 位置参数、`role=/content=`、
+        以及直接传入若干内容部件（role 默认 "user"）。
+        '''
+        rest = list(args)
+        resolved_role = "user" if role is None else role
+        if (
+            role is None
+            and rest
+            and isinstance(rest[0], str)
+            and rest[0] in SUPPORTED_ROLES
+        ):
+            resolved_role = rest[0]
+            rest.pop(0)
+
+        if content is _UNSET:
+            if not rest:
+                content = ""
+            elif len(rest) == 1:
+                content = rest[0]
+            else:
+                content = rest
+        elif rest:
+            raise TypeError("Prompt 的 content 不能同时用位置参数和关键字参数传入")
+
+        # 统一成「字符串 or 列表」，下游（LLMStep.build_prompt 等）可以直接展开
+        # （不能对 content 用 != 比较：Expr 重载了 __ne__，会返回表达式而不是 bool）
+        if isinstance(content, tuple):
+            content = list(content)
+        elif not isinstance(content, (str, list)):
+            content = [content]
+
+        object.__setattr__(self, "role", resolved_role)
+        object.__setattr__(self, "content", content)
+
+    def render(self, **kwargs: object) -> Dict[str, Any]:
+        '''渲染该对象，返回支持的消息格式。'''
+        if self.role not in SUPPORTED_ROLES:
+            raise ValueError(
+                f"暂不支持该角色：{self.role!r}，可选：{', '.join(SUPPORTED_ROLES)}"
+            )
+        if isinstance(self.content, str):
+            return {"role": self.role, "content": render_text(self.content, kwargs)}
+        parts = [self._render_part(item, kwargs) for item in self._items()]
+        return {"role": self.role, "content": parts}
+
+    def _items(self) -> List[Any]:
+        '''把 content 统一成部件列表（单个部件也包成列表）。'''
+        if isinstance(self.content, list):
+            return list(self.content)
+        if isinstance(self.content, tuple):
+            return list(self.content)
+        return [self.content]
+
+    def _render_part(
+        self, item: "Union[str, ContentPart, Expr]", kwargs: Mapping[str, object]
+    ) -> Dict[str, Any]:
+        '''渲染一个内容部件，返回 JSON 可序列化的字典。
+
+        - `str` / `TextPart`：走模板替换
+        - `Var(...)`（VarExpr）：解析成 `ContentPart`；解析出字符串时按扩展名推断
+          （`.png` -> ImagePart，`.pdf` -> FilePart，其他 -> TextPart），
+          声明了 `type=` 时校验，不匹配抛 `TypeError`
+        - `ImagePart(Var("img"))` 这类部件：解析内部的 Var，再渲染
+        - 其他部件：原样保留
+        - SetStep / CallExpr 等非 VarExpr 的 Expr：抛 `TypeError`（Prompt 里不该
+          出现赋值或函数调用）
+        '''
+        from aipykit.core.content import TextPart, part_from_any
+        from aipykit.core.steps.logics.expr_sys.expr import Expr, VarExpr
+
+        if isinstance(item, VarExpr):
+            value = resolve_variable(item.var, kwargs)
+            if item.type is str:
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"变量 {item.var!r} 期望 str，实际是 {type(value).__name__}"
+                    )
+                return TextPart(text=value).to_dict()
+            part = part_from_any(value)
+            item.check_type(part)
+            return part.to_dict()
+        if isinstance(item, Expr):
+            raise TypeError(
+                f"Prompt content 里只接受 str / ContentPart / Var(...)，"
+                f"不能放 {type(item).__name__}（试试把它先赋给变量再用 Var(变量名)）"
+            )
+        if isinstance(item, str):
+            item = TextPart(text=item)
+        if isinstance(item, TextPart):
+            return TextPart(text=render_text(item.text, kwargs)).to_dict()
+        return self._resolve_part(item, kwargs).to_dict()
+
+    def _resolve_part(
+        self, item: "ContentPart", kwargs: Mapping[str, object]
+    ) -> "ContentPart":
+        '''解析部件内部的 `Var(...)`（目前支持媒体部件的 `source`）。
+
+        `ImagePart(Var("img"))`：变量是字符串时按 URL / 本地路径处理；
+        是同类部件（ImagePart）时直接取它的来源字段。详细原因见测试。
+        '''
+        from dataclasses import replace
+        import mimetypes
+
+        from aipykit.core.content import TextPart
+        from aipykit.core.steps.logics.expr_sys.expr import Expr, VarExpr
+
+        if isinstance(item, TextPart):
+            return item
+
+        # content 的字段类型标注是 str，但运行时允许 Var(...)，这里按 Any 处理
+        source: Any = getattr(item, "source", None)
+        if not isinstance(source, VarExpr):
+            if isinstance(source, Expr):
+                raise TypeError(
+                    f"{type(item).__name__} 的 source 只接受字符串或 Var(...)，"
+                    f"不能放 {type(source).__name__}"
+                )
+            return item
+
+        value = resolve_variable(source.var, kwargs)
+        if isinstance(value, TextPart):
+            raise TypeError(
+                f"变量 {source.var!r} 是文本部件，不能当作 {type(item).__name__} 的来源"
+            )
+        if hasattr(value, "source"):
+            if not isinstance(value, type(item)):
+                raise TypeError(
+                    f"变量 {source.var!r} 期望 {type(item).__name__}，"
+                    f"实际是 {type(value).__name__}"
+                )
+            return replace(
+                item,
+                source=value.source,
+                source_type=value.source_type,
+                media_type=item.media_type or value.media_type,
+            )
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise ValueError(
+                    f"变量 {source.var!r} 是空字符串，不能当作 {type(item).__name__} 的来源"
+                )
+            guessed, _ = mimetypes.guess_type(text.split("?")[0])
+            return replace(
+                item,
+                source=value,
+                source_type="url" if text.startswith(("http://", "https://")) else "file",
+                media_type=item.media_type or guessed,
+            )
+        raise TypeError(
+            f"变量 {source.var!r} 的类型是 {type(value).__name__}，"
+            f"不能当作 {type(item).__name__} 的来源"
+        )
+
+    def _render_text(self, text: str, kwargs: Mapping[str, object]) -> str:
+        '''渲染文本，替换其中的变量占位符。'''
+        return render_text(text, kwargs)
+
+
+def render_messages(prompts: List[Prompt], **kwargs: object) -> List[Dict[str, Any]]:
+    '''批量渲染多个 Prompt，返回消息列表。'''
+    return [p.render(**kwargs) for p in prompts]

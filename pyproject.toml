@@ -30,31 +30,39 @@ dependencies = [
 rich = ["rich>=13"]
 
 # 终端渲染（rich）。
-# 公式渲染内置零依赖的 Unicode 映射；装了 TeXicode（`txc`）会自动增强。
-render = ["rich>=13"]
+# 公式渲染内置零依赖的 Unicode 映射；TeXicode 零依赖，装上即自动增强。
+# 图表：termaid 把 ```mermaid 画成字符画（纯 Python、零依赖）；
+# DOT 走 phart / graph-easy 命令行（可选，不属于 Python 依赖）。
+render = ["rich>=13", "termaid>=0.12", "TeXicode>=1.0"]
 
 # 终端对话界面：EnableTUI() 用 rich + prompt_toolkit，fullscreen=True 用 Textual。
-tui = ["rich>=13", "prompt_toolkit>=3.0", "textual>=1.0"]
+tui = [
+    "rich>=13",
+    "prompt_toolkit>=3.0",
+    "textual>=1.0",
+    "termaid>=0.12",
+    "TeXicode>=1.0",
+]
 
 # YamlFormatter 需要 pyyaml，其余地方零依赖
 yaml = ["pyyaml>=6"]
 mcp = ["mcp>=1.0"]
 dev = ["pytest>=8", "mypy>=1.10"]
 
-# src 布局：包位于 src/promptkit/，用 packages.find 自动发现全部子包
+# src 布局：包位于 src/aipykit/，用 packages.find 自动发现全部子包
 #（含 core.steps.logics.expr_sys 这类深层子包）。
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-promptkit = [".env.example"]
+aipykit = [".env.example"]
 
 # 类型检查基线：先「检查带注解的函数」，不强制所有函数都写注解。
 # 待 `docs/typing-any-audit.md` 的分批计划推进后再逐步收紧
 # （check_untyped_defs → disallow_untyped_defs → disallow_any_explicit）。
 [tool.mypy]
 python_version = "3.10"
-files = ["src/promptkit"]
+files = ["src/aipykit"]
 check_untyped_defs = false
 disallow_untyped_defs = false
 disallow_any_explicit = false

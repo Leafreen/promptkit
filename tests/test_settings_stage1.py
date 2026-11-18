@@ -1,4 +1,4 @@
-# tests/test_settings_stage1.py
+﻿# tests/test_settings_stage1.py
 '''阶段 1：Settings 不可变 + Workflow 级覆盖的验收测试。'''
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from promptkit.core import (
+from aipykit.core import (
     Const,
     Context,
     LoopLimitExceeded,
     While,
     Workflow,
 )
-from promptkit.core.settings import (
+from aipykit.core.settings import (
     Settings,
     reset_settings,
     settings,

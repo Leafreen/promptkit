@@ -1,4 +1,4 @@
-# tests/mcp/test_e2e_agent.py
+﻿# tests/mcp/test_e2e_agent.py
 '''端到端：Agent → MCPTool 调用流程（FakeLLMClient + FakeMCPClient）。
 
 两个场景：
@@ -15,14 +15,14 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
-from promptkit.agent import Agent
-from promptkit.core.context import Context
-from promptkit.core.tool.base import Tool
-from promptkit.core.tool.registry import ToolRegistry
-from promptkit.core.steps.actions.mcp_step import MCPToolStep
-from promptkit.mcp.hooks import HookRegistry
-from promptkit.mcp.security import register_mcp_security
-from promptkit.mcp.tool import MCPTool
+from aipykit.agent import Agent
+from aipykit.core.context import Context
+from aipykit.core.tool.base import Tool
+from aipykit.core.tool.registry import ToolRegistry
+from aipykit.core.steps.actions.mcp_step import MCPToolStep
+from aipykit.mcp.hooks import HookRegistry
+from aipykit.mcp.security import register_mcp_security
+from aipykit.mcp.tool import MCPTool
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-'''时间戳 / 计时器：`GET_TIME`、`TIMER`、到点提醒插进对话。
+﻿'''时间戳 / 计时器：`GET_TIME`、`TIMER`、到点提醒插进对话。
 
 `ALARMS` 是进程级队列，所以每个用例结束都要清空 —— 否则一个用例里
 没到点的计时器会在另一个用例调模型时突然冒出提醒。
@@ -9,10 +9,10 @@ from unittest import mock
 
 import pytest
 
-from promptkit.agent import Agent
-from promptkit.core.context import Context
-from promptkit.core.steps.actions.chat_util import CHAT_TIME_KEY, ChatLoop
-from promptkit.core.steps.actions.clock import (
+from aipykit.agent import Agent
+from aipykit.core.context import Context
+from aipykit.core.steps.actions.chat_util import CHAT_TIME_KEY, ChatLoop
+from aipykit.core.steps.actions.clock import (
     Now,
     ProactiveAlarms,
     StartTimer,
@@ -20,7 +20,7 @@ from promptkit.core.steps.actions.clock import (
     TimeStamp,
     WaitAlarm,
 )
-from promptkit.core.tool import (
+from aipykit.core.tool import (
     ALARMS,
     GET_TIME,
     AlarmRunner,

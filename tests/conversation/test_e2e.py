@@ -1,18 +1,18 @@
-'''端到端测试：Snapshot -> Branches -> Merge 完整流程（FakeClient，无真实 API）。'''
+﻿'''端到端测试：Snapshot -> Branches -> Merge 完整流程（FakeClient，无真实 API）。'''
 from .fake_client import make_agent
 
-from promptkit.conversation.semantic import (
+from aipykit.conversation.semantic import (
     Branch,
     Branches,
     Merge,
     Snapshot,
     branch_key,
 )
-from promptkit.conversation.steps import session_from_context
-from promptkit.core.context import Context
-from promptkit.core.display_sys.render import Verbosity
-from promptkit.core.steps.interface import Step
-from promptkit.core.steps.workflow import Workflow
+from aipykit.conversation.steps import session_from_context
+from aipykit.core.context import Context
+from aipykit.core.display_sys.render import Verbosity
+from aipykit.core.steps.interface import Step
+from aipykit.core.steps.workflow import Workflow
 
 
 class BranchAskStep(Step):

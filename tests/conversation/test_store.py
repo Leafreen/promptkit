@@ -1,9 +1,9 @@
-'''Store 单元测试：InMemory / SQLite 的读写、删除、JSON 序列化与隔离。'''
+﻿'''Store 单元测试：InMemory / SQLite 的读写、删除、JSON 序列化与隔离。'''
 import sqlite3
 
-from promptkit.conversation.message import Message
-from promptkit.conversation.session import Session, SessionState
-from promptkit.conversation.store import InMemorySessionStore, SQLiteSessionStore
+from aipykit.conversation.message import Message
+from aipykit.conversation.session import Session, SessionState
+from aipykit.conversation.store import InMemorySessionStore, SQLiteSessionStore
 
 
 def test_in_memory_store_saves_copies():

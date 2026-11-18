@@ -1,4 +1,4 @@
-'''阶段 3 验收：`Call` 收敛为可注册、可序列化的 `Transform`。
+﻿'''阶段 3 验收：`Call` 收敛为可注册、可序列化的 `Transform`。
 
 覆盖：
 - 未注册的名字在**构造时**就抛 `UnknownTransformError`
@@ -12,7 +12,7 @@ import warnings
 
 import pytest
 
-from promptkit.core import (
+from aipykit.core import (
     Call,
     Context,
     Expr,

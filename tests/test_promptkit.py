@@ -1,4 +1,4 @@
-'''promptkit 的冒烟测试 —— 不需要网络和 API Key，直接运行：
+﻿﻿﻿'''promptkit 的冒烟测试 —— 不需要网络和 API Key，直接运行：
 
     python tests/test_promptkit.py
 '''
@@ -20,37 +20,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from openai.types.chat import ChatCompletionMessage  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
-from promptkit.agent import Agent, ToolLoopExceeded, load_env_file  # noqa: E402
-from promptkit.executor import (  # noqa: E402
+from aipykit.agent import Agent, ToolLoopExceeded, load_env_file  # noqa: E402
+from aipykit.executor import (  # noqa: E402
     Executor,
     MaxRetriesExceeded,
     OutputValidationError,
 )
-from promptkit.prompt import Prompt, render_messages, render_text  # noqa: E402
-from promptkit.core.model_action.caution_related.caution import (  # noqa: E402
+from aipykit.prompt import Prompt, render_messages, render_text  # noqa: E402
+from aipykit.core.model_action.caution_related.caution import (  # noqa: E402
     join_cautions,
 )
-from promptkit.core.event_sys import (  # noqa: E402
+from aipykit.core.event_sys import (  # noqa: E402
     Event,
     EventBus,
     EventType,
     emit,
     extract_reasoning,
 )
-from promptkit.core.display_sys.display import (  # noqa: E402
+from aipykit.core.display_sys.display import (  # noqa: E402
     collect_events,
     console_display,
     filter_events,
     json_display,
 )
-from promptkit.core.tool import RUN_COMMAND  # noqa: E402
-from promptkit.core.tool import (  # noqa: E402
+from aipykit.core.tool import RUN_COMMAND  # noqa: E402
+from aipykit.core.tool import (  # noqa: E402
     DEFAULT_ALLOWED_EXTENSIONS,
     WRITE_FILE,
     WriteFile,
 )
-from promptkit.core.tool.builtin.run_command import _decode, run_command  # noqa: E402
-from promptkit.core.tool.builtin.web_search import (  # noqa: E402
+from aipykit.core.tool.builtin.run_command import _decode, run_command  # noqa: E402
+from aipykit.core.tool.builtin.web_search import (  # noqa: E402
     BaiduBackend,
     BingCnBackend,
     BochaBackend,
@@ -76,7 +76,7 @@ from promptkit.core.tool.builtin.web_search import (  # noqa: E402
     resolve_baidu_target,
     unwrap_url,
 )
-from promptkit.api import (  # noqa: E402
+from aipykit.api import (  # noqa: E402
     Assert,
     AssertionAdapter,
     AssertionFailed,
@@ -89,7 +89,7 @@ from promptkit.api import (  # noqa: E402
     assertion_adapters,
     use_hooks,
 )
-from promptkit.cautions import (  # noqa: E402
+from aipykit.cautions import (  # noqa: E402
     ANALYST,
     CODE_ONLY,
     GROUNDED,
@@ -120,26 +120,26 @@ from promptkit.cautions import (  # noqa: E402
     translator,
     tutor,
 )
-from promptkit.core.model_action.caution_related.caution import (  # noqa: E402
+from aipykit.core.model_action.caution_related.caution import (  # noqa: E402
     WORKFLOW_CAUTIONS_KEY,
     CautionGroup,
     resolve_cautions,
 )
-from promptkit.core.model_action.defaults import (  # noqa: E402
+from aipykit.core.model_action.defaults import (  # noqa: E402
     add_default_caution,
     clear_default_cautions,
     get_default_cautions,
     set_default_cautions,
     using_default_cautions,
 )
-from promptkit.core.settings import (  # noqa: E402
+from aipykit.core.settings import (  # noqa: E402
     Settings,
     reset_settings,
     settings,
     settings_names,
     using_settings,
 )
-from promptkit.core.display_sys.render import (  # noqa: E402
+from aipykit.core.display_sys.render import (  # noqa: E402
     HAVE_RICH,
     HAVE_TEXICODE,
     Verbosity,
@@ -157,13 +157,13 @@ from promptkit.core.display_sys.render import (  # noqa: E402
     texicode_render,
     get_console,
 )
-from promptkit.core.display_sys.runlog import (  # noqa: E402
+from aipykit.core.display_sys.runlog import (  # noqa: E402
     close_logging,
     get_logger,
     log_display,
     setup_logging,
 )
-from promptkit.client_sys import (  # noqa: E402
+from aipykit.client_sys import (  # noqa: E402
     AnthropicClient,
     BaseClient,
     ClientError,
@@ -179,8 +179,8 @@ from promptkit.client_sys import (  # noqa: E402
     resolve_target,
     vendor_names,
 )
-from promptkit.core.steps.actions.interactive import VERBOSITY_KEY  # noqa: E402
-from promptkit.core.steps.actions.chat_util import (  # noqa: E402
+from aipykit.core.steps.actions.interactive import VERBOSITY_KEY  # noqa: E402
+from aipykit.core.steps.actions.chat_util import (  # noqa: E402
     DEFAULT_EXIT_WORDS,
     Behavior,
     ChatLoop,
@@ -198,17 +198,17 @@ from promptkit.core.steps.actions.chat_util import (  # noqa: E402
     flatten_single,
     MakeFile,
 )
-from promptkit.core.steps.chat import (  # noqa: E402
+from aipykit.core.steps.chat import (  # noqa: E402
     ChatWorkflow,
     Deliverable,
     chat_workflow,
 )
-from promptkit.session import (  # noqa: E402
+from aipykit.session import (  # noqa: E402
     SESSION_VERSION,
     Session,
     as_session,
 )
-from promptkit.memory import (  # noqa: E402
+from aipykit.memory import (  # noqa: E402
     BACKENDS,
     FolderVectorStore,
     InMemoryMemory,
@@ -238,7 +238,7 @@ from promptkit.memory import (  # noqa: E402
     register_memory_backend,
     safe_namespace_name,
 )
-from promptkit.memory.adapters import (  # noqa: E402
+from aipykit.memory.adapters import (  # noqa: E402
     ChromaVectorStore,
     CohereReranker,
     CrossEncoderReranker,
@@ -249,7 +249,7 @@ from promptkit.memory.adapters import (  # noqa: E402
     QdrantVectorStore,
     SentenceTransformerEmbedding,
 )
-from promptkit.core import (  # noqa: E402
+from aipykit.core import (  # noqa: E402
     ForgetMemory,
     MemoryStep,
     ReadMemory,
@@ -258,8 +258,8 @@ from promptkit.core import (  # noqa: E402
     WriteMemory,
     format_recalled,
 )
-from promptkit.agent import normalize_history  # noqa: E402
-from promptkit.core.model_action.caution_related.formatter import (  # noqa: E402
+from aipykit.agent import normalize_history  # noqa: E402
+from aipykit.core.model_action.caution_related.formatter import (  # noqa: E402
     FormatterError,
     JsonFormatter,
     RegexFormatter,
@@ -269,20 +269,20 @@ from promptkit.core.model_action.caution_related.formatter import (  # noqa: E40
 )
 from promptkit import features  # noqa: E402
 
-from promptkit.knowledge import (  # noqa: E402
+from aipykit.knowledge import (  # noqa: E402
     FORMAT_VERSION,
     KnowledgeBase,
     chunk_text,
     token_weight,
     tokenize,
 )
-from promptkit.core.tool import (  # noqa: E402
+from aipykit.core.tool import (  # noqa: E402
     Tool,
     as_tool,
     schema_from_signature,
     tool,
 )
-from promptkit.core import (  # noqa: E402
+from aipykit.core import (  # noqa: E402
     And,
     ArgumentError,
     BinaryExpr,
@@ -362,8 +362,8 @@ from promptkit.core import (  # noqa: E402
     Workflow,
     WorkflowError,
 )
-from promptkit.core.steps.actions.message import MessageStep  # noqa: E402
-from promptkit.core import (  # noqa: E402
+from aipykit.core.steps.actions.message import MessageStep  # noqa: E402
+from aipykit.core import (  # noqa: E402
     # 语义条件：Intent 这个名字在本文件里已经被 pydantic 模型占了，别名导入
     Intent as SemanticIntent,
     Classify,
@@ -3376,7 +3376,7 @@ class TestPackaging(PromptkitTestCase):
         self.assertNotIn("package-dir", tool, "src 布局不应再映射 package-dir")
         self.assertEqual(tool["packages"]["find"]["where"], ["src"])
         project = config["project"]
-        self.assertEqual(project["name"], "promptkit")
+        self.assertEqual(project["name"], "aipykit")
         self.assertIn("openai", " ".join(project["dependencies"]))
         self.assertIn("pydantic", " ".join(project["dependencies"]))
 
@@ -4437,6 +4437,28 @@ class TestAgentStreaming(PromptkitTestCase):
         list(agent.ask_stream("你好"))
         # 自己迭代时不再往总线发，避免显示两遍
         self.assertEqual(events, [])
+
+    def test_stream_yields_usage_before_message_end(self):
+        '''流式的最后一个 usage chunk 要变成 USAGE 事件（思考 token 也算在内）。'''
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=1200, completion_tokens=30, total_tokens=1230
+            ),
+        )
+        agent = fake_agent([[*stream_chunks(["hi"], reasoning=["嗯"]), usage_chunk]])
+        events = list(agent.ask_stream("hi"))
+        types = [event.type for event in events]
+        self.assertEqual(types[-2:], [EventType.USAGE, EventType.MESSAGE_END])
+        usage = events[types.index(EventType.USAGE)].data
+        self.assertEqual(usage["prompt_tokens"], 1200)
+        self.assertEqual(usage["completion_tokens"], 30)
+        self.assertEqual(usage["total_tokens"], 1230)
+
+    def test_stream_without_usage_chunk_emits_no_usage(self):
+        agent = fake_agent([stream_chunks(["hi"])])
+        events = list(agent.ask_stream("hi"))
+        self.assertNotIn(EventType.USAGE, [event.type for event in events])
 
     def test_streaming_tool_calls_are_reassembled(self):
         def get_weather(city: str) -> str:
@@ -7289,6 +7311,9 @@ class TestMathRendering(PromptkitTestCase):
         self.assertTrue(needs_art(r"\sqrt{x}"))
         self.assertFalse(needs_art(r"\beta_0 + \beta_1 x_1"))
         self.assertFalse(needs_art("x^2 + 1"))
+        # 矩阵写成 `\begin{...}`：环境名前隔着 `\begin{`，不能漏掉
+        self.assertTrue(needs_art(r"\begin{pmatrix}1&2\\3&4\end{pmatrix}"))
+        self.assertTrue(needs_art(r"\begin{cases}x&x>0\\0&x\le 0\end{cases}"))
 
     def test_render_math_caches(self):
         render_math.cache_clear() if hasattr(render_math, "cache_clear") else None
@@ -7314,8 +7339,21 @@ class TestMathRendering(PromptkitTestCase):
             return_value=proc,
         ) as run:
             self.assertEqual(texicode_render(r"\frac{a}{b}"), "a\n─\nb")
-            self.assertEqual(run.call_args.args[0][0], "txc")
+            self.assertTrue(run.call_args.args[0][0].lower().endswith("txc")
+                            or run.call_args.args[0][0].lower().endswith("txc.exe"))
             self.assertEqual(run.call_args.args[0][1], r"\frac{a}{b}")
+
+    def test_texicode_input_is_sanitized(self):
+        '''`\\boxed` 会变成 `?`、`\\\\[2mm]` 会漏出 `[2mm]`，送去之前要先清掉。'''
+        proc = mock.Mock(returncode=0, stdout="ok")
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ) as run:
+            texicode_render(r"\boxed{a \\[2mm] b}")
+            self.assertEqual(run.call_args.args[0][1], r"a \\ b")
 
     def test_texicode_render_returns_none_on_failure(self):
         cases = [
@@ -7339,6 +7377,58 @@ class TestMathRendering(PromptkitTestCase):
             side_effect=OSError("boom"),
         ):
             self.assertIsNone(texicode_render(r"\frac{a}{b}"))
+
+    def test_texicode_renders_unsupported_commands_without_placeholder(self):
+        '''TeXicode 不认的命令要先降级，别把 `?` 占位符印进答案。'''
+        proc = mock.Mock(returncode=0, stdout="ok")
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ) as run:
+            texicode_render(
+                r"\begin{array}{c|c}a&b\end{array} E=mc^2\tag{1} "
+                r"a\not=b \overset{n}{\sum} \phantom{xx} \color{red}{y}"
+            )
+            sent = run.call_args.args[0][1]
+        self.assertNotIn("|", sent)          # array 列格式里的竖线
+        self.assertNotIn("tag", sent)        # 题号
+        self.assertNotIn("phantom", sent)    # 占位
+        self.assertNotIn("color", sent)      # 颜色命令
+        self.assertNotIn(r"\not=", sent)     # 换成 \neq
+        self.assertIn(r"\neq", sent)
+        self.assertIn(r"{\sum}^{n}", sent)   # overset 降级成上标
+
+    def test_texicode_error_output_falls_back(self):
+        '''txc 有些失败仍 exit 0，把错误写到 stdout —— 不能当成公式显示。'''
+        proc = mock.Mock(
+            returncode=0,
+            stdout="TeXicode: rendering error: Unsupported column spec 'c|c'",
+            stderr="",
+        )
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ):
+            self.assertIsNone(texicode_render(r"\begin{array}{c|c}a&b\end{array}"))
+
+    def test_vmatrix_is_drawn_with_vertical_bars(self):
+        '''行列式两边要是竖线：TeXicode 原样画的是 `⎟`（右括号延伸符）。'''
+        proc = mock.Mock(returncode=0, stdout="⎡a b⎤\n⎣c d⎦\n", stderr="")
+        with mock.patch(
+            "promptkit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "promptkit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ) as run:
+            art = texicode_render(r"\begin{vmatrix}a&b\\c&d\end{vmatrix}")
+            sent = run.call_args.args[0][1]
+        # 送去渲染的是 bmatrix（方括号），拿回来再换成竖线
+        self.assertEqual(sent, r"\begin{bmatrix}a&b\\c&d\end{bmatrix}")
+        self.assertEqual(art, "⎢a b⎥\n⎢c d⎥")
 
     def test_render_math_prefers_texicode_for_complex(self):
         with mock.patch(
@@ -7561,6 +7651,33 @@ class TestEchoRender(PromptkitTestCase):
         captured = io.StringIO()
         Workflow(Echo("x", render="plain")).run(out=captured)
         self.assertEqual(captured.getvalue().strip(), "x")
+
+
+class TestEchoNotification(PromptkitTestCase):
+    '''`Echo(notify=...)` 的通知事件。'''
+
+    def test_notification_is_off_by_default(self):
+        handler, events = collect_events()
+        Workflow(Echo("普通输出")).run(on_event=handler, out=io.StringIO())
+        self.assertFalse(
+            any(event.type == EventType.NOTIFICATION for event in events)
+        )
+
+    def test_notification_contains_rendered_text_and_title(self):
+        handler, events = collect_events()
+        captured = io.StringIO()
+        Workflow(
+            Echo("重试 {{target}}", title="状态", notify=True)
+        ).run(on_event=handler, out=captured, target="对话")
+
+        notifications = [
+            event for event in events if event.type == EventType.NOTIFICATION
+        ]
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(
+            notifications[0].data, {"text": "重试 对话", "title": "状态"}
+        )
+        self.assertIn("重试 对话", captured.getvalue())
 
 
 class TestLogDisplay(PromptkitTestCase):
@@ -7897,6 +8014,164 @@ class TestRenderExports(PromptkitTestCase):
         self.assertEqual([n for n in core.__all__ if not hasattr(core, n)], [])
 
 
+class TestDiagramSubstitution(PromptkitTestCase):
+    '''```mermaid / ```dot 代码块 -> 字符画；后端缺失时保留源码。'''
+
+    def test_mermaid_block_is_replaced_with_art(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "看图：\n\n```mermaid\nflowchart LR\n A --> B\n```\n"
+        with mock.patch.object(render_mod, "_render_mermaid", return_value="┌─┐\n│A│\n└─┘"):
+            out = render_mod.substitute_diagrams(source)
+        self.assertIn("│A│", out)
+        self.assertIn("```text", out)
+        self.assertNotIn("flowchart LR", out)
+
+    def test_dot_block_goes_through_dot_renderer(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```dot\ndigraph G { A -> B }\n```"
+        with mock.patch.object(render_mod, "_render_dot", return_value="树形图") as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_called_once()
+        self.assertIn("树形图", out)
+
+    def test_missing_backend_keeps_source(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```mermaid\nflowchart LR\n A --> B\n```"
+        with mock.patch.object(render_mod, "_render_mermaid", return_value=None):
+            out = render_mod.substitute_diagrams(source)
+        self.assertEqual(out, source)
+
+    def test_prefer_diagrams_false_keeps_source(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```mermaid\nflowchart LR\n A --> B\n```"
+        self.assertEqual(
+            render_mod.substitute_diagrams(source, prefer_diagrams=False), source
+        )
+
+    def test_real_mermaid_renderer_if_installed(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        if not render_mod.HAVE_MERMAID:
+            self.skipTest("没装 mermaid-ascii-diagrams")
+        text = "```mermaid\nflowchart LR\n A[Start] --> B[End]\n```"
+        out = render_mod.substitute_diagrams(text)
+        self.assertIn("┌", out)
+        self.assertIn("Start", out)
+
+    def test_text_fence_with_mermaid_body_is_rendered(self):
+        '''模型常把 Mermaid 写成 ```text：按内容识别后照样画。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```text\nflowchart TD\n A --> B\n```"
+        with mock.patch.object(
+            render_mod, "_render_mermaid", return_value="┌─┐"
+        ) as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_called_once()
+        self.assertIn("┌─┐", out)
+        self.assertNotIn("flowchart TD", out)
+
+    def test_indented_mermaid_block_is_rendered(self):
+        '''没有围栏、只用 4 空格缩进的 Mermaid 也要能画。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "看：\n\n    flowchart TD\n        A --> B\n\n结束"
+        with mock.patch.object(
+            render_mod, "_render_mermaid", return_value="┌─┐"
+        ) as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_called_once()
+        self.assertIn("┌─┐", out)
+        self.assertNotIn("flowchart TD", out)
+
+    def test_any_fence_language_with_mermaid_body_is_rendered(self):
+        '''模型把 Mermaid 标成 ```python 也要按内容认出来。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```python\nflowchart LR\n v1 --> v2\n```"
+        with mock.patch.object(
+            render_mod, "_render_mermaid", return_value="┌─┐"
+        ) as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_called_once()
+        self.assertIn("┌─┐", out)
+        self.assertNotIn("flowchart LR", out)
+
+    def test_unclosed_mermaid_fence_is_rendered(self):
+        '''模型忘了写结尾 ``` 时也要能画。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```mermaid\nflowchart TD\n A --> B"
+        with mock.patch.object(
+            render_mod, "_render_mermaid", return_value="┌─┐"
+        ) as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_called_once()
+        self.assertIn("┌─┐", out)
+        self.assertNotIn("flowchart TD", out)
+
+    def test_unclosed_plain_code_block_is_left_alone(self):
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```python\nprint('hi')"
+        with mock.patch.object(render_mod, "_render_mermaid") as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_not_called()
+        self.assertEqual(out, source)
+
+    def test_real_mermaid_html_entities_are_cleaned(self):
+        '''标签里的 <br/>、&gt; 不能被原样画进图里。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        if not render_mod.HAVE_MERMAID:
+            self.skipTest("没装 mermaid-ascii-diagrams")
+        source = '```mermaid\nflowchart LR\n A["A<br/&gt;0 / 0"] --> B["B"]\n```'
+        out = render_mod.substitute_diagrams(source)
+        # <br/> 被换成换行，&gt; 变成 >，但不能再出现原始 HTML
+        self.assertIn("A", out)
+        self.assertIn("0 / 0", out)
+        self.assertNotIn("&gt;", out)
+        self.assertNotIn("<br", out)
+
+    def test_plain_graph_text_is_not_treated_as_mermaid(self):
+        '''普通文本里以 graph 开头的句子不能被误判成图。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        source = "```text\ngraph theory is fun\n```"
+        with mock.patch.object(render_mod, "_render_mermaid") as patched:
+            out = render_mod.substitute_diagrams(source)
+        patched.assert_not_called()
+        self.assertEqual(out, source)
+
+    def test_real_complex_flowchart_with_back_edges(self):
+        '''带环 / 回边的拓扑排序流程图也应渲染成字符画。'''
+        from promptkit.core.display_sys import render as render_mod
+
+        if not render_mod.HAVE_MERMAID:
+            self.skipTest("没装 mermaid-ascii-diagrams")
+        source = (
+            "```mermaid\n"
+            "flowchart TD\n"
+            '    S["统计每个顶点的入度"] --> Q["入度为 0 的顶点入队"]\n'
+            '    Q --> P["取出队首 u"]\n'
+            "    P --> R[\"遍历 u 的后继\"]\n"
+            '    R --> C{"入度是否为 0？"}\n'
+            '    C -- 是 --> I["v 入队"]\n'
+            '    C -- 否 --> N["检查下一个"]\n'
+            "    I --> P\n"
+            "    N --> P\n"
+            "```"
+        )
+        out = render_mod.substitute_diagrams(source)
+        self.assertIn("┌", out)
+        self.assertIn("统计每个顶点的入度", out)
+        self.assertNotIn("flowchart TD", out)
+
+
 class TestDisplaySysLayering(PromptkitTestCase):
     '''`core/display_sys/` 是叶子层：只管「怎么显示」，不认识 DSL。'''
 
@@ -8152,7 +8427,10 @@ class TestLatexDelimiters(PromptkitTestCase):
             r"\[ \boxed{\displaystyle \frac{1}{n+1}\binom{2n}{n}} \]"
         )
         captured = io.StringIO()
-        render_markdown(source, stream=captured)
+        # 固定走内置渲染器：TeXicode 会把字母渲成斜体数学字符（`2𝑛`），
+        # 这条测的是「内容没丢」，不该随装没装 txc 变化。
+        with using_settings(prefer_texicode=False):
+            render_markdown(source, stream=captured)
         out = captured.getvalue()
         # 定界符和命令都不能漏出去
         for leaked in ("\\[", "\\]", "\\binom", "\\boxed", "\\displaystyle", "\\frac"):
@@ -8257,11 +8535,11 @@ class TestLatexRenderer(PromptkitTestCase):
         self.assertIn("a", text)
         self.assertIn("\n", text)
 
-    # ---------------- TeXicode 默认关闭 ----------------
-    def test_texicode_is_off_by_default(self):
-        '''TeXicode 默认关闭，需显式 settings.prefer_texicode=True 才启用。'''
+    # ---------------- TeXicode 默认开启（装了才生效） ----------------
+    def test_texicode_is_on_by_default(self):
+        '''默认开启：装了 txc 就用，没装自动回退内置。'''
         from promptkit.core.settings import settings
-        self.assertFalse(settings.prefer_texicode)
+        self.assertTrue(settings.prefer_texicode)
 
     # ---------------- 用户的整段推导 ----------------
     def test_the_integral_derivation_renders_cleanly(self):
@@ -8279,7 +8557,9 @@ class TestLatexRenderer(PromptkitTestCase):
             r"\]"
         )
         captured = io.StringIO()
-        render_markdown(source, stream=captured)
+        # 这条测的是**内置**渲染器的保真度，固定走内置，避免装没装 txc 结果不同。
+        with using_settings(prefer_texicode=False):
+            render_markdown(source, stream=captured)
         out = captured.getvalue()
 
         for leaked in ("\\frac", "\\ln", "\\arctan", "\\sqrt", "\\left",
@@ -8306,7 +8586,9 @@ class TestLatexRenderer(PromptkitTestCase):
             r"-\frac{\sqrt5+1}{20}\ln(x^2+\beta x+1) + C \]"
         )
         captured = io.StringIO()
-        render_markdown(body, stream=captured)
+        # 同样固定走内置渲染器：这条测的是 rich 折行不裁内容。
+        with using_settings(prefer_texicode=False):
+            render_markdown(body, stream=captured)
         out = captured.getvalue()
         for fragment in ("ln|x+1|", "α", "β", "x⁵"):
             self.assertIn(fragment, out, f"{fragment} 被裁掉了")
@@ -10921,6 +11203,28 @@ class TestOpenAIClient(PromptkitTestCase):
         self.assertEqual(sdk.calls[0]["tools"], tools)
         self.assertTrue(sdk.calls[0]["stream"])
 
+    def test_stream_requests_usage_chunk(self):
+        '''流式要带 include_usage，服务端才会在末尾补 token 用量。'''
+        sdk = FakeSDK([iter([])])
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
+        client.create(model="m", messages=[], stream=True)
+        self.assertEqual(
+            sdk.calls[0]["stream_options"], {"include_usage": True}
+        )
+
+    def test_explicit_stream_options_win(self):
+        sdk = FakeSDK([iter([])])
+        client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
+        client.create(
+            model="m",
+            messages=[],
+            stream=True,
+            stream_options={"include_usage": False},
+        )
+        self.assertEqual(
+            sdk.calls[0]["stream_options"], {"include_usage": False}
+        )
+
     def test_params_are_passed_through_untouched(self):
         sdk = FakeSDK(["ok"])
         client = OpenAIClient(api_key="k", base_url="https://x/v1", sdk=sdk)
@@ -11625,7 +11929,7 @@ class TestAgentMultiVendor(PromptkitTestCase):
         self.assertEqual(value.label, "退款")
 
 
-from promptkit.coding import (  # noqa: E402
+from aipykit.coding import (  # noqa: E402
     ApplyChanges,
     ApplyDiff,
     ChangesOutput,
@@ -11660,7 +11964,7 @@ from promptkit.coding import (  # noqa: E402
     strip_code_fence,
     validate_patch,
 )
-from promptkit.core.tool.coding import (  # noqa: E402
+from aipykit.core.tool.coding import (  # noqa: E402
     ApplyDiffTool,
     ListDirTool,
     ReadFileTool,
@@ -11670,7 +11974,7 @@ from promptkit.core.tool.coding import (  # noqa: E402
     WriteFileTool,
 )
 
-from promptkit.orchestrate import (  # noqa: E402
+from aipykit.orchestrate import (  # noqa: E402
     API_VERSION,
     AggregateStep,
     BudgetExceeded,
@@ -16191,7 +16495,7 @@ class TestOrchestrateCompat(PromptkitTestCase):
 
 
 # ==================== orchestrate Skill（自包含 skill 组件） ====================
-from promptkit.skill.orchestrate_skill import (  # noqa: E402
+from aipykit.skill.orchestrate_skill import (  # noqa: E402
     OrchestrateSkillSet,
     orchestrate_plan,
     orchestrate_run,
@@ -16404,7 +16708,7 @@ class TestOrchestrateSkill(PromptkitTestCase):
 
 
 # ==================== Skill（可注册的能力单元） ====================
-from promptkit.skill import (  # noqa: E402
+from aipykit.skill import (  # noqa: E402
     Skill,
     SkillAlreadyExists,
     SkillContext,

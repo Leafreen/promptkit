@@ -1,13 +1,13 @@
-# tests/mcp/test_tool.py
+﻿# tests/mcp/test_tool.py
 '''MCPTool 单测 — 用 FakeMCPClient，不连真实 MCP Server。'''
 from __future__ import annotations
 
 import asyncio
 import pytest
 
-from promptkit.core.tool.base import Tool
-from promptkit.mcp.exceptions import MCPToolNotFound
-from promptkit.mcp.tool import MCPTool, _extract_text_content
+from aipykit.core.tool.base import Tool
+from aipykit.mcp.exceptions import MCPToolNotFound
+from aipykit.mcp.tool import MCPTool, _extract_text_content
 from tests.mcp.conftest import (
     FakeCallToolResult,
     FakeMCPClient,

@@ -1,10 +1,10 @@
-'''Session 单元测试：20 个 CRUD、按 id 定位、clone 隔离、持久化容错。'''
+﻿'''Session 单元测试：20 个 CRUD、按 id 定位、clone 隔离、持久化容错。'''
 import pytest
 
-from promptkit.conversation.exceptions import SessionError
-from promptkit.conversation.message import Message
-from promptkit.conversation.session import Session, SessionState
-from promptkit.conversation.store import InMemorySessionStore, SessionStore
+from aipykit.conversation.exceptions import SessionError
+from aipykit.conversation.message import Message
+from aipykit.conversation.session import Session, SessionState
+from aipykit.conversation.store import InMemorySessionStore, SessionStore
 
 
 class BrokenStore(SessionStore):

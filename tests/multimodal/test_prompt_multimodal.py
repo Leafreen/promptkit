@@ -1,9 +1,9 @@
-'''Prompt 多模态渲染：部件列表、Var 解析、模板替换。'''
+﻿'''Prompt 多模态渲染：部件列表、Var 解析、模板替换。'''
 import pytest
 
-from promptkit.core.content import ImagePart, TextPart, part_from_any
-from promptkit.core.steps.logics.var import Var
-from promptkit.prompt import Prompt, render_messages
+from aipykit.core.content import ImagePart, TextPart, part_from_any
+from aipykit.core.steps.logics.var import Var
+from aipykit.prompt import Prompt, render_messages
 
 
 def test_str_content_behavior_unchanged():

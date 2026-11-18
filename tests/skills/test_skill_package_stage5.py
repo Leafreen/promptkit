@@ -1,11 +1,11 @@
-'''阶段 5：run_command 默认关闭 + allow_commands 白名单。'''
+﻿'''阶段 5：run_command 默认关闭 + allow_commands 白名单。'''
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from promptkit.skill import as_skill_package
+from aipykit.skill import as_skill_package
 
 
 @pytest.fixture

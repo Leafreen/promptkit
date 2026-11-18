@@ -1,10 +1,10 @@
-'''阶段 5 验收：`OnError` 兜底、结构化 trace、trace 落盘、ChatTurn 每轮兜底。'''
+﻿'''阶段 5 验收：`OnError` 兜底、结构化 trace、trace 落盘、ChatTurn 每轮兜底。'''
 import json
 from pathlib import Path
 
 import pytest
 
-from promptkit.core import (
+from aipykit.core import (
     Echo,
     FunctionStep,
     OnError,
@@ -14,7 +14,7 @@ from promptkit.core import (
     Workflow,
     WorkflowError,
 )
-from promptkit.core.steps.actions.chat_util import CHAT_ERROR_KEY, ChatTurn
+from aipykit.core.steps.actions.chat_util import CHAT_ERROR_KEY, ChatTurn
 
 
 def _boom(context):

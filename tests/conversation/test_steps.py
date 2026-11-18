@@ -1,10 +1,10 @@
-'''CRUD Step 单元测试：从 ctx["_session"] 取会话、结果写 trace。'''
+﻿'''CRUD Step 单元测试：从 ctx["_session"] 取会话、结果写 trace。'''
 import pytest
 
-from promptkit.conversation.exceptions import SessionError
-from promptkit.conversation.message import Message
-from promptkit.conversation.session import Session
-from promptkit.conversation.steps import (
+from aipykit.conversation.exceptions import SessionError
+from aipykit.conversation.message import Message
+from aipykit.conversation.session import Session
+from aipykit.conversation.steps import (
     SESSION_KEY,
     SessionAppend,
     SessionClear,
@@ -15,7 +15,7 @@ from promptkit.conversation.steps import (
     SessionTruncate,
     SessionUpdate,
 )
-from promptkit.core.context import Context
+from aipykit.core.context import Context
 
 
 def make_context() -> Context:
