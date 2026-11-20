@@ -79,6 +79,10 @@ class LLMStep(Step, Generic[T]):
     #: `_llm_stream`（`EnableTUI()` 会自动设成 True）。只有纯文本输出
     #: 生效，`output_model` 结构化输出不支持流式。
     stream: Optional[bool] = None
+    #: 临时步骤：True 表示这次调用**不写进对话历史**。开场白、总结、意图识别
+    #: 这类「工作流自己说的话」不该出现在主对话里 —— 否则模型下一轮会看到
+    #: 一串伪造的 user 消息。回复仍照常写进 `output_key`，只是历史被还原。
+    temp: bool = False
 
     name: str = "llm"
 
@@ -173,19 +177,26 @@ class LLMStep(Step, Generic[T]):
         rendered = prompt.render(**variables)
         self._check_modalities(agent, rendered)
 
-        if self.output_model is None:
-            value: object = getattr(agent, "ask")(
-                rendered,
-                tools=self.tools,
-                bus=bus,
-                stream=self._resolve_stream(context),
-            )
-        else:
-            value = Executor(
-                agent=cast("AgentLike", agent),
-                max_retries=self.retry_count(),
-                formatter=cast("Formatter | str | None", self.formatter),
-            ).run(prompt, self.output_model, tools=self.tools, bus=bus, **variables)
+        # temp：执行完把历史还原到调用前（回复本身不受影响）。
+        # 放在 try/finally 里，模型报错 / 解析失败也能还原，不留半条消息。
+        snapshot = _snapshot_history(agent) if self.temp else None
+        try:
+            if self.output_model is None:
+                value: object = getattr(agent, "ask")(
+                    rendered,
+                    tools=self.tools,
+                    bus=bus,
+                    stream=self._resolve_stream(context),
+                )
+            else:
+                value = Executor(
+                    agent=cast("AgentLike", agent),
+                    max_retries=self.retry_count(),
+                    formatter=cast("Formatter | str | None", self.formatter),
+                ).run(prompt, self.output_model, tools=self.tools, bus=bus, **variables)
+        finally:
+            if snapshot is not None:
+                _restore_history(agent, snapshot)
 
         context[self.output_key] = value
         context.trace.append(self.name)
@@ -242,10 +253,42 @@ class LLMStep(Step, Generic[T]):
             bits.append(get_formatter(self.formatter).name)
         if self.stream is True:
             bits.append("stream")
+        if self.temp:
+            bits.append("temp")
         extra = f" [{' + '.join(bits)}]" if bits else ""
 
         content = self.prompt.content
         summary = content if isinstance(content, str) else f"[多模态 {len(content)} 部件]"
         return f"LLM({short(summary)}){model}{tools}{extra} -> {self.output_key}"
+
+
+def _snapshot_history(agent: object) -> Optional[List[object]]:
+    '''给 temp 步骤拍一份历史快照，执行完用它回滚。
+
+    优先用 `agent.session.messages`：那是会话层的不可变 Message，回滚后
+    **id 不变**，不会让外面已经持有的消息引用失效。没有 session 的轻量
+    Agent（测试里的假 agent）退回 `get_history()` / 普通 list `history`。
+    '''
+    session = getattr(agent, "session", None)
+    messages = getattr(session, "messages", None) if session is not None else None
+    if isinstance(messages, list):
+        return list(messages)
+    getter = getattr(agent, "get_history", None)
+    if callable(getter):
+        return list(getter())
+    history = getattr(agent, "history", None)
+    if isinstance(history, list):
+        return list(history)
+    return None
+
+
+def _restore_history(agent: object, snapshot: List[object]) -> None:
+    '''把历史还原成 snapshot（`Agent.history` 的 setter 会同步 messages 缓存）。'''
+    try:
+        setattr(agent, "history", snapshot)
+    except (AttributeError, TypeError):
+        # agent 没有可写 history：无法回滚，但别让 temp 反而把调用搞崩
+        return
+
 
 __all__ = ["LLMStep", "LLM_STREAM_KEY", "T"]

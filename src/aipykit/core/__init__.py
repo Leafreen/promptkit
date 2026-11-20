@@ -126,6 +126,7 @@ from aipykit.core.steps.logics.expr_sys.expr import (
     UnaryExpr,
     VarExpr,
     as_expr,
+    
 )
 from aipykit.core.steps.logics.expr_sys.transforms import (
     Transform,
@@ -292,6 +293,10 @@ from aipykit.core.steps import (
     coerce_steps,
     format_recalled,
 )
+
+    
+from aipykit.core.steps.parallel import Parallel
+
 # VarType 由 core.steps 从 expr_sys.vartypes 再导出，这里不重复 import
 from aipykit.core.steps.workflow import Workflow
 
@@ -357,6 +362,8 @@ __all__ = [
     "Or",
     "Not",
     "When",
+    # 并行编程
+    "Parallel",
     # 语义条件（意图识别 / 语义比较 / 分类）
     "Intent",
     "Similar",

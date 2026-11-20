@@ -45,6 +45,16 @@ class EventType(str, Enum):
     # ---- 工作流主动展示的通知 ----
     NOTIFICATION = "notification"
 
+    # ---- 编码：文件变更与代码预览 ----
+    #: 一个文件被创建 / 覆盖 / 删除。`data` 形如
+    #: `{"path": "src/a.py", "action": "create|modify|delete",
+    #:   "added": 3, "removed": 1, "diff": "..."}`
+    FILE_CHANGE = "file_change"
+    #: 一段代码的预览。`data` 形如
+    #: `{"path": "src/a.py", "content": "...", "language": "python",
+    #:   "start_line": 1}`
+    CODE_PREVIEW = "code_preview"
+
     # ---- 用量 ----
     #: 一次模型调用的 token 用量。终端默认不显示，日志处理器会记下来。
     USAGE = "usage"
@@ -71,6 +81,8 @@ USER_MESSAGE = EventType.USER_MESSAGE
 STEP_START = EventType.STEP_START
 STEP_END = EventType.STEP_END
 NOTIFICATION = EventType.NOTIFICATION
+FILE_CHANGE = EventType.FILE_CHANGE
+CODE_PREVIEW = EventType.CODE_PREVIEW
 USAGE = EventType.USAGE
 SEMANTIC_JUDGE = EventType.SEMANTIC_JUDGE
 ERROR = EventType.ERROR

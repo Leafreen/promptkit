@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 from aipykit.coding.errors import CodeFormatError, DiffError
 from aipykit.coding.formats import CodeOutput, get_output
 from aipykit.coding.sandbox import Sandbox
-from aipykit.core.event_sys.events import bus_of
+from aipykit.core.event_sys.events import bus_of, emit
 from aipykit.core.errors import UndefinedVariable
 from aipykit.core.model_action.caution_related.caution import (
     join_cautions,
@@ -262,6 +262,7 @@ class CodingStep(Step):
                 )
                 continue
 
+            self._emit_preview(context, value, target)
             context[self.output_key] = value
             context.trace.append(f"{self.name}:{attempt}")
             return
@@ -269,6 +270,40 @@ class CodingStep(Step):
         raise CodeFormatError(
             f"CodingStep 连续 {attempts} 次都没有拿到可用的代码变更；"
             f"最后一次错误：{last_error}"
+        )
+
+    def _emit_preview(
+        self, context: "Context", value: object, target: Optional[str]
+    ) -> None:
+        '''把模型产出的代码 / 补丁发给界面层（TUI 挂「代码预览」面板）。
+
+        这一步只做展示，不参与校验；没有事件总线时 `emit` 直接返回。
+        '''
+        name = self._code_output().name
+        if name == "json":
+            items = value.get("changes") if isinstance(value, dict) else None
+            for item in items or ():
+                if item.get("action") == "delete":
+                    continue
+                emit(
+                    context,
+                    "code_preview",
+                    path=str(item.get("path") or ""),
+                    content=str(item.get("content") or ""),
+                    language=self.language,
+                    start_line=1,
+                )
+            return
+        content = value if isinstance(value, str) else ""
+        if not content:
+            return
+        emit(
+            context,
+            "code_preview",
+            path=target or "",
+            content=content,
+            language="diff" if name == "diff" else self.language,
+            start_line=1,
         )
 
     # ---------------- 展示 ----------------

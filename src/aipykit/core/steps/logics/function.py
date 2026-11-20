@@ -85,6 +85,7 @@ class FunctionDef:
         output_model: Optional[type] = None,
         tools: Optional[List[ToolLike]] = None,
         inherit: object = False,
+        temp: bool = False,
     ):
         self.args = _normalise_params(params)
         self.name = name or f"function_{uuid.uuid4().hex[:8]}"
@@ -94,6 +95,8 @@ class FunctionDef:
         self.inherit = _normalise_inherit(inherit, self.name)
         self.output_model = output_model
         self.tools = list(tools) if tools else None
+        #: 函数体里的 Prompt 是临时步骤：不写进对话历史（开场白 / 总结等）
+        self.temp = temp
         self.body: List[Step] = []
 
     def Do(self, *body: object) -> "FunctionDef":  # noqa: N802 - 跟随 DSL 命名
@@ -113,6 +116,7 @@ class FunctionDef:
                         self.output_key,
                         tools=self.tools,
                         name=self.name,
+                        temp=self.temp,
                     )
                 )
             else:
@@ -352,6 +356,7 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
     output_model: Optional[type] = None,
     tools: Optional[List[ToolLike]] = None,
     inherit: object = False,
+    temp: bool = False,
 ) -> FunctionDef:
     '''定义一个带参数的步骤：Function('$job', name="ask").Do(Prompt(...))。
 
@@ -367,6 +372,9 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
 
     `inherit`：被当成工具调用时，要不要把调用方的状态（Context 里的变量）
     带进来。`True` = 全部，`("profile", "topics")` = 只带这几个。
+
+    `temp`：函数体里的 Prompt 是**临时步骤**，执行完把对话历史还原 ——
+    开场白、总结、意图识别这类「工作流自己说的话」不该留在主对话里。
     '''
     return FunctionDef(
         *params,
@@ -376,6 +384,7 @@ def Function(  # noqa: N802 - 跟随 DSL 命名
         output_model=output_model,
         tools=tools,
         inherit=inherit,
+        temp=temp,
     )
 
 

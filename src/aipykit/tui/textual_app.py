@@ -46,12 +46,20 @@ if TYPE_CHECKING:
     from aipykit.core.event_sys import Event
 
 try:  # 可选依赖：只有真正启动全屏 TUI 时才要求
+    from rich.text import Text as RichText
     from textual.app import App, ComposeResult
     from textual.binding import Binding
     from textual.containers import Horizontal, VerticalScroll
     from textual.content import Content
     from textual.message import Message
-    from textual.widgets import Collapsible, Markdown, Static, TextArea
+    from textual.widgets import (
+        Collapsible,
+        Markdown,
+        Static,
+        TabbedContent,
+        TabPane,
+        TextArea,
+    )
 
     _IMPORT_ERROR: Optional[BaseException] = None
 except ImportError as exc:  # pragma: no cover - 依赖齐全时不会走到
@@ -62,6 +70,15 @@ __all__ = ["TutorApp", "run_fullscreen"]
 
 _EOF = object()
 
+#: 文件变更面板标题里的动作名（`file_change` 事件 / write_file 工具）
+_FILE_ACTION_LABELS = {
+    "create": "新建",
+    "modify": "修改",
+    "delete": "删除",
+    "write": "写入",
+    "patch": "应用补丁",
+}
+
 #: 首次进入全屏界面时显示在对话区顶部的「使用方法」，发出第一条消息后收起
 _WELCOME = (
     "[b]使用方法[/b]\n\n"
@@ -71,6 +88,7 @@ _WELCOME = (
     "• 鼠标拖选对话内容，[b]Ctrl+C[/b] 复制；[b]Ctrl+S[/b] 导出 Markdown\n"
     "• [b]Ctrl+Q[/b] 退出　[b]End[/b] 回到对话最底部\n"
     "• [b]Ctrl+R[/b] 展开/折叠思考　[b]Ctrl+T[/b] 展开/折叠工具调用\n"
+    "• [b]Ctrl+G[/b] 查看子 Agent 状态（召回过子 Agent 时）\n"
 )
 
 #: 按模型名估算上下文窗口，只用于状态栏的百分比显示。
@@ -186,6 +204,60 @@ if App is not None:
                 return
             await super()._on_key(event)
 
+        def _undo_batch(self, edits) -> None:
+            '''修复 Textual 撤销「多行粘贴」时的越界崩溃。
+
+            官方顺序是 `_refresh_size()` → `edit.after()`（恢复选区）。撤销一段
+            多行粘贴后文档可能只剩 1 行，但 `cursor_location` 还停在旧文档末尾，
+            `_refresh_size` 里的 `scroll_cursor_visible` 拿它去 wrapped document
+            找位置，就会抛 `line index out of bounds`。这里先把选区恢复到撤销后
+            的位置（即粘贴前的光标），再刷新尺寸。
+            '''
+            if not edits:
+                return
+
+            old_gutter_width = self.gutter_width
+            minimum_top = edits[-1].top
+            maximum_old_bottom = (0, 0)
+            maximum_new_bottom = (0, 0)
+            for edit in reversed(edits):
+                edit.undo(self)
+                end_location = (
+                    edit._edit_result.end_location if edit._edit_result else (0, 0)
+                )
+                if edit.top < minimum_top:
+                    minimum_top = edit.top
+                if end_location > maximum_old_bottom:
+                    maximum_old_bottom = end_location
+                if edit.bottom > maximum_new_bottom:
+                    maximum_new_bottom = edit.bottom
+
+            for edit in reversed(edits):
+                if edit._updated_selection is not None:
+                    self.selection = edit._updated_selection
+
+            new_gutter_width = self.gutter_width
+            if old_gutter_width != new_gutter_width:
+                self.wrapped_document.wrap(self.wrap_width, self.indent_width)
+            else:
+                self.wrapped_document.wrap_range(
+                    minimum_top, maximum_old_bottom, maximum_new_bottom
+                )
+
+            self._refresh_size()
+            for edit in reversed(edits):
+                edit.after(self)
+            self._build_highlight_map()
+            self.post_message(self.Changed(self))
+            self.update_suggestion()
+
+        def action_undo(self) -> None:
+            try:
+                super().action_undo()
+            except ValueError:
+                # 兜底：万一后续 Textual 版本又变了内部顺序，至少别让界面崩
+                self.load_text(self.text)
+
     class TutorApp(App):
         '''一次 ChatLoop 的全屏界面；对话循环退出时应用也随之退出。'''
 
@@ -213,9 +285,38 @@ if App is not None:
             background: $boost;
             color: $text-muted;
         }
+        #tabs {
+            height: 1fr;
+        }
+        #tab-chat, #tab-agents {
+            height: 1fr;
+        }
         #chat {
             height: 1fr;
             padding: 0 1;
+        }
+        #agents-summary {
+            height: auto;
+            padding: 0 1;
+            color: $text-muted;
+        }
+        #agents {
+            height: 1fr;
+            padding: 0 1;
+        }
+        #agents-empty {
+            height: auto;
+            padding: 1 1;
+            color: $text-muted;
+        }
+        Collapsible.agent-panel {
+            margin: 1 0 0 0;
+            padding: 0 1;
+            border: none;
+            background: $surface;
+        }
+        Collapsible.agent-panel > .header {
+            color: $text-muted;
         }
         #input {
             height: 3;
@@ -271,6 +372,15 @@ if App is not None:
         Collapsible.thinking-panel > .header {
             color: $text-muted;
         }
+        Collapsible.code-panel {
+            margin: 1 0 0 0;
+            padding: 0 1;
+            border: none;
+            background: $surface;
+        }
+        Collapsible.code-panel > .header {
+            color: $text-muted;
+        }
         .panel-content {
             padding: 0 0 0 2;
         }
@@ -299,6 +409,7 @@ if App is not None:
             Binding("ctrl+r", "toggle_thinking", "展开/折叠思考", show=False),
             Binding("ctrl+t", "toggle_tools", "展开/折叠工具", show=False),
             Binding("ctrl+s", "export_chat", "导出 Markdown", show=False),
+            Binding("ctrl+g", "show_agents", "子 Agent", show=False),
             Binding("end", "jump_bottom", "回到最底部", show=False),
         ]
 
@@ -326,6 +437,9 @@ if App is not None:
             self._stream_reply: Optional[Static] = None
             self._stream_reply_text = ""
             self._current_reply: Optional[Markdown] = None
+            #: 助手消息的**渲染前原文**（含 `$...$`、```mermaid）。
+            #: 界面上显示的是字符画，但 Ctrl+S 导出要还原成可直接编译的源码。
+            self._markdown_sources: dict[int, str] = {}
 
             # 思考面板：THINKING_START 挂载，THINKING_DELTA 累积内容，
             # THINKING_END 固定。新用户消息到来时会重置一轮。
@@ -346,6 +460,19 @@ if App is not None:
             self._tool_started: dict[str, float] = {}
             self._tool_current_key: Optional[str] = None
             self._tool_current_args_parts: list[str] = []
+
+            # 代码面板：文件更改 / diff 比较 / 代码预览。和工具面板一样跨轮保留，
+            # 展开时看全文，Ctrl+S 导出时会写成代码块。
+            self._code_seq = 0
+            self._code_metas: dict[str, dict[str, Any]] = {}
+
+            # 子 Agent 面板：「子 Agent」标签页里的每次 summon_subagent 调用。
+            # 子 Agent 有自己的 bus，内部事件不会到主界面 —— 状态从工具参数 /
+            # 工具结果里还原（角色、任务、运行中 / 完成 / 失败、耗时）。
+            self._agent_seq = 0
+            self._agent_panels: dict[str, Collapsible] = {}
+            self._agent_contents: dict[str, Static] = {}
+            self._agent_meta: dict[str, dict[str, Any]] = {}
 
             self._welcome_dismissed = False
             self._generating = False
@@ -379,8 +506,20 @@ if App is not None:
                 yield Static("正在启动…", id="status-left")
                 yield Static("", id="status-right")
             yield Static("", id="status-detail")
-            with ChatScroll(id="chat"):
-                yield Static(welcome, id="welcome")
+            with TabbedContent(id="tabs"):
+                with TabPane("对话", id="tab-chat"):
+                    with ChatScroll(id="chat"):
+                        yield Static(welcome, id="welcome")
+                with TabPane("子 Agent", id="tab-agents"):
+                    yield Static(
+                        "暂无子 Agent 调用", id="agents-summary"
+                    )
+                    with VerticalScroll(id="agents"):
+                        yield Static(
+                            "模型调用 summon_subagent 时，"
+                            "这里会显示每个子 Agent 的角色、任务和结果。",
+                            id="agents-empty",
+                        )
             yield Static("↓ 回到最底部（End / 点击）", id="jump-bottom")
             yield ChatInput(
                 placeholder="输入内容 · Enter 发送 · Shift+Enter 换行 · Ctrl+S 导出",
@@ -568,6 +707,11 @@ if App is not None:
                         break
             self.call_after_refresh(self._sync_jump_hint)
 
+        # ---------------- 标签页 ----------------
+        def action_show_agents(self) -> None:
+            '''Ctrl+G：切到「子 Agent」标签页。'''
+            self.query_one("#tabs", TabbedContent).active = "tab-agents"
+
         # ---------------- 导出 Markdown ----------------
         def action_export_chat(self) -> None:
             '''Ctrl+S：把当前对话导出到工作目录下的 Markdown 文件。'''
@@ -601,13 +745,35 @@ if App is not None:
                     )
                     blocks.append(f"## 你\n\n{body}")
                 elif isinstance(widget, Markdown):
-                    body = self._strip_bullet(str(widget.source))
+                    # 优先用挂载时留下的原文：界面上的 source 是公式 / 流程图
+                    # 渲染后的字符画，导出时要的是能重新渲染的 Markdown 源码。
+                    source = self._markdown_sources.get(id(widget))
+                    if source is None:
+                        source = str(widget.source)
+                    body = self._strip_bullet(source)
                     blocks.append(f"## 助手\n\n{body}")
                 elif isinstance(widget, Collapsible):
                     panel = self._panel_markdown(widget)
                     if panel:
                         blocks.append(panel)
+            if self._agent_meta:
+                blocks.append(self._agents_markdown())
             return "\n\n".join(blocks).rstrip() + "\n"
+
+        def _agents_markdown(self) -> str:
+            '''把「子 Agent」标签页里的状态卡片导出成一节 Markdown。'''
+            lines = ["## 子 Agent"]
+            icons = {"running": "◐", "done": "✓", "failed": "✗"}
+            for meta in self._agent_meta.values():
+                role = meta.get("role") or "子 Agent"
+                icon = icons.get(str(meta.get("status")), "●")
+                lines.append("")
+                lines.append(f"### {icon} {role}")
+                if meta.get("task"):
+                    lines.append(f"任务：{meta['task']}")
+                if meta.get("result") is not None:
+                    lines.append(f"结果：\n\n{meta['result']}")
+            return "\n".join(lines)
 
         def _panel_markdown(self, panel: "Collapsible") -> str:
             '''把折叠面板导出成 <details>，保留可折叠的思考 / 工具过程。'''
@@ -628,6 +794,14 @@ if App is not None:
                 args = meta.get("args") or ""
                 result = meta.get("result")
                 body = args if result is None else f"{args}\n\n{result}"
+            elif panel.has_class("code-panel"):
+                meta = self._code_metas.get(panel.name or "")
+                if meta is None:
+                    return ""
+                summary = meta.get("title") or panel.title
+                raw = meta.get("raw") or ""
+                language = meta.get("language") or "text"
+                body = f"```{language}\n{raw}\n```" if raw else "（无内容）"
             else:
                 return ""
             return (
@@ -750,6 +924,17 @@ if App is not None:
                     self.call_from_thread(
                         self._set_tool_result, key, result, seconds
                     )
+                    # 模型自己调 write_file / apply_diff 时，TUI 从工具参数里
+                    # 还原「文件更改 + 代码预览」，和步骤层发的事件统一呈现。
+                    raw_args = str(
+                        (self._tool_meta.get(key) or {}).get("raw_args") or ""
+                    )
+                    self.call_from_thread(
+                        self._maybe_file_panels_from_tool, name, raw_args, result
+                    )
+                    self.call_from_thread(
+                        self._finish_agent_from_tool, key, result, seconds
+                    )
                 self._tool = ""
                 self._tool_current_key = None
                 self._tool_current_args_parts = []
@@ -766,6 +951,12 @@ if App is not None:
                     self._context_tokens = prompt_tokens + completion_tokens
                 # 一次调用只发一条 USAGE，直接刷，别被 10fps 节流吞掉。
                 self._push_status(force=True)
+            elif etype == EventType.FILE_CHANGE:
+                data = dict(event.data)
+                self.call_from_thread(self._mount_file_change_panel, data)
+            elif etype == EventType.CODE_PREVIEW:
+                data = dict(event.data)
+                self.call_from_thread(self._mount_preview_panel, data)
             elif etype == EventType.NOTIFICATION:
                 text = str(event.data.get("text") or "")
                 title = str(event.data.get("title") or "通知")
@@ -852,6 +1043,7 @@ if App is not None:
                     self._message_markdown(text, user=False),
                     classes="message assistant",
                 )
+                self._markdown_sources[id(self._current_reply)] = text
                 self.query_one("#chat", VerticalScroll).mount(self._current_reply)
                 self._set_status()
                 self.call_after_refresh(self._scroll_to_end)
@@ -940,6 +1132,11 @@ if App is not None:
             self._tool_panels[key] = panel
             self._tool_contents[key] = (args_widget, result_widget)
             self._refresh_tool_panel(key)
+            # 召唤子 Agent 是特殊工具：同时在「子 Agent」标签页挂一张状态卡片
+            if name == "summon_subagent":
+                agent_key = self._next_agent_key()
+                self._tool_meta[key]["agent_key"] = agent_key
+                self._mount_agent_panel(agent_key)
             self.call_after_refresh(self._scroll_to_end)
 
         def _update_tool_panel_args(self, key: str, args: str) -> None:
@@ -960,9 +1157,14 @@ if App is not None:
             meta = self._tool_meta.get(key)
             if meta is None:
                 return
+            # 原始 JSON 留着：工具结果回来时要解析 write_file / apply_diff 的参数
+            meta["raw_args"] = args
             meta["args"] = self._format_tool_args(args)
             meta["summary"] = self._tool_summary(args)
             self._refresh_tool_panel(key)
+            agent_key = meta.get("agent_key")
+            if agent_key:
+                self._update_agent_args(agent_key, args)
 
         def _set_tool_result(
             self, key: str, result: str, seconds: Optional[float]
@@ -1070,6 +1272,309 @@ if App is not None:
                 summary = " ".join(text.split())
             return summary[:limit] + ("…" if len(summary) > limit else "")
 
+        # ---- 文件更改 / diff 比较 / 代码预览 ----
+        #: 超过这么多行默认折叠
+        _CODE_FOLD_LINES = 24
+        #: 单块内容最多渲染多少行（超长文件只显示前一段）
+        _CODE_MAX_LINES = 400
+
+        def _next_code_key(self) -> str:
+            self._code_seq += 1
+            return f"code#{self._code_seq}"
+
+        def _mount_code_panel(
+            self,
+            title: str,
+            body: "RichText",
+            *,
+            raw: str,
+            language: str = "text",
+            fold: bool = False,
+        ) -> None:
+            '''挂一个代码面板（文件更改 / 补丁 / 预览共用）。'''
+            self._dismiss_welcome()
+            key = self._next_code_key()
+            widget = Static(body, classes="panel-content", markup=False)
+            panel = Collapsible(
+                widget,
+                title=title,
+                collapsed=fold,
+                classes="code-panel",
+                name=key,
+            )
+            self.query_one("#chat", VerticalScroll).mount(panel)
+            self._code_metas[key] = {
+                "title": title,
+                "raw": raw,
+                "language": language,
+            }
+            self.call_after_refresh(self._scroll_to_end)
+
+        def _mount_file_change_panel(self, data: dict[str, Any]) -> None:
+            '''文件更改面板：标题给出动作与增删行数，正文是 diff 比较。'''
+            path = str(data.get("path") or "（未知文件）")
+            action = str(data.get("action") or "modify")
+            added = int(data.get("added") or 0)
+            removed = int(data.get("removed") or 0)
+            diff = str(data.get("diff") or "")
+
+            label = _FILE_ACTION_LABELS.get(action, action)
+            title = f"✎ {label} {path}"
+            stats = []
+            if added:
+                stats.append(f"+{added}")
+            if removed:
+                stats.append(f"-{removed}")
+            if stats:
+                title += "  " + " ".join(stats)
+
+            if diff.strip():
+                body = self._diff_text(diff)
+                language = "diff"
+            else:
+                body = RichText("（没有文本 diff，内容见代码预览）", style="dim")
+                language = "text"
+            self._mount_code_panel(
+                title,
+                body,
+                raw=diff,
+                language=language,
+                fold=diff.count("\n") > self._CODE_FOLD_LINES,
+            )
+
+        def _mount_preview_panel(self, data: dict[str, Any]) -> None:
+            '''代码预览面板：带行号显示模型产出 / 写入的代码。'''
+            content = str(data.get("content") or "")
+            if not content.strip():
+                return
+            path = str(data.get("path") or "")
+            language = str(data.get("language") or "")
+            start = int(data.get("start_line") or 1)
+            lines = content.splitlines()
+
+            if language == "diff":
+                body = self._diff_text(content)
+                title = f"▤ 补丁预览 {path}".rstrip()
+            else:
+                body = self._code_text(lines, start)
+                title = f"▤ 代码预览 {path}".rstrip()
+            title += f" · {len(lines)} 行"
+            self._mount_code_panel(
+                title,
+                body,
+                raw=content,
+                language=language or "text",
+                fold=len(lines) > self._CODE_FOLD_LINES,
+            )
+
+        def _maybe_file_panels_from_tool(
+            self, name: str, raw_args: str, result: str
+        ) -> None:
+            '''模型调用 write_file / apply_diff 时，把参数还原成文件面板。'''
+            if not raw_args or result.lstrip().startswith("错误"):
+                return
+            try:
+                args = json.loads(raw_args)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if not isinstance(args, dict):
+                return
+
+            if name == "write_file":
+                # coding 版参数是 path，内置 WriteFile 工具用的是 name
+                path = str(args.get("path") or args.get("name") or "")
+                content = str(args.get("content") or "")
+                if path:
+                    self._mount_file_change_panel(
+                        {
+                            "path": path,
+                            "action": "write",
+                            "added": len(content.splitlines()),
+                        }
+                    )
+                if content:
+                    self._mount_preview_panel({"path": path, "content": content})
+            elif name == "apply_diff":
+                diff = str(args.get("diff") or "")
+                if diff.strip():
+                    added, removed = self._diff_counts(diff)
+                    self._mount_file_change_panel(
+                        {
+                            "path": str(args.get("path") or "补丁内路径"),
+                            "action": "patch",
+                            "added": added,
+                            "removed": removed,
+                            "diff": diff,
+                        }
+                    )
+
+        def _diff_text(self, diff: str) -> "RichText":
+            '''给 unified diff 按行着色：+ 绿、- 红、@@ 青、文件头加粗。'''
+            text = RichText()
+            lines = diff.splitlines()
+            for line in lines[: self._CODE_MAX_LINES]:
+                if line.startswith(("+++", "---")):
+                    style = "bold"
+                elif line.startswith("+"):
+                    style = "green"
+                elif line.startswith("-"):
+                    style = "red"
+                elif line.startswith("@@"):
+                    style = "cyan"
+                else:
+                    style = "dim"
+                text.append(line + "\n", style=style)
+            rest = len(lines) - self._CODE_MAX_LINES
+            if rest > 0:
+                text.append(f"… 还有 {rest} 行未显示\n", style="dim")
+            return text
+
+        def _code_text(self, lines: list[str], start: int = 1) -> "RichText":
+            '''带行号的代码文本；行号用暗色，代码保持默认前景色。'''
+            text = RichText()
+            for offset, line in enumerate(lines[: self._CODE_MAX_LINES], start):
+                text.append(f"{offset:>4}  ", style="dim")
+                text.append(line + "\n")
+            rest = len(lines) - self._CODE_MAX_LINES
+            if rest > 0:
+                text.append(f"… 还有 {rest} 行未显示\n", style="dim")
+            return text
+
+        @staticmethod
+        def _diff_counts(diff: str) -> tuple[int, int]:
+            '''数一下 diff 的新增 / 删除行数（跳过 +++ / --- 文件头）。'''
+            added = removed = 0
+            for line in diff.splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    added += 1
+                elif line.startswith("-") and not line.startswith("---"):
+                    removed += 1
+            return added, removed
+
+        # ---- 子 Agent 状态（「子 Agent」标签页） ----
+        def _next_agent_key(self) -> str:
+            self._agent_seq += 1
+            return f"agent#{self._agent_seq}"
+
+        def _mount_agent_panel(self, key: str) -> None:
+            '''一次 summon_subagent 调用 → 一张状态卡片。'''
+            self._agent_meta[key] = {
+                "role": "",
+                "task": "",
+                "status": "running",
+                "seconds": None,
+                "result": None,
+            }
+            content = Static("准备中…", classes="panel-content", markup=False)
+            panel = Collapsible(
+                content,
+                title="◐ 子 Agent · 运行中…",
+                collapsed=False,
+                classes="agent-panel",
+                name=key,
+            )
+            self.query_one("#agents", VerticalScroll).mount(panel)
+            self._agent_panels[key] = panel
+            self._agent_contents[key] = content
+            empty = self.query("#agents-empty")
+            if empty:
+                empty.first().display = False
+            self._refresh_agent_summary()
+
+        def _update_agent_args(self, key: str, args: str) -> None:
+            '''工具参数完整后补上角色和任务。'''
+            meta = self._agent_meta.get(key)
+            if meta is None or not args.strip():
+                return
+            try:
+                parsed = json.loads(args)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if isinstance(parsed, dict):
+                meta["role"] = str(parsed.get("role") or meta["role"])
+                meta["task"] = str(parsed.get("task") or meta["task"])
+                self._refresh_agent_panel(key)
+
+        def _finish_agent_from_tool(
+            self, tool_key: str, result: str, seconds: Optional[float]
+        ) -> None:
+            '''工具结果回来时，把对应子 Agent 卡片标成完成 / 失败。'''
+            meta = self._tool_meta.get(tool_key) or {}
+            agent_key = meta.get("agent_key")
+            if not agent_key:
+                return
+            agent = self._agent_meta.get(agent_key)
+            if agent is None:
+                return
+            agent["result"] = result
+            agent["seconds"] = seconds
+            agent["status"] = (
+                "failed"
+                if result.lstrip().startswith("子 Agent 执行失败")
+                else "done"
+            )
+            self._refresh_agent_panel(agent_key)
+            self._refresh_agent_summary()
+
+        def _refresh_agent_panel(self, key: str) -> None:
+            panel = self._agent_panels.get(key)
+            content = self._agent_contents.get(key)
+            meta = self._agent_meta.get(key)
+            if panel is None or content is None or meta is None:
+                return
+
+            role = meta.get("role") or "子 Agent"
+            status = meta.get("status") or "running"
+            icon = {"running": "◐", "done": "✓", "failed": "✗"}.get(status, "●")
+            title = f"{icon} {role}"
+            seconds = meta.get("seconds")
+            if seconds is not None:
+                title += f" · {seconds:.1f}s"
+            if status == "running":
+                title += " · 运行中…"
+            panel.title = title
+
+            parts: list[str] = []
+            if meta.get("task"):
+                parts.append(f"任务：{meta['task']}")
+            if meta.get("result") is not None:
+                parts.append(f"结果：\n{meta['result']}")
+            else:
+                parts.append("状态：等待子 Agent 返回…")
+            content.update(
+                self._preview(
+                    "\n\n".join(parts),
+                    limit=12,
+                    hint="（点标题展开完整任务 / 结果）",
+                    expanded=not panel.collapsed,
+                )
+            )
+
+        def _refresh_agent_summary(self) -> None:
+            '''标签页顶部的一行汇总：总共 / 运行中 / 完成 / 失败。'''
+            total = len(self._agent_meta)
+            if not total:
+                return
+            running = sum(
+                1
+                for meta in self._agent_meta.values()
+                if meta.get("status") == "running"
+            )
+            failed = sum(
+                1
+                for meta in self._agent_meta.values()
+                if meta.get("status") == "failed"
+            )
+            done = total - running - failed
+            bits = [f"子 Agent {total}"]
+            if running:
+                bits.append(f"运行中 {running}")
+            if done:
+                bits.append(f"完成 {done}")
+            if failed:
+                bits.append(f"失败 {failed}")
+            self.query_one("#agents-summary", Static).update(" · ".join(bits))
+
         # ---------------- 通用渲染 ----------------
         def _mount_message(self, text: str, *, user: bool) -> None:
             self._dismiss_welcome()
@@ -1081,6 +1586,7 @@ if App is not None:
                     self._message_markdown(text, user=False),
                     classes="message assistant",
                 )
+                self._markdown_sources[id(widget)] = text
             chat.mount(widget)
             self.call_after_refresh(self._scroll_to_end)
 

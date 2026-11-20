@@ -29,6 +29,7 @@ from aipykit.coding.diff import apply_hunks, validate_patch
 from aipykit.coding.errors import DiffError
 from aipykit.coding.formats import validate_changes
 from aipykit.coding.sandbox import Sandbox
+from aipykit.core.event_sys.events import emit
 from aipykit.core.steps.interface import Step
 from aipykit.core.steps.logics.expr_sys.expr import Expr
 
@@ -57,6 +58,57 @@ def _text(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False, indent=2)
     return str(value)
+
+
+def _diff_counts(diff_text: str) -> Tuple[int, int]:
+    '''数一下 unified diff 里新增 / 删除了多少行（跳过文件头）。'''
+    added = removed = 0
+    for line in (diff_text or "").splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return added, removed
+
+
+def _emit_file_change(
+    context: "Context",
+    *,
+    path: str,
+    action: str,
+    added: int = 0,
+    removed: int = 0,
+    diff: str = "",
+) -> None:
+    '''把一次文件变更告诉界面层（终端会忽略，TUI 用它挂「文件更改」面板）。'''
+    emit(
+        context,
+        "file_change",
+        path=path,
+        action=action,
+        added=added,
+        removed=removed,
+        diff=diff,
+    )
+
+
+def _emit_code_preview(
+    context: "Context",
+    *,
+    path: str,
+    content: str,
+    language: str = "",
+    start_line: int = 1,
+) -> None:
+    '''把一段代码告诉界面层（TUI 用它挂「代码预览」面板）。'''
+    emit(
+        context,
+        "code_preview",
+        path=path,
+        content=content,
+        language=language,
+        start_line=start_line,
+    )
 
 
 # ============================ 读 ============================
@@ -112,7 +164,17 @@ class WriteFileStep(Step):
         path = _text(_render(self.path, context))
         content = _text(_render(self.content, context))
         sandbox = Sandbox(self.base_dir, allow_write=True, encoding=self.encoding)
+        existed = sandbox.exists(path)
+        old_text = sandbox.read_text(path) if existed else ""
         full = sandbox.write_text(path, content)
+        _emit_file_change(
+            context,
+            path=path,
+            action="modify" if existed else "create",
+            added=len(content.splitlines()),
+            removed=len(old_text.splitlines()) if existed else 0,
+        )
+        _emit_code_preview(context, path=path, content=content)
         if self.output_key:
             context[self.output_key] = {
                 "path": sandbox.relative(full),
@@ -224,6 +286,28 @@ class ApplyDiff(Step):
             path=target,
             backup=self.backup,
         )
+        added, removed = _diff_counts(patch_text)
+        paths = [*result["files"], *result["deleted"]]
+        if paths:
+            label = (
+                paths[0]
+                if len(paths) == 1
+                else f"{paths[0]} 等 {len(paths)} 个文件"
+            )
+            if not result["files"]:
+                action = "delete"
+            elif result["created"]:
+                action = "create"
+            else:
+                action = "modify"
+            _emit_file_change(
+                context,
+                path=label,
+                action=action,
+                added=added,
+                removed=removed,
+                diff=patch_text,
+            )
         context[self.output_key] = result
         context.trace.append(f"{self.name}:{len(result['files'])}")
 
@@ -259,9 +343,19 @@ class ApplyChanges(Step):
             if item["action"] == "delete":
                 if sandbox.remove(item["path"]):
                     deleted.append(item["path"])
+                    _emit_file_change(context, path=item["path"], action="delete")
                 continue
             sandbox.write_text(item["path"], item["content"])
             written.append(item["path"])
+            _emit_file_change(
+                context,
+                path=item["path"],
+                action=item["action"],
+                added=len(item["content"].splitlines()),
+            )
+            _emit_code_preview(
+                context, path=item["path"], content=item["content"]
+            )
 
         context[self.output_key] = {
             "files": written,
