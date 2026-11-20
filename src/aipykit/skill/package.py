@@ -1,4 +1,4 @@
-﻿﻿# skill/package.py
+# skill/package.py
 '''目录式技能包（SKILL.md + references/ + assets/ + scripts/）。
 
 `as_skill` 只把 SKILL.md 当一段说明读进来；技能包在这一层之上补四件事：

@@ -1,4 +1,4 @@
-﻿﻿# memory/adapters/__init__.py
+# memory/adapters/__init__.py
 '''`EmbeddingClient` / `VectorStore` / `Reranker` 的具体实现。
 
 **这个包不会被 `aipykit.memory` 自动导入** —— 是故意的：

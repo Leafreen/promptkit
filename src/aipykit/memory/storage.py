@@ -1,4 +1,4 @@
-﻿﻿# memory/storage.py
+# memory/storage.py
 '''「存哪」的统一配置：`StorageConfig` + `create_memory()` 工厂。
 
 为什么要有这一层

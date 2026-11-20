@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/clock.py
+# core/steps/actions/clock.py
 '''时间与计时器的 DSL 原语。
 
     from aipykit.core import Now, TimeStamp, StartTimer, StopTimer, WaitAlarm

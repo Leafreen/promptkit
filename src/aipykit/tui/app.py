@@ -1,4 +1,4 @@
-﻿﻿# aipykit/tui/app.py
+# aipykit/tui/app.py
 '''增强版终端对话界面：prompt_toolkit 管输入，rich 管状态。
 
 分工是刻意的：
@@ -174,6 +174,28 @@ class TuiSession:
             self._live.stop()
             self._live_on = False
 
+    def _agent(self) -> Any:
+        '''Context 里的 Agent -> 默认 Agent；拿不到就 None。'''
+        agent = self._context.get("agent") if self._context is not None else None
+        if agent is None:
+            try:
+                from aipykit.agent import Agent
+
+                agent = Agent.default()
+            except Exception:  # noqa: BLE001 - 纯展示，拿不到就算了
+                agent = None
+        return agent
+
+    def _reasoning(self) -> Optional[str]:
+        '''当前推理等级（low / medium / high / off），没设置就返回 None。'''
+        agent = self._agent()
+        level = getattr(agent, "reasoning_level", None) if agent is not None else None
+        return str(level) if level else None
+
+    def _is_max_reasoning(self) -> bool:
+        '''是不是厂商声明的最高等级。'''
+        return bool(getattr(self._agent(), "reasoning_is_max", False))
+
     def _status_line(self) -> str:
         if self._tool:
             head = f" 运行工具 {self._tool}"
@@ -183,6 +205,10 @@ class TuiSession:
             head = f" 思考中（{self._thinking} 字）"
         else:
             head = " 等待模型"
+        level = self._reasoning()
+        if level:
+            bolt = "⚡ " if self._is_max_reasoning() else ""
+            head += f" · {bolt}推理 {level}"
         if self._prompt_tokens or self._completion_tokens:
             head += (
                 f"   ↑{_tokens(self._prompt_tokens)}"

@@ -1,4 +1,4 @@
-﻿﻿# aipykit/api/hooks.py
+# aipykit/api/hooks.py
 '''Hook 扩展 API：在 DSL 步骤执行的前 / 后 / 异常时插入自定义逻辑。
 
 三个生命周期钩子：

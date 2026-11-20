@@ -20,9 +20,10 @@ OpenAI 的 Chat Completions 和 Anthropic 的 Messages 只差四件事：
 
 已知限制
 --------
-Anthropic 的 extended thinking 没接：开启之后多轮工具调用必须把带 `signature`
-的 thinking 块原样回传，而 aipykit 的通用历史里没有地方存它。真传了
-`thinking=` 会直接报一个能看懂的错，而不是让 API 甩 400 出来。
+Anthropic 的 extended thinking 只能用在**不带工具**的请求上：开启之后多轮
+工具调用必须把带 `signature` 的 thinking 块原样回传，而 aipykit 的通用历史
+里没有地方存它。这里接受了 `thinking=` / `reasoning=` 的统一等级写法，但碰到
+带工具的请求会直接报一个能看懂的错，而不是让 API 甩 400 出来。
 '''
 from __future__ import annotations
 
@@ -56,6 +57,8 @@ DEFAULT_BASE_URL = "https://api.anthropic.com"
 DEFAULT_API_VERSION = "2023-06-01"
 #: Messages API 要求显式给 max_tokens
 DEFAULT_MAX_TOKENS = 4096
+#: extended thinking 的最小预算（Anthropic 硬性要求）
+MIN_THINKING_BUDGET = 1024
 #: 没设 timeout 时给个大方的值：长回答 + 思考可以跑很久
 DEFAULT_TIMEOUT = 600.0
 
@@ -91,6 +94,7 @@ SUPPORTED_PARAMS: Tuple[str, ...] = (
     "system",
     "metadata",
     "tool_choice",
+    "thinking",
 )
 
 #: OpenAI 的 tool_choice 字符串 -> Anthropic 的对象
@@ -434,21 +438,25 @@ class AnthropicClient(BaseClient):
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         options = dict(params)
-        # 思考模式：明确拒绝，而不是让 API 甩一个看不懂的 400
-        if "thinking" in options or "extra_body" in options:
+        if "extra_body" in options:
             raise ClientError(
-                "Anthropic 的 extended thinking 还没接：开启后多轮工具调用必须"
-                "回传带 signature 的 thinking 块，aipykit 的通用历史里没地方存。"
-                "要用思考模式请继续用 DeepSeek，或者把 tools 去掉再开。"
+                "Anthropic 没有 extra_body 这层包装；思考相关请用 "
+                "reasoning= 或 params={'thinking': {...}}"
             )
+        thinking = options.pop("thinking", None)
 
         system, translated = self._translate_messages(messages)
+        max_tokens = int(options.pop("max_tokens", self.default_max_tokens))
         body: Dict[str, Any] = {
             "model": model,
             "messages": translated,
-            "max_tokens": int(options.pop("max_tokens", self.default_max_tokens)),
+            "max_tokens": max_tokens,
             "stream": bool(stream),
         }
+        if thinking is not None:
+            body["thinking"] = self._thinking_body(
+                thinking, has_tools=bool(tools), max_tokens=max_tokens, options=options
+            )
 
         if system:
             body["system"] = system
@@ -471,6 +479,63 @@ class AnthropicClient(BaseClient):
                 "OpenAI / DeepSeek 专有的。"
             )
         return body
+
+    @staticmethod
+    def _thinking_body(
+        value: Any,
+        *,
+        has_tools: bool,
+        max_tokens: int,
+        options: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        '''把统一的 ``thinking`` 参数规整成 Anthropic 的形状，并做硬性检查。
+
+        兼容 ``{'type': 'enabled'}``（预算取最小值）和完整写法；``disabled``
+        原样翻译。带工具、预算越界、和采样参数冲突都会提前报错 —— 这些是
+        API 会 400 的情况，提前说清楚比让用户猜好。
+        '''
+        if not isinstance(value, dict):
+            raise ClientError(
+                "Anthropic 的 thinking 要写成 "
+                "{'type': 'enabled', 'budget_tokens': 1024}"
+            )
+        kind = str(value.get("type") or "enabled").strip().lower()
+        if kind in ("disabled", "off"):
+            return {"type": "disabled"}
+        if kind != "enabled":
+            raise ClientError(
+                f"Anthropic 不认 thinking.type={kind!r}；只能 enabled / disabled"
+            )
+
+        if has_tools:
+            raise ClientError(
+                "带工具的请求不能开 Anthropic extended thinking：多轮工具调用"
+                "必须原样回传带 signature 的 thinking 块，aipykit 的通用历史里"
+                "没地方存。把 tools 去掉再开，或换 DeepSeek / OpenAI。"
+            )
+        blockers = [name for name in ("temperature", "top_p", "top_k") if name in options]
+        if blockers:
+            raise ClientError(
+                "Anthropic 开 extended thinking 时不能同时改 "
+                f"{' / '.join(blockers)}；去掉这些参数，或关掉 thinking"
+            )
+
+        try:
+            budget = int(value.get("budget_tokens") or MIN_THINKING_BUDGET)
+        except (TypeError, ValueError):
+            raise ClientError(
+                f"thinking.budget_tokens 要是整数：{value.get('budget_tokens')!r}"
+            ) from None
+        if budget < MIN_THINKING_BUDGET:
+            raise ClientError(
+                f"Anthropic 的 budget_tokens 至少 {MIN_THINKING_BUDGET}，收到 {budget}"
+            )
+        if budget >= max_tokens:
+            raise ClientError(
+                f"thinking.budget_tokens={budget} 必须小于 max_tokens={max_tokens}；"
+                "把 max_tokens 调大（例如 max_tokens=8192）"
+            )
+        return {"type": "enabled", "budget_tokens": budget}
 
     def _translate_messages(self, messages: Any) -> Tuple[str, List[Dict[str, Any]]]:
         '''OpenAI 消息列表 -> (system, Anthropic messages)。

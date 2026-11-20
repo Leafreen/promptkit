@@ -1,4 +1,4 @@
-﻿# core/display_sys/render.py
+# core/display_sys/render.py
 '''终端渲染：Markdown、数学公式、分级显示。
 
 外部依赖**全可选**，没有也能跑：
@@ -142,46 +142,123 @@ def get_console(stream: Any = None) -> Any:
 # ============================ LaTeX -> Unicode ============================
 #: 常用符号的直译（不依赖任何库）
 _SYMBOLS = {
-    # 希腊字母
+    # 希腊字母（小写及变体）
     "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
     "varepsilon": "ε", "zeta": "ζ", "eta": "η", "theta": "θ", "vartheta": "ϑ",
-    "iota": "ι", "kappa": "κ", "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ",
-    "pi": "π", "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
-    "varphi": "φ", "chi": "χ", "psi": "ψ", "omega": "ω",
-    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ", "Pi": "Π",
-    "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω",
-    # 运算
-    "times": "×", "cdot": "·", "div": "÷", "pm": "±", "mp": "∓",
-    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "ne": "≠", "neq": "≠",
-    "approx": "≈", "equiv": "≡", "sim": "∼", "propto": "∝",
-    # 大算符
-    "sum": "∑", "prod": "∏", "int": "∫", "iint": "∬", "oint": "∮",
-    "partial": "∂", "nabla": "∇", "infty": "∞", "sqrt": "√",
-    # 集合 / 逻辑
-    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆", "supset": "⊃",
-    "cup": "∪", "cap": "∩", "emptyset": "∅", "forall": "∀", "exists": "∃",
-    "neg": "¬", "land": "∧", "lor": "∨",
+    "iota": "ι", "kappa": "κ", "varkappa": "ϰ", "lambda": "λ", "mu": "μ",
+    "nu": "ν", "xi": "ξ", "omicron": "ο", "pi": "π", "varpi": "ϖ",
+    "rho": "ρ", "varrho": "ϱ", "sigma": "σ", "varsigma": "ς", "tau": "τ",
+    "upsilon": "υ", "phi": "φ", "varphi": "φ", "chi": "χ", "psi": "ψ",
+    "omega": "ω", "digamma": "ϝ",
+    # 希腊字母（大写）
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
+    "Pi": "Π", "Sigma": "Σ", "Upsilon": "Υ", "Phi": "Φ", "Psi": "Ψ",
+    "Omega": "Ω", "Omicron": "Ο",
+    # 二元运算
+    "times": "×", "cdot": "·", "centerdot": "·", "div": "÷", "pm": "±",
+    "mp": "∓", "oplus": "⊕", "ominus": "⊖", "otimes": "⊗", "oslash": "⊘",
+    "odot": "⊙", "circ": "∘", "bigcirc": "○", "bullet": "•", "star": "⋆",
+    "ast": "∗", "dagger": "†", "ddagger": "‡", "amalg": "⨿", "wr": "≀",
+    "diamond": "⋄", "setminus": "∖", "smallsetminus": "∖", "uplus": "⊎",
+    "sqcap": "⊓", "sqcup": "⊔", "vee": "∨", "wedge": "∧", "dotplus": "∔",
+    "intercal": "⊫", "boxplus": "⊞", "boxminus": "⊟", "boxtimes": "⊠",
+    "boxdot": "⊡", "divideontimes": "⋇", "doublecap": "⋒", "doublecup": "⋓",
+    "veebar": "⊻", "barwedge": "⊼", "curlyvee": "⋎", "curlywedge": "⋏",
+    "circledast": "⊛", "circledcirc": "⊚", "circleddash": "⊝",
+    "leftthreetimes": "⋋", "rightthreetimes": "⋌", "ltimes": "⋉", "rtimes": "⋊",
+    "triangleleft": "◁", "triangleright": "▷", "lhd": "◁", "rhd": "▷",
+    "unlhd": "⊴", "unrhd": "⊵", "bigtriangleup": "△", "bigtriangledown": "▽",
+    # 大小、相等与近似关系
+    "le": "≤", "leq": "≤", "leqslant": "⩽", "ge": "≥", "geq": "≥",
+    "geqslant": "⩾", "ne": "≠", "neq": "≠", "nless": "≮", "ngtr": "≯",
+    "nleq": "≰", "ngeq": "≱", "nleqslant": "⩽̸", "ngeqslant": "⩾̸",
+    "lneq": "⪇", "gneq": "⪈", "lneqq": "≨", "gneqq": "≩",
+    "ll": "≪", "gg": "≫", "lll": "⋘", "llless": "⋘", "ggg": "⋙", "gggtr": "⋙",
+    "lesssim": "≲", "gtrsim": "≳", "lnsim": "⋦", "gnsim": "⋧",
+    "lessapprox": "⪅", "gtrapprox": "⪆", "lnapprox": "⪉", "gnapprox": "⪊",
+    "approx": "≈", "approxeq": "≊", "thickapprox": "≈", "equiv": "≡",
+    "sim": "∼", "thicksim": "∼", "simeq": "≃", "nsim": "≁", "ncong": "≇",
+    "cong": "≅", "backsim": "∽", "backsimeq": "⋍", "eqsim": "≂",
+    "bumpeq": "≏", "Bumpeq": "≎", "doteq": "≐", "doteqdot": "≑",
+    "risingdotseq": "≓", "fallingdotseq": "≒", "eqcirc": "≖", "circeq": "≗",
+    "triangleq": "≜", "propto": "∝", "asymp": "≍", "between": "≬",
+    "pitchfork": "⋔", "smile": "⌣", "frown": "⌢", "smallsmile": "⌣",
+    "smallfrown": "⌢", "shortmid": "∣", "shortparallel": "∥",
+    # 顺序关系
+    "prec": "≺", "succ": "≻", "preceq": "⪯", "succeq": "⪰",
+    "preccurlyeq": "≼", "succcurlyeq": "≽", "curlyeqprec": "⋞",
+    "curlyeqsucc": "⋟", "precsim": "≾", "succsim": "≿", "precapprox": "⪷",
+    "succapprox": "⪸", "nprec": "⊀", "nsucc": "⊁", "npreceq": "⋠",
+    "nsucceq": "⋡", "precneq": "⪱", "succneq": "⪲", "precneqq": "⪵",
+    "succneqq": "⪶", "precnsim": "⋨", "succnsim": "⋩",
+    # 集合与逻辑
+    "in": "∈", "notin": "∉", "ni": "∋", "owns": "∋", "subset": "⊂",
+    "supset": "⊃", "subseteq": "⊆", "supseteq": "⊇", "nsubseteq": "⊈",
+    "nsupseteq": "⊉", "subsetneq": "⊊", "supsetneq": "⊋", "subsetneqq": "⫋",
+    "supsetneqq": "⫌", "varsubsetneq": "⊊", "varsupsetneq": "⊋",
+    "varsubsetneqq": "⫋", "varsupsetneqq": "⫌", "sqsubset": "⊏",
+    "sqsupset": "⊐", "sqsubseteq": "⊑", "sqsupseteq": "⊒", "cup": "∪",
+    "cap": "∩", "emptyset": "∅", "varnothing": "∅", "complement": "∁",
+    "forall": "∀", "exists": "∃", "nexists": "∄", "neg": "¬", "lnot": "¬",
+    "land": "∧", "lor": "∨", "top": "⊤", "bot": "⊥", "vdash": "⊢",
+    "dashv": "⊣", "vDash": "⊨", "Vdash": "⊩", "Vvdash": "⊪", "models": "⊨",
+    "nvdash": "⊬", "nvDash": "⊭", "nVdash": "⊮", "nVDash": "⊯",
+    "mid": "∣", "nmid": "∤", "parallel": "∥", "nparallel": "∦",
+    "perp": "⊥", "therefore": "∴", "because": "∵", "implies": "⟹",
+    "impliedby": "⟸", "iff": "⟺",
     # 箭头
-    "to": "→", "rightarrow": "→", "leftarrow": "←", "leftrightarrow": "↔",
-    "Rightarrow": "⇒", "Leftarrow": "⇐", "Leftrightarrow": "⇔",
-    "mapsto": "↦", "uparrow": "↑", "downarrow": "↓",
-    # 其它
-    "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
-    "angle": "∠", "perp": "⊥", "parallel": "∥", "degree": "°",
-    "circ": "∘", "star": "⋆", "bullet": "•",
-    "prime": "′", "therefore": "∴", "because": "∵",
-    # 证明结束符
-    "blacksquare": "■", "square": "□", "qed": "∎", "checkmark": "✓",
-    # 逻辑 / 蕴含
-    "implies": "⟹", "Longleftrightarrow": "⟺", "Longleftarrow": "⟸",
-    "Longrightarrow": "⟹", "iff": "⟺", "land": "∧", "lor": "∨", "lnot": "¬",
-    # 括号 / 定界符
-    "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉",
-    "langle": "⟨", "rangle": "⟩", "lvert": "|", "rvert": "|",
-    "vert": "|", "mid": "|", "Vert": "‖",
-    # 微积分 / 线性代数
+    "to": "→", "rightarrow": "→", "gets": "←", "leftarrow": "←",
+    "leftrightarrow": "↔", "Rightarrow": "⇒", "Leftarrow": "⇐",
+    "Leftrightarrow": "⇔", "Lleftarrow": "⇚", "Rrightarrow": "⇛",
+    "longleftarrow": "⟵", "longrightarrow": "⟶", "Longleftarrow": "⟸",
+    "Longrightarrow": "⟹", "longleftrightarrow": "⟷", "Longleftrightarrow": "⟺",
+    "mapsto": "↦", "longmapsto": "⟼", "hookleftarrow": "↩", "hookrightarrow": "↪",
+    "leftharpoonup": "↼", "leftharpoondown": "↽", "rightharpoonup": "⇀",
+    "rightharpoondown": "⇁", "rightleftharpoons": "⇌", "leftrightharpoons": "⇋",
+    "uparrow": "↑", "Uparrow": "⇑", "downarrow": "↓", "Downarrow": "⇓",
+    "updownarrow": "↕", "Updownarrow": "⇕", "nearrow": "↗", "searrow": "↘",
+    "swarrow": "↙", "nwarrow": "↖", "rightrightarrows": "⇉",
+    "leftleftarrows": "⇇", "rightleftarrows": "⇄", "leftrightarrows": "⇆",
+    "twoheadleftarrow": "↞", "twoheadrightarrow": "↠", "leftarrowtail": "↢",
+    "rightarrowtail": "↣", "looparrowleft": "↫", "looparrowright": "↬",
+    "circlearrowleft": "↺", "circlearrowright": "↻", "curvearrowleft": "↶",
+    "curvearrowright": "↷", "rightsquigarrow": "⇝", "leadsto": "⇝",
+    "dashleftarrow": "⇠", "dashrightarrow": "⇢", "nleftarrow": "↚",
+    "nrightarrow": "↛", "nLeftarrow": "⇍", "nRightarrow": "⇏",
+    "nleftrightarrow": "↮", "nLeftrightarrow": "⇎", "upuparrows": "⇈",
+    "downdownarrows": "⇊", "upharpoonleft": "↿", "upharpoonright": "↾",
+    "downharpoonleft": "⇃", "downharpoonright": "⇂", "multimap": "⊸",
+    # 三角形关系
+    "vartriangleleft": "◁", "vartriangleright": "▷", "trianglelefteq": "⊴",
+    "trianglerighteq": "⊵", "ntriangleleft": "⋪", "ntriangleright": "⋫",
+    "ntrianglelefteq": "⋬", "ntrianglerighteq": "⋭",
+    # 大算符、微积分
+    "sum": "∑", "prod": "∏", "coprod": "∐", "int": "∫", "iint": "∬",
+    "iiint": "∭", "iiiint": "⨌", "oint": "∮", "oiint": "∯", "oiiint": "∰",
+    "bigcup": "⋃", "bigcap": "⋂", "bigsqcup": "⨆", "bigvee": "⋁",
+    "bigwedge": "⋀", "bigodot": "⨀", "bigotimes": "⨂", "bigoplus": "⨁",
+    "biguplus": "⨄", "partial": "∂", "nabla": "∇", "infty": "∞", "sqrt": "√",
     "lim": "lim", "log": "log", "ln": "ln", "exp": "exp", "det": "det",
     "max": "max", "min": "min", "sup": "sup", "inf": "inf",
+    # 点号、角度与其它常用数学符号
+    "dots": "…", "ldots": "…", "cdots": "⋯", "vdots": "⋮", "ddots": "⋱",
+    "prime": "′", "angle": "∠", "measuredangle": "∡", "sphericalangle": "∢",
+    "degree": "°", "surd": "√", "aleph": "ℵ", "beth": "ℶ", "gimel": "ℷ",
+    "daleth": "ℸ", "hbar": "ℏ", "hslash": "ℏ", "ell": "ℓ", "wp": "℘",
+    "Re": "ℜ", "Im": "ℑ", "mho": "℧", "eth": "ð", "Finv": "Ⅎ", "Game": "⅁",
+    "flat": "♭", "natural": "♮", "sharp": "♯", "clubsuit": "♣",
+    "diamondsuit": "♢", "heartsuit": "♡", "spadesuit": "♠", "triangle": "△",
+    "triangledown": "▽", "blacktriangle": "▲", "blacktriangledown": "▼",
+    "square": "□", "blacksquare": "■", "Box": "□", "Diamond": "◇",
+    "lozenge": "◊", "blacklozenge": "⧫", "bigstar": "★", "qed": "∎",
+    "checkmark": "✓", "copyright": "©", "pounds": "£", "yen": "¥", "euro": "€",
+    "bmod": "mod",
+    # 括号与定界符
+    "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉",
+    "langle": "⟨", "rangle": "⟩", "lvert": "|", "rvert": "|", "lVert": "‖",
+    "rVert": "‖", "vert": "|", "Vert": "‖", "lbrack": "[", "rbrack": "]",
+    "lbrace": "{", "rbrace": "}", "backslash": "\\", "ulcorner": "⌜",
+    "urcorner": "⌝", "llcorner": "⌞", "lrcorner": "⌟",
 }
 
 _SUPERSCRIPT = {
@@ -241,9 +318,7 @@ def latex_to_unicode(latex: str) -> str:
     '''
     tokens = _tokenize(latex or "")
     text, _ = _render_sequence(tokens, 0)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
-    return unicodedata.normalize("NFC", text).strip()
+    return unicodedata.normalize("NFC", _tidy_spacing(text)).strip()
 
 
 # ============================ 分词 ============================
@@ -300,7 +375,7 @@ _FRACTIONS = frozenset({"frac", "dfrac", "tfrac", "cfrac"})
 _BINOMIALS = frozenset({"binom", "dbinom", "tbinom"})
 #: 去掉命令只看内容
 _TRANSPARENT = frozenset(
-    {"boxed", "fbox", "text", "mathrm", "operatorname", "mbox", "textbf",
+    {"text", "mathrm", "operatorname", "mbox", "textbf",
      "textit", "textsf", "textrm", "textnormal", "mathnormal", "boldsymbol",
      "mathbf", "mathit", "mathsf", "mathtt", "mathcal", "ensuremath"}
 )
@@ -320,16 +395,19 @@ _DELIMITER_COMMANDS = frozenset({"left", "right", "middle", "big", "Big",
 #: 重音命令 -> 组合字符
 _ACCENT_MARKS = {
     "hat": "\u0302", "widehat": "\u0302", "bar": "\u0304", "overline": "\u0304",
-    "vec": "\u20d7", "tilde": "\u0303", "widetilde": "\u0303",
-    "dot": "\u0307", "ddot": "\u0308",
+    "vec": "\u20d7", "overrightarrow": "\u20d7", "overleftarrow": "\u20d6",
+    "tilde": "\u0303", "widetilde": "\u0303", "dot": "\u0307", "ddot": "\u0308",
+    "acute": "\u0301", "grave": "\u0300", "breve": "\u0306", "check": "\u030c",
+    "mathring": "\u030a",
 }
 
 #: 函数名：原样输出（`\arctan` -> `arctan`，不改写成 `atan`）
 _FUNCTIONS = frozenset(
     {"ln", "log", "lg", "exp", "sin", "cos", "tan", "cot", "sec", "csc",
      "arcsin", "arccos", "arctan", "arccot", "sinh", "cosh", "tanh", "coth",
-     "lim", "max", "min", "sup", "inf", "det", "dim", "ker", "deg", "gcd",
-     "arg", "Pr", "mod", "bmod"}
+     "lim", "liminf", "limsup", "max", "min", "sup", "inf", "det", "dim",
+     "ker", "deg", "gcd", "hom", "arg", "Pr", "mod", "injlim", "projlim",
+     "varinjlim", "varprojlim", "varliminf", "varlimsup"}
 )
 
 #: 多行环境：行与行之间换真换行
@@ -338,6 +416,45 @@ _MULTILINE_ENVS = frozenset(
      "aligned", "align", "align*", "gathered", "gather", "gather*", "split",
      "array", "eqnarray", "eqnarray*", "subarray", "smallmatrix"}
 )
+
+
+def _tidy_spacing(text: str) -> str:
+    '''压掉多余空格：连续空格并一个、换行两侧的空白去掉。
+
+    `latex_to_unicode` 末尾和 `\\boxed` 画框前都要用 —— 先压再量宽度，
+    否则 `a \\\\ b` 这种「换行两边带空格」的写法会让框宽和内容对不上。
+    '''
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+
+
+def _display_width(text: str) -> int:
+    '''终端显示宽度：全角/宽字符占 2 列，组合符号占 0 列。'''
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+    return width
+
+
+def _box(text: str) -> str:
+    '''用框线字符把内容框起来（`\\boxed{...}`）。
+
+    多行内容逐行补空格对齐；宽度按终端列数算，中日韩字符占两列，
+    否则中文答案的框会短一截。
+    '''
+    lines = (text or "").split("\n")
+    width = max((_display_width(line) for line in lines), default=0)
+    # 补白用不换行空格：后续的 `_tidy_spacing` 会把连续普通空格并成一个，
+    # 多行框的右边界就会歪掉。
+    body = [
+        "│ " + line + "\u00a0" * (width - _display_width(line)) + " │"
+        for line in lines
+    ]
+    return "\n".join(
+        ["┌" + "─" * (width + 2) + "┐", *body, "└" + "─" * (width + 2) + "┘"]
+    )
 
 
 def _as_script(body: str, table: Dict[str, str]) -> Optional[str]:
@@ -448,7 +565,43 @@ def _render_command(
 
     if name in _ACCENT_MARKS:
         base, pos = _read_argument(tokens, pos)
+        # 组合符号交给终端合成；拉丁字母会在最后被 NFC 归一化成预组合字符
         return base + _ACCENT_MARKS[name], pos
+
+    if name == "pmod":
+        argument, pos = _read_argument(tokens, pos)
+        return f"(mod {argument})", pos
+
+    if name in ("boxed", "fbox"):
+        content, pos = _read_argument(tokens, pos)
+        return _box(_tidy_spacing(content)), pos
+
+    # 颜色只影响样式，颜色名必须吃掉，否则 `color redy` 会漏进公式
+    if name == "color":
+        _color, pos = _read_argument(tokens, pos)
+        return "", pos
+
+    if name in ("textcolor", "colorbox"):
+        _color, pos = _read_argument(tokens, pos)
+        return _read_argument(tokens, pos)
+
+    if name == "fcolorbox":
+        _frame, pos = _read_argument(tokens, pos)
+        _color, pos = _read_argument(tokens, pos)
+        return _read_argument(tokens, pos)
+
+    if name == "not":
+        argument, pos = _read_argument(tokens, pos)
+        negated = {
+            "=": "≠", "<": "≮", ">": "≯", "≤": "≰", "≥": "≱",
+            "∈": "∉", "∋": "∌", "⊂": "⊄", "⊃": "⊅", "⊆": "⊈",
+            "⊇": "⊉", "≈": "≉", "≡": "≢", "∼": "≁", "≅": "≇",
+            "≺": "⊀", "≻": "⊁", "⪯": "⋠", "⪰": "⋡", "∣": "∤",
+            "∥": "∦", "⊢": "⊬", "⊨": "⊭", "⊩": "⊮", "⊪": "⊯",
+            "←": "↚", "→": "↛", "↔": "↮", "⇐": "⇍", "⇒": "⇏",
+            "⇔": "⇎", "◁": "⋪", "▷": "⋫", "⊴": "⋬", "⊵": "⋭",
+        }
+        return negated.get(argument, argument + "\u0338"), pos
 
     if name in _TRANSPARENT:
         return _read_argument(tokens, pos)
@@ -669,6 +822,79 @@ def _strip_boxed(latex: str) -> str:
     return "".join(out)
 
 
+def _unwrap_fully_boxed(latex: str) -> Optional[str]:
+    '''整段式子就是一个 `\\boxed{...}` 时，返回里面的内容。
+
+    这样 `\\boxed{\\frac{a}{b}}` 可以先交给 TeXicode 画分数、再整体套框；
+    直接交给 txc 的话它不认 `\\boxed`，框会丢。
+    '''
+    text = latex.strip()
+    for token in (r"\boxed", r"\fbox"):
+        if not text.startswith(token):
+            continue
+        if len(text) > len(token) and text[len(token)].isalpha():
+            continue
+        cursor = len(token)
+        while cursor < len(text) and text[cursor] in " \t\n":
+            cursor += 1
+        if cursor >= len(text) or text[cursor] != "{":
+            continue
+        depth = 0
+        for end in range(cursor, len(text)):
+            if text[end] == "{":
+                depth += 1
+            elif text[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    if text[end + 1 :].strip():
+                        return None  # 外壳后面还有内容，不是整体套框
+                    return text[cursor + 1 : end]
+    return None
+
+
+#: 宽字符占位候选：两列宽、公式里极少出现
+_WIDE_TOKENS = ("qq", "qj", "qx", "qz", "zq", "xz")
+
+
+def _protect_wide_chars(latex: str) -> Tuple[str, List[str], Optional[str]]:
+    '''把中日韩等宽字符换成等宽的 ASCII 占位符。
+
+    TeXicode 按字符数算宽度，一个汉字只当 1 列；终端里汉字占 2 列，
+    分数横线、上下对齐就会整体错位。换成两个 ASCII 字符（同样 2 列）
+    交给它排 art，排完再换回来，宽度就一致了。
+    '''
+    token = next((item for item in _WIDE_TOKENS if item not in latex), None)
+    if token is None:
+        return latex, [], None
+    chars: List[str] = []
+    out: List[str] = []
+    for char in latex:
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            chars.append(char)
+            out.append(token)
+        else:
+            out.append(char)
+    return "".join(out), chars, token
+
+
+def _restore_wide_chars(art: str, chars: List[str], token: Optional[str]) -> str:
+    '''把占位符换回原来的宽字符。数量对不上时原样返回，避免换错内容。'''
+    if not chars or token is None or art.count(token) != len(chars):
+        return art
+    out: List[str] = []
+    index = 0
+    pos = 0
+    while pos < len(art):
+        if art.startswith(token, pos):
+            out.append(chars[index])
+            index += 1
+            pos += len(token)
+        else:
+            out.append(art[pos])
+            pos += 1
+    return "".join(out)
+
+
 #: 纯装饰、TeXicode 不认，直接删掉的带参命令（题号 / 占位）
 _TEXICODE_DROP_ARG = re.compile(
     r"\\(?:tag|phantom|hphantom|vphantom)\s*\{[^{}]*\}"
@@ -677,8 +903,13 @@ _TEXICODE_DROP_ARG = re.compile(
 _TEXICODE_DROP_WORD = re.compile(
     r"\\(?:hline|displaystyle|textstyle|scriptstyle)\b"
 )
-#: `\color{red}` 只影响颜色，删掉命令、保留后面的内容
-_TEXICODE_DROP_COLOR = re.compile(r"\\color\s*\{[^{}]*\}")
+#: 颜色命令只影响样式，删掉命令和颜色参数、保留内容
+_TEXICODE_DROP_COLOR = re.compile(
+    r"\\(?:color|textcolor|colorbox|fcolorbox)\s*\{[^{}]*\}"
+)
+#: 粗体数学命令 TeXicode 不认，会先画一个 `?` 再接内容
+#: （`\boldsymbol{\hat{\beta}}` -> `?β̂`）。粗体只影响字形，去掉命令即可。
+_TEXICODE_DROP_BOLD = re.compile(r"\\(?:boldsymbol|bm|pmb)\b\s*")
 #: `\not=` 换成 `\neq`，否则 txc 只画出一个 `?`
 _TEXICODE_NOT_EQ = re.compile(r"\\not\s*=\s*")
 #: `\overset{A}{B}` / `\underset{A}{B}` / `\stackrel{A}{B}` 改成上下标写法
@@ -710,6 +941,7 @@ def _sanitize_for_texicode(latex: str) -> str:
     text = _TEXICODE_DROP_ARG.sub("", text)
     text = _TEXICODE_DROP_WORD.sub("", text)
     text = _TEXICODE_DROP_COLOR.sub("", text)
+    text = _TEXICODE_DROP_BOLD.sub("", text)
     text = _TEXICODE_NOT_EQ.sub(r"\\neq ", text)
     text = _TEXICODE_STACK.sub(_rewrite_stack, text)
     text = _TEXICODE_ARRAY_SPEC.sub(
@@ -744,9 +976,12 @@ def texicode_render(latex: str) -> Optional[str]:
     if os.name == "nt":
         # 别每次渲染都弹一个控制台窗口（全屏 TUI 里尤其明显）
         extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    protected, wide_chars, wide_token = _protect_wide_chars(
+        _sanitize_for_texicode(latex)
+    )
     try:
         proc = subprocess.run(
-            [_TEXICODE_PATH or _TEXICODE_BIN, _sanitize_for_texicode(latex)],
+            [_TEXICODE_PATH or _TEXICODE_BIN, protected],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -771,6 +1006,8 @@ def texicode_render(latex: str) -> Optional[str]:
     out = (proc.stdout or "").replace("\r\n", "\n").rstrip("\n")
     if not out.strip():
         return None
+    # 汉字在 art 里是占位符，排好版后换回真字符
+    out = _restore_wide_chars(out, wide_chars, wide_token)
     # vmatrix 是借 bmatrix 画的，把方括号的角和边都换成竖线延伸符 `⎢ ⎥`，
     # 这样行列式两边才是连续的竖线，而不是方括号。
     if _TEXICODE_VMATRIX.search(latex):
@@ -811,12 +1048,17 @@ def render_math(
         return cached
 
     result = ""
+    # 整体套框的式子：先渲染里面的内容，最后再由我们补框
+    inner = _unwrap_fully_boxed(latex)
+    target = latex if inner is None else inner
     # TeXicode 优先：输出最忠实原式。只在「复杂公式 + 已开启 + 装了 CLI」时才
     # 请它出马，简单公式（x^2、\beta_0）用内置映射更快，也省一次子进程。
-    if use_texicode and HAVE_TEXICODE and needs_art(latex):
-        result = texicode_render(latex) or ""
+    if use_texicode and HAVE_TEXICODE and needs_art(target):
+        result = texicode_render(target) or ""
     if not result:
-        result = latex_to_unicode(latex) or latex.strip()
+        result = latex_to_unicode(target) or target.strip()
+    if inner is not None:
+        result = _box(result)
 
     if len(_MATH_CACHE) >= _MATH_CACHE_LIMIT:
         _MATH_CACHE.clear()

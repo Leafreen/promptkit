@@ -1,4 +1,4 @@
-﻿﻿# memory/adapters/rerank.py
+# memory/adapters/rerank.py
 '''`Reranker` 的现成适配器：粗排召回之后的精排。
 
 | 适配器 | 依赖 | 说明 |

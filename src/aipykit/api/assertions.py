@@ -1,4 +1,4 @@
-﻿﻿# aipykit/api/assertions.py
+# aipykit/api/assertions.py
 '''DSL 断言：`Assert(rule)` 步骤 + 可插拔的断言适配器。
 
 规则写法与 `If` / `While` 完全一致（bool / Expr / Condition / callable），

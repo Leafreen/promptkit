@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/tui.py
+# core/steps/actions/tui.py
 '''TUI 的 DSL 标记步骤。
 
     from aipykit.core import ChatLoop, EnableTUI

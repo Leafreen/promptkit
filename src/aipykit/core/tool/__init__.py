@@ -1,4 +1,4 @@
-﻿﻿'''工具（function calling）的统一入口。
+'''工具（function calling）的统一入口。
 
 最小的用法就是直接传 Python 函数，签名和 docstring 会自动变成 JSON Schema：
 

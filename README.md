@@ -231,10 +231,26 @@ Agent(base_url="http://localhost:11434/v1", model="qwen2.5",
 | 兼容端点  | `openai-compatible`（必须给 `base_url` 和 `model`） | `OPENAI_API_KEY`         | —       |
 
 厂商识别顺序：`vendor=` 显式 > `base_url` 主机名 > `model` 前缀 > 环境里
-现成的密钥 > DeepSeek。厂商特有参数走 `params=`（如
-`Agent(params={"reasoning_effort": "low"})`）。内部统一说 Chat Completions
-方言，Anthropic 的协议差异由 `AnthropicClient` 翻译（`urllib` 直连，不需要
-装 anthropic SDK）。
+现成的密钥 > DeepSeek。厂商特有参数走 `params=`；「思考多深」建议用统一的
+`reasoning=`（`low` / `medium` / `high` / `minimal` / `off`），各家不一样的
+参数名由客户端翻译：
+
+```python
+Agent(reasoning="low")                                     # DeepSeek
+Agent(vendor="openai", reasoning="high")                   # OpenAI
+Agent(vendor="anthropic", reasoning="medium", max_tokens=8192)
+Agent(vendor="doubao", reasoning="off")                    # 豆包只有开关
+```
+
+| 厂商 | `reasoning="high"` 实际发出去的参数 |
+| --- | --- |
+| DeepSeek | `reasoning_effort="high"` + `extra_body.thinking` |
+| OpenAI / 兼容端点 | `reasoning_effort="high"` |
+| Anthropic | `thinking={"type":"enabled","budget_tokens":3072}`（要求 `max_tokens` 更大） |
+| 豆包 | `extra_body.thinking`（只有开关，没有等级） |
+
+内部统一说 Chat Completions 方言，Anthropic 的协议差异由 `AnthropicClient`
+翻译（`urllib` 直连，不需要装 anthropic SDK）。
 
 如果别人可以看到你的代码，或者你有意要把代码传给他人，**千万不要**明文把你的apikey扔进代码里！！！请进行脱敏处理。
 

@@ -1,4 +1,4 @@
-﻿﻿# orchestrate/__init__.py
+# orchestrate/__init__.py
 '''多代理编排：把大任务拆开、分头执行、汇总结果、控制成本。
 
 一句话：**`Plan`（拆任务）+ `Orchestrator`（调度）+ `SubAgent`（隔离执行）

@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/recall.py
+# core/steps/actions/recall.py
 '''检索原语：`RecallMemory` —— 语义召回 + 预算裁剪 + 拼成可读文本。
 
 为什么召回单独一个原语、不塞进 `ReadMemory`

@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/multimodal.py
+# core/steps/actions/multimodal.py
 '''多模态生成 / 理解步骤：文生图、文生视频、语音转文字、文字转语音。
 
 四个步骤都是薄壳：

@@ -1,4 +1,4 @@
-﻿﻿# orchestrate/api.py
+# orchestrate/api.py
 '''统一的对外接口：请求 / 响应 + 错误码 + 入参校验。
 
 面向「一次调用」的形态（和 REST 的资源动作同构），但不绑定传输层 ——

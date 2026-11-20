@@ -1,4 +1,4 @@
-﻿﻿# core/event_sys/events.py
+# core/event_sys/events.py
 '''事件定义。
 
 核心库只负责 **发事件**，「要不要显示、怎么显示」由调用方的 handler 决定。

@@ -1,4 +1,4 @@
-﻿﻿# skill/context.py
+# skill/context.py
 '''`SkillContext`：Skill 执行时能拿到的东西。
 
 一个 Skill 不该自己 `Agent()`、自己连数据库、自己 print。需要什么就从 ctx 拿：

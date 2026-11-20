@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/mcp_step.py
+# core/steps/actions/mcp_step.py
 '''在工作流中显式调用 MCP 工具的 Step —— 不经过 Agent 循环，直接按映射参数。
 
 为什么要单独一个 Step：

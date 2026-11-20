@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/skill.py
+# core/steps/actions/skill.py
 '''`SkillStep`：在 DSL 工作流里调用一个 Skill。
 
 `FunctionStep` 是 Step（调用约定是 `func(context)`，只有一个参数），Skill 是

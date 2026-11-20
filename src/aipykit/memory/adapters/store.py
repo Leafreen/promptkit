@@ -1,4 +1,4 @@
-﻿﻿# memory/adapters/store.py
+# memory/adapters/store.py
 '''`VectorStore` 的现成适配器。
 
 | 适配器 | 依赖 | 说明 |

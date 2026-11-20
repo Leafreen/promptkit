@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/message.py
+# core/steps/actions/message.py
 '''把一条消息追加进 context["messages"]。'''
 from __future__ import annotations
 

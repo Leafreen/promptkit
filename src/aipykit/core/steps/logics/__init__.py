@@ -1,4 +1,4 @@
-﻿﻿'''逻辑类步骤：控制流、函数、跳转、变量，以及配套的条件系统。
+'''逻辑类步骤：控制流、函数、跳转、变量，以及配套的条件系统。
 
 不调用任何外部能力，只是「怎么算、往哪走」：
 
@@ -69,6 +69,7 @@ from aipykit.core.steps.logics.semantic import (
     UNKNOWN_ELSE,
     UNKNOWN_RAISE,
     Classify,
+    InRange,
     Intent,
     Judge,
     JudgeRequest,
@@ -135,6 +136,7 @@ __all__ = [
     "Intent",
     "Similar",
     "Classify",
+    "InRange",
     "Sem",
     "SemanticCondition",
     "Judge",

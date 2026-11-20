@@ -1,4 +1,4 @@
-﻿﻿'''EnableTUI 的接线：标记步骤的摘除、输入注入、环境不满足时的显式失败。'''
+'''EnableTUI 的接线：标记步骤的摘除、输入注入、环境不满足时的显式失败。'''
 import pytest
 
 from aipykit.core import (
@@ -584,7 +584,7 @@ def test_fullscreen_thinking_panel_appears_collapsed():
             panels = list(app.query("Collapsible.thinking-panel"))
             assert len(panels) == 1
             panel = panels[0]
-            assert panel.title.startswith("✦ 思考")
+            assert "思考" in panel.title
             assert "Ctrl+R 展开" in panel.title
             assert panel.collapsed is True
             content = panel.query_one("Static.panel-content")
@@ -794,11 +794,13 @@ def test_fullscreen_status_bar_shows_model_and_context_usage():
     import asyncio
     import threading
 
+    from promptkit.agent import Agent
     from promptkit.core.event_sys import EVENT_BUS_KEY, Event, EventType
     from promptkit.tui.textual_app import TutorApp
     from textual.widgets import Static
 
     ctx = Context()
+    ctx["agent"] = Agent(api_key="k", reasoning="high", register_as_default=False)
     allow_exit = threading.Event()
 
     def loop(context):
@@ -818,22 +820,26 @@ def test_fullscreen_status_bar_shows_model_and_context_usage():
             left = str(app.query_one("#status-left", Static).render())
             right = str(app.query_one("#status-right", Static).render())
             detail = str(app.query_one("#status-detail", Static).render())
+            footer = str(app.query_one("#footer", Static).render())
             try:
                 await pilot.pause(0.1)
             finally:
                 allow_exit.set()
             await pilot.pause(0.2)
-        return app, left, right, detail
+        return app, left, right, detail, footer
 
-    app, left, right, detail = asyncio.run(
+    app, left, right, detail, footer = asyncio.run(
         asyncio.wait_for(exercise(), timeout=20)
     )
     assert app.error is None
     assert "deepseek" in left
-    assert "39.8k" in right
-    assert "4.0%" in right
-    assert "ctx 4.0%" in detail
-    assert "↑39.0k" in detail
+    assert "↑39.0k" in right
+    # 底部一行：思考等级 + 全宽上下文进度条 + 用量
+    assert "MAX" in footer
+    assert "=" in footer
+    assert "39.8k/1.0M" in footer
+    assert "4.0%" in footer
+    assert "Ctrl+S 导出" in detail
 
 
 def test_fullscreen_jump_hint_appears_above_bottom():
@@ -929,7 +935,7 @@ def test_fullscreen_ctrl_s_exports_transcript_markdown(tmp_path, monkeypatch):
     assert "你好" in text
     assert "## 助手" in text
     assert "答案是 42" in text
-    assert "<summary>✦ 思考" in text
+    assert "<summary>✦ 思考" in text or "<summary>⚡ 思考" in text
     assert "让我想想" in text
     assert "<summary>● Read" in text
     assert "42 条结果" in text

@@ -43,6 +43,12 @@ from aipykit.client_sys.client import (
     UnsupportedModality,
     part_data_url,
 )
+from aipykit.client_sys.reasoning import (
+    OFF_ALIASES,
+    ReasoningSpec,
+    expand_reasoning,
+    reasoning_params,
+)
 from aipykit.client_sys.openai_client import OpenAIClient
 from aipykit.client_sys.doubao_client import DoubaoClient
 from aipykit.client_sys.anthropic_client import (
@@ -81,6 +87,11 @@ __all__ = [
     "ClientSpec",
     "UnsupportedModality",
     "part_data_url",
+    # 推理等级
+    "ReasoningSpec",
+    "OFF_ALIASES",
+    "expand_reasoning",
+    "reasoning_params",
     # 实现
     "OpenAIClient",
     "DoubaoClient",

@@ -1,4 +1,4 @@
-﻿﻿# skill/orchestrate_skill.py
+# skill/orchestrate_skill.py
 '''把 `aipykit.orchestrate` 封装成可注册、可直接调用的 Skill 集合。
 
 **一个导入点搞定全部** —— 不需要再手动 `import Orchestrator / PlanSpec / Request /

@@ -28,9 +28,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from aipykit.client_sys.reasoning import ReasoningSpec
+
 __all__ = [
     "ClientError",
     "UnsupportedModality",
+    "ReasoningSpec",
     "ClientSpec",
     "BaseClient",
     "ChatClient",
@@ -111,6 +114,10 @@ class ClientSpec:
     aliases: Tuple[str, ...] = ()
     #: 补充说明（`vendor_names()` 的展示、报错提示用）
     note: str = ""
+    #: 统一推理等级（low / medium / high / off）怎么翻成本厂商参数；
+    #: None 表示这家不做统一适配，只能走 `params=` 传原生参数。
+    #: 放在最后，避免打乱按位置构造 `ClientSpec` 的老代码。
+    reasoning: Optional[ReasoningSpec] = None
 
     def names(self) -> Tuple[str, ...]:
         return (self.name, *self.aliases)

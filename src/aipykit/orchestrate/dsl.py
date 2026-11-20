@@ -1,4 +1,4 @@
-﻿﻿# orchestrate/dsl.py
+# orchestrate/dsl.py
 '''DSL 声明式配置：一份 dict 同时描述**任务、调度规则、协同策略**。
 
 这是 planner 与多 agent 协同的**标准解析接入点**，不需要任何适配层：

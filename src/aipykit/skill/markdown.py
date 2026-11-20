@@ -1,4 +1,4 @@
-﻿﻿# skill/markdown.py
+# skill/markdown.py
 '''从外部 Markdown 文件加载技能（不改代码就能扩展能力）。
 
 一个 `.md` 技能就是「一段说明 + 一份参数表」。模型调用它时拿到的是

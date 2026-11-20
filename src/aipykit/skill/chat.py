@@ -1,4 +1,4 @@
-﻿﻿# skill/chat.py
+# skill/chat.py
 '''把 Skill / DSL `Function` 挂到 `ChatWorkflow(skills=[...])` 上。
 
 聊天里模型只能看到「工具」：名字 + 描述 + 参数 Schema。所以这里做两件事：

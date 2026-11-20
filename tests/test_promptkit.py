@@ -1,4 +1,4 @@
-﻿﻿﻿'''promptkit 的冒烟测试 —— 不需要网络和 API Key，直接运行：
+'''promptkit 的冒烟测试 —— 不需要网络和 API Key，直接运行：
 
     python tests/test_promptkit.py
 '''
@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import sys
+import unicodedata
 import unittest
 import urllib.error
 from types import SimpleNamespace
@@ -170,7 +171,9 @@ from aipykit.client_sys import (  # noqa: E402
     ClientSpec,
     Completion,
     OpenAIClient,
+    ReasoningSpec,
     detect_vendor,
+    expand_reasoning,
     get_spec,
     iter_sse,
     make_client,
@@ -7217,6 +7220,40 @@ class TestMathRendering(PromptkitTestCase):
         self.assertEqual(latex_to_unicode(r"a \cdot b"), "a · b")
         self.assertEqual(latex_to_unicode(r"a \le b \ge c"), "a ≤ b ≥ c")
         self.assertEqual(latex_to_unicode(r"a \ne b"), "a ≠ b")
+        self.assertEqual(
+            latex_to_unicode(r"b_d=x_u \oplus y_u \oplus c_u"),
+            "b_d=xᵤ ⊕ yᵤ ⊕ cᵤ",
+        )
+
+    def test_all_registered_symbols_render(self):
+        from aipykit.core.display_sys.render import _SYMBOLS
+
+        for name, expected in _SYMBOLS.items():
+            if name == "sqrt":  # 需要参数的结构性命令单独测试
+                continue
+            with self.subTest(command=name):
+                self.assertEqual(latex_to_unicode("\\" + name), expected)
+
+    def test_extended_symbol_categories(self):
+        cases = {
+            r"\oplus \ominus \otimes \oslash \odot": "⊕ ⊖ ⊗ ⊘ ⊙",
+            r"\subseteq \supseteq \notin \nexists \varnothing": "⊆ ⊇ ∉ ∄ ∅",
+            r"\leqslant \geqslant \lesssim \gtrsim \preceq \succeq": "⩽ ⩾ ≲ ≳ ⪯ ⪰",
+            r"\longrightarrow \Longleftrightarrow \mapsto \rightsquigarrow": "⟶ ⟺ ↦ ⇝",
+            r"\iiint \bigoplus \bigotimes \bigcup \bigcap": "∭ ⨁ ⨂ ⋃ ⋂",
+            r"\aleph \hbar \ell \Re \Im \partial \nabla": "ℵ ℏ ℓ ℜ ℑ ∂ ∇",
+            r"\lfloor x \rfloor \lceil x \rceil \langle x \rangle": "⌊ x ⌋ ⌈ x ⌉ ⟨ x ⟩",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(latex_to_unicode(source), expected)
+
+    def test_mod_and_general_negation_commands(self):
+        self.assertEqual(latex_to_unicode(r"h_i = i \bmod 2"), "hᵢ = i mod 2")
+        self.assertEqual(latex_to_unicode(r"n \pmod{m}"), "n (mod m)")
+        self.assertEqual(latex_to_unicode(r"x \not\in A"), "x ∉ A")
+        self.assertEqual(latex_to_unicode(r"a \not< b"), "a ≮ b")
+        self.assertEqual(latex_to_unicode(r"a \not\approx b"), "a ≉ b")
 
     def test_superscripts_and_subscripts(self):
         self.assertEqual(latex_to_unicode("x^2"), "x²")
@@ -7256,10 +7293,57 @@ class TestMathRendering(PromptkitTestCase):
         self.assertEqual(latex_to_unicode(r"\int_0^1 x"), "∫₀¹ x")
 
     def test_accents(self):
-        # NFC 归一化，所以是预组合的 U+0177，而不是 y + U+0302
+        # 拉丁字母有预组合形式，NFC 归一化后是单个码点
         self.assertEqual(latex_to_unicode(r"\hat{y}"), "\u0177")
         self.assertEqual(latex_to_unicode(r"\hat{a}"), "\u00e2")
+        self.assertEqual(latex_to_unicode(r"\dot{x}"), "\u1e8b")
+
+    def test_accents_keep_combining_marks(self):
+        '''希腊字母没有预组合形式，保留组合符号交给终端合成。'''
+        self.assertEqual(latex_to_unicode(r"\hat{\beta}"), "\u03b2\u0302")
         self.assertEqual(latex_to_unicode(r"\bar{x}"), "x\u0304")
+        self.assertEqual(latex_to_unicode(r"\overline{AB}"), "AB\u0304")
+        self.assertEqual(latex_to_unicode(r"\vec{v}"), "v\u20d7")
+        # 组合符号必须紧跟在基字符后面
+        rendered = render_math(r"\hat{\beta}", prefer_texicode=False)
+        self.assertTrue(any(unicodedata.combining(ch) for ch in rendered))
+
+    def test_color_commands_keep_content_and_drop_color(self):
+        '''颜色只影响样式；命令名和颜色名不能漏进公式。'''
+        self.assertEqual(latex_to_unicode(r"\color{red}{y}"), "y")
+        self.assertEqual(latex_to_unicode(r"\textcolor{red}{y}"), "y")
+        self.assertEqual(latex_to_unicode(r"\colorbox{yellow}{x}"), "x")
+        self.assertEqual(
+            latex_to_unicode(r"\fcolorbox{black}{yellow}{x}"), "x"
+        )
+        self.assertEqual(latex_to_unicode(r"a + \color{blue} b"), "a + b")
+
+    def test_boxed_draws_a_real_box(self):
+        self.assertEqual(
+            latex_to_unicode(r"\boxed{x+1}"),
+            "┌─────┐\n│ x+1 │\n└─────┘",
+        )
+        # 中文按两列算，框不能短一截
+        self.assertEqual(
+            latex_to_unicode(r"\boxed{答}"),
+            "┌────┐\n│ 答 │\n└────┘",
+        )
+        # 多行逐行对齐
+        self.assertEqual(
+            latex_to_unicode(r"\boxed{a \\ b}"),
+            "┌───┐\n│ a │\n│ b │\n└───┘",
+        )
+
+    def test_whole_formula_box_keeps_art(self):
+        '''整体套框时先渲染内容再补框，txc 的 `?` 不能混进来。'''
+        out = render_math(r"\boxed{\frac{a}{b}}", prefer_texicode=False)
+        self.assertTrue(out.startswith("┌"), out)
+        self.assertIn("(a)/(b)", out)
+        self.assertTrue(out.rstrip().endswith("┘"), out)
+
+        partial = latex_to_unicode(r"E=\boxed{mc^2}")
+        self.assertIn("┌", partial)
+        self.assertIn("mc²", partial)
 
     def test_left_right_and_spacing_are_dropped(self):
         self.assertEqual(latex_to_unicode(r"\left( x \right)"), "( x )")
@@ -7389,16 +7473,51 @@ class TestMathRendering(PromptkitTestCase):
         ) as run:
             texicode_render(
                 r"\begin{array}{c|c}a&b\end{array} E=mc^2\tag{1} "
-                r"a\not=b \overset{n}{\sum} \phantom{xx} \color{red}{y}"
+                r"a\not=b \overset{n}{\sum} \phantom{xx} \color{red}{y} "
+                r"\textcolor{blue}{z} \colorbox{yellow}{w} "
+                r"\boldsymbol{\hat{\beta}} \bm{x} \pmb{y}"
             )
             sent = run.call_args.args[0][1]
         self.assertNotIn("|", sent)          # array 列格式里的竖线
         self.assertNotIn("tag", sent)        # 题号
         self.assertNotIn("phantom", sent)    # 占位
         self.assertNotIn("color", sent)      # 颜色命令
+        self.assertNotIn("boldsymbol", sent)  # 粗体命令 txc 会画成 `?`
+        self.assertNotIn(r"\bm", sent)
+        self.assertNotIn(r"\pmb", sent)
+        self.assertIn(r"\hat{\beta}", sent)  # 内容要保留
         self.assertNotIn(r"\not=", sent)     # 换成 \neq
         self.assertIn(r"\neq", sent)
         self.assertIn(r"{\sum}^{n}", sent)   # overset 降级成上标
+
+    def test_wide_chars_are_protected_for_texicode(self):
+        '''汉字占两列、txc 按一列算会错位：先换成等宽占位符再排版。'''
+        from aipykit.core.display_sys.render import (
+            _display_width,
+            _protect_wide_chars,
+            _restore_wide_chars,
+        )
+
+        latex = r"\frac{\text{估计斜率}}{\text{标准误}}"
+        protected, chars, token = _protect_wide_chars(latex)
+        self.assertEqual(len(chars), 7)
+        self.assertNotIn("估", protected)
+        # 占位后显示宽度必须和原式一致，否则分数横线仍会歪
+        self.assertEqual(_display_width(protected), _display_width(latex))
+        self.assertEqual(_restore_wide_chars(protected, chars, token), latex)
+        # 占位符数量对不上时原样返回，不能换错内容
+        self.assertEqual(_restore_wide_chars("qq", chars, token), "qq")
+
+        proc = mock.Mock(returncode=0, stdout="art\n", stderr="")
+        with mock.patch(
+            "aipykit.core.display_sys.render.HAVE_TEXICODE", True
+        ), mock.patch(
+            "aipykit.core.display_sys.render.subprocess.run",
+            return_value=proc,
+        ) as run:
+            texicode_render(latex)
+        sent = run.call_args.args[0][1]
+        self.assertFalse(any(ch in sent for ch in "估计斜率标准误"))
 
     def test_texicode_error_output_falls_back(self):
         '''txc 有些失败仍 exit 0，把错误写到 stdout —— 不能当成公式显示。'''
@@ -11489,15 +11608,18 @@ class TestAnthropicTranslation(PromptkitTestCase):
             )
         self.assertIn("response_format", str(cm.exception))
 
-    def test_thinking_is_rejected_with_an_explanation(self):
+    def test_thinking_is_rejected_with_tools(self):
+        # 不带工具时可以用 extended thinking；带工具必须回传 signature，
+        # 通用历史里没地方存，所以这里提前拒绝。
         client, _ = anthropic_client_with({})
         with self.assertRaises(ClientError) as cm:
             client.create(
                 model="claude",
                 messages=[{"role": "user", "content": "x"}],
+                tools=[{"type": "function", "function": {"name": "f"}}],
                 thinking={"type": "enabled", "budget_tokens": 1024},
             )
-        self.assertIn("extended thinking", str(cm.exception))
+        self.assertIn("signature", str(cm.exception))
 
     def test_model_is_required(self):
         client, _ = anthropic_client_with({})
@@ -11927,6 +12049,149 @@ class TestAgentMultiVendor(PromptkitTestCase):
             Prompt(role="user", content="意图？"), Intent
         )
         self.assertEqual(value.label, "退款")
+
+
+class TestReasoningLevels(PromptkitTestCase):
+    '''统一的 reasoning 等级 -> 各厂商自己的参数名/形状。'''
+
+    def test_deepseek_expands_to_reasoning_effort_and_thinking(self):
+        agent = Agent(api_key="k", reasoning="low", register_as_default=False)
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        self.assertEqual(agent.ask("hello"), "hi")
+        call = sdk.calls[0]
+        self.assertEqual(call["reasoning_effort"], "low")
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_deepseek_off_leaves_no_default_level_behind(self):
+        agent = Agent(api_key="k", reasoning="off", register_as_default=False)
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        agent.ask("hello")
+        call = sdk.calls[0]
+        self.assertNotIn("reasoning_effort", call)
+        self.assertEqual(call["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_openai_uses_reasoning_effort(self):
+        agent = Agent(
+            vendor="openai", api_key="k", reasoning="high", register_as_default=False
+        )
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        agent.ask("hello")
+        self.assertEqual(sdk.calls[0]["reasoning_effort"], "high")
+        self.assertNotIn("extra_body", sdk.calls[0])
+
+    def test_doubao_maps_levels_to_the_thinking_switch(self):
+        agent = Agent(
+            vendor="doubao", api_key="k", reasoning="high", register_as_default=False
+        )
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        agent.ask("hello")
+        self.assertEqual(sdk.calls[0]["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_anthropic_maps_levels_to_thinking_budget(self):
+        agent = Agent(
+            vendor="anthropic", api_key="k", reasoning="low", register_as_default=False
+        )
+        seen = []
+
+        def transport(url, body, stream):
+            seen.append(body)
+            return {
+                "content": [{"type": "text", "text": "好"}],
+                "stop_reason": "end_turn",
+            }
+
+        agent.client.transport = transport
+
+        self.assertEqual(agent.ask("hi"), "好")
+        self.assertEqual(
+            seen[0]["thinking"], {"type": "enabled", "budget_tokens": 1024}
+        )
+        self.assertEqual(seen[0]["max_tokens"], 4096)
+
+    def test_unknown_level_fails_at_construction(self):
+        with self.assertRaises(ValueError) as cm:
+            Agent(api_key="k", reasoning="ultra", register_as_default=False)
+        message = str(cm.exception)
+        self.assertIn("ultra", message)
+        self.assertIn("low", message)
+
+    def test_legacy_params_key_is_translated_too(self):
+        agent = Agent(
+            vendor="doubao",
+            api_key="k",
+            params={"reasoning_effort": "low"},
+            register_as_default=False,
+        )
+        sdk = FakeSDK([fake_message(role="assistant", content="hi")])
+        agent.client.sdk = sdk
+
+        agent.ask("hello")
+        self.assertEqual(sdk.calls[0]["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_reasoning_level_reports_the_effective_level(self):
+        # DeepSeek 的厂商默认值（high）也算「当前生效」
+        self.assertEqual(
+            Agent(api_key="k", register_as_default=False).reasoning_level, "high"
+        )
+        self.assertEqual(
+            Agent(
+                api_key="k", reasoning="LOW", register_as_default=False
+            ).reasoning_level,
+            "low",
+        )
+        # OpenAI 默认不给你加推理参数，就没什么可展示的
+        self.assertIsNone(
+            Agent(
+                vendor="openai", api_key="k", register_as_default=False
+            ).reasoning_level
+        )
+
+    def test_reasoning_is_max_marks_the_top_level(self):
+        # DeepSeek 默认 high，正好是最高档
+        self.assertTrue(Agent(api_key="k", register_as_default=False).reasoning_is_max)
+        self.assertFalse(
+            Agent(
+                api_key="k", reasoning="low", register_as_default=False
+            ).reasoning_is_max
+        )
+        # 没设置等级就没特效
+        self.assertFalse(
+            Agent(
+                vendor="openai", api_key="k", register_as_default=False
+            ).reasoning_is_max
+        )
+
+    def test_custom_vendor_can_declare_its_own_reasoning_params(self):
+        custom = ClientSpec(
+            name="custom-reasoning",
+            label="自定义厂商",
+            kind="openai",
+            default_model="m",
+            default_base_url="https://x/v1",
+            reasoning=ReasoningSpec(
+                levels={
+                    "low": {"extra_body": {"enable_thinking": False}},
+                    "high": {"extra_body": {"enable_thinking": True}},
+                },
+                off={"extra_body": {"enable_thinking": False}},
+            ),
+        )
+        self.assertEqual(
+            expand_reasoning(custom, {"reasoning": "high"}),
+            {"extra_body": {"enable_thinking": True}},
+        )
+        self.assertEqual(
+            expand_reasoning(custom, {"reasoning_effort": "low"}),
+            {"extra_body": {"enable_thinking": False}},
+        )
 
 
 from aipykit.coding import (  # noqa: E402

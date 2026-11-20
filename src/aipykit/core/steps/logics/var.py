@@ -1,4 +1,4 @@
-﻿﻿# core/steps/logics/var.py
+# core/steps/logics/var.py
 '''变量：声明（NewVar / Number / Str）、赋值（Set / Var(val=...)）、
 复合赋值（Inc / Dec）、引用（Var("x")）。'''
 from __future__ import annotations

@@ -1,4 +1,4 @@
-﻿﻿# memory/session.py
+# memory/session.py
 '''短期记忆：把当前对话（`Agent.history`）当成一块可读的记忆。
 
 **不引入任何新存储** —— 它只是给 `agent.history` 套一层 `read()`，

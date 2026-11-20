@@ -1,4 +1,4 @@
-﻿﻿﻿# core/steps/actions/interactive.py
+# core/steps/actions/interactive.py
 '''跟外部打交道的「输入 / 输出」步骤。
 
 - `Read` / `ReadFile`：读标准输入 / 读文件（都是**惰性表达式**）

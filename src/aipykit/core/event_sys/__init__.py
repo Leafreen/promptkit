@@ -1,4 +1,4 @@
-﻿﻿from aipykit.core.event_sys.callbacks import ChildBus, EventBus, EventHandler
+from aipykit.core.event_sys.callbacks import ChildBus, EventBus, EventHandler
 from aipykit.core.event_sys.events import (
     ERROR,
     EVENT_BUS_KEY,

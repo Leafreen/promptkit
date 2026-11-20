@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/memory.py
+# core/steps/actions/memory.py
 '''和长期记忆打交道的 IO 原语：`ReadMemory` / `WriteMemory` / `ForgetMemory`，
 外加把三件事组合起来的 `MemoryStep`。
 

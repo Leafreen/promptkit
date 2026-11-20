@@ -19,8 +19,8 @@
     judge = LLMJudge(agent)
 
     wf = Workflow(
-        If(Intent(Var("reply"), "退款", "其他").AtLeast(0.8)).Then(...),
-        Set("sentiment", Classify(Var("reply"), "积极的", "消极的", "其他")),
+        If(Intent(Var("reply"), ["退款", "其他"]).AtLeast(0.8)).Then(...),
+        Set("sentiment", Classify(Var("reply"), ["积极的", "消极的", "其他"])),
         Switch(Var("sentiment"))
             .Case("积极的").Then(...)
             .Case("消极的").Then(...)
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Dict, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Dict, Iterable, Optional, Tuple, cast
 
 from aipykit.core.errors import WorkflowError
 from aipykit.core.event_sys.events import EventType, emit
@@ -623,7 +623,7 @@ def _note(reason: str, note: str) -> str:
 class Intent(SemanticCondition):
     '''判断一段文本的意图是不是闭集里的某个标签。
 
-        If(Intent(Var("reply"), "退款", "换货", "其他").Using(judge)).Then(...)
+        If(Intent(Var("reply"), ["退款", "换货", "其他"]).Using(judge)).Then(...)
 
     标签可以是字符串，也可以是 `Label("退款", "用户要求退回已付款项", "我要退款")`。
     闭集里必须有「其他 / 未知」，否则模型没有退路。
@@ -632,7 +632,7 @@ class Intent(SemanticCondition):
     name = "intent"
     kind = "intent"
 
-    def __init__(self, source: object, *labels: object):
+    def __init__(self, source: object, labels: Iterable[object]):
         super().__init__()
         self.source = as_expr(source)
         self.labels = tuple(Label.of(item) for item in labels)
@@ -811,7 +811,7 @@ def _text_of(value: object) -> str:
 class Classify(Expr):
     '''判一次意图、把**标签字符串**当结果返回的表达式，给 Switch / If 用：
 
-        Set("sentiment", Classify(Var("reply"), "积极的", "消极的", "其他"))
+        Set("sentiment", Classify(Var("reply"), ["积极的", "消极的", "其他"]))
         Switch(Var("sentiment"))
             .Case("积极的").Then(...)
             .Default(...)
@@ -824,8 +824,8 @@ class Classify(Expr):
     .UnknownRaise() / .Budget() / .NoCache()`，都返回新对象。
     '''
 
-    def __init__(self, source: object, *labels: object):
-        self._intent = Intent(source, *labels)
+    def __init__(self, source: object, labels: Iterable[object]):
+        self._intent = Intent(source, labels)
 
     # ---------------- 链式配置（委托给内部的 Intent） ----------------
     def _wrap(self, intent: SemanticCondition) -> "Classify":
@@ -917,8 +917,103 @@ class Sem:
     def __xor__(self, other: object) -> Similar:
         return Similar(self.value, other, "contradicts")
 
+    def In(self, labels: Iterable[object]) -> "InRange":  # noqa: N802
+        '''语义范围判断：`Sem(Var("reply")).In(["退款", "换货"])`。
+
+        闭集里可以写字符串，也可以写 `Label("退款", "定义", "例子")`。
+        框架自动补一个「其他」兜底标签，调用方不用手写。
+
+        返回的是 `InRange` 条件，`.Using() / .AtLeast() / .Rule() /
+        .UnknownRaise()` 等链式方法照常用：
+
+            If(Sem(Var("reply")).In(["退款", "换货"]).Using(judge)).Then(...)
+        '''
+        return InRange(self.value, labels)
+
     def __repr__(self) -> str:
         return f"Sem({self.value!r})"
+
+
+# ---------------- 语义范围判断 ----------------
+
+
+class InRange(SemanticCondition):
+    '''判断一段文本的语义是否落在给定闭集里（返回 bool）。
+
+    和 `Intent` 的区别：Intent 还可以 `.Rule()` 绑定确定性规则做
+    精确路由，InRange 就是一句话：「在不在这个范围里？」。
+
+        If(InRange(Var("reply"), ["退款", "换货"]).Using(judge)).Then(...)
+        # 或用运算符糖：
+        If(Sem(Var("reply")).In(["退款", "换货"]).Using(judge)).Then(...)
+
+    闭集里自动补一个「其他」兜底，不会没退路。
+    '''
+
+    name = "in_range"
+    kind = "intent"
+
+    def __init__(self, source: object, labels: Iterable[object]):
+        # 自动补兜底标签：调用方没写「其他」就塞一个
+        all_labels: list[object] = list(labels)
+        has_fallback = any(is_fallback_label(str(Label.of(item).name)) for item in all_labels)
+        if not has_fallback:
+            all_labels.append("其他")
+        self._intent = Intent(source, all_labels)
+        super().__init__()
+
+    # ---------------- 链式配置（委托给内部 Intent） ----------------
+    def _wrap(self, intent: SemanticCondition) -> "InRange":
+        new = copy.copy(self)
+        new._intent = cast(Intent, intent)
+        return new
+
+    def Using(self, judge: Judge) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.Using(judge))
+
+    def AtLeast(self, threshold: float) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.AtLeast(threshold))
+
+    def Margin(self, margin: float) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.Margin(margin))
+
+    def Rule(self, label: object, condition: ConditionLike) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.Rule(label, condition))
+
+    def UnknownRaise(self) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.UnknownRaise())
+
+    def UnknownToElse(self) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.UnknownToElse())
+
+    def Budget(self, calls: int) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.Budget(calls))
+
+    def NoCache(self) -> "InRange":  # noqa: N802
+        return self._wrap(self._intent.NoCache())
+
+    # ---------------- SemanticCondition 接口 ----------------
+    def _request(self, context: Context) -> Optional[JudgeRequest]:
+        return self._intent._request(context)
+
+    def _rule_verdict(self, context: Context) -> Optional[Verdict]:
+        return self._intent._rule_verdict(context)
+
+    def _check_label(self, verdict: Verdict) -> None:
+        self._intent._check_label(verdict)
+
+    def evaluate(self, context: Context) -> bool:
+        '''命中非兜底标签返回 True，兜底或 unknown 返回 False。'''
+        verdict = self._intent._resolve(context)
+        if verdict.value is None:
+            if self._intent.unknown == UNKNOWN_RAISE:
+                raise UnknownVerdict(self._intent._unknown_message(verdict))
+            return False
+        return verdict.value  # Intent 已经算好了：兜底标签 -> False
+
+    def __repr__(self) -> str:
+        names = "|".join(self._intent.label_names())
+        return f"InRange({self._intent.source!r}, {names})"
 
 
 __all__ = [
@@ -926,6 +1021,7 @@ __all__ = [
     "Intent",
     "Similar",
     "Classify",
+    "InRange",
     "Sem",
     "SemanticCondition",
     # 判定

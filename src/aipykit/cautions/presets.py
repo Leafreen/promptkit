@@ -1,4 +1,4 @@
-﻿﻿'''预置约束组：常用的一整套约束，拿名字就能用。
+'''预置约束组：常用的一整套约束，拿名字就能用。
 
     from aipykit.cautions import JSON_STRICT, GROUNDED, tutor
 

@@ -1,4 +1,4 @@
-﻿﻿# memory/folder_store.py
+# memory/folder_store.py
 '''一个文件夹 = 一份向量记忆（零依赖的持久化 `VectorStore`）。
 
 目录长这样：

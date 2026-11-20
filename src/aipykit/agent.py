@@ -1,4 +1,4 @@
-﻿﻿'''Agent：模型对话客户端。
+﻿'''Agent：模型对话客户端。
 
 配置（密钥从哪来、用哪个模型）都在 aipykit/config.py 和
 aipykit/client_sys/registry.py；Agent 只负责「怎么干活」：发请求、跑工具循环、
@@ -39,7 +39,9 @@ from aipykit.types import AgentLike, Message
 from aipykit.client_sys import (
     BaseClient,
     ClientError,  # 再导出：ask() 抛的网络 / 鉴权错误就是它
+    expand_reasoning,
     make_client,
+    reasoning_params,
     resolve_api_key as resolve_vendor_api_key,
     resolve_target,
     with_params,
@@ -402,6 +404,7 @@ class Agent(AgentLike):
         params: Optional[Dict[str, JSONValue]] = None,
         timeout: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        reasoning: Optional[str] = None,
     ):
         # 厂商 / 模型 / 端点是一组，缺的用厂商默认值补（补不上会在这一步报错）
         self.spec, self.model, self.base_url = resolve_target(
@@ -411,6 +414,11 @@ class Agent(AgentLike):
         self.api_key = resolve_vendor_api_key(self.spec, api_key)
 
         # 厂商默认参数（DeepSeek 的思考模式就住这儿）+ 用户参数。用户优先。
+        # `reasoning=` 是统一写法（low / medium / high / off），
+        # 具体叫什么参数由 client_sys/reasoning.py 按厂商翻译。
+        if reasoning is not None:
+            params = {**(params or {}), "reasoning": reasoning}
+            reasoning_params(self.spec, reasoning)  # 等级写错了现在就报
         self.params: Dict[str, JSONValue] = with_params(self.spec, params)
         if max_tokens is not None:
             self.params["max_tokens"] = max_tokens
@@ -475,6 +483,31 @@ class Agent(AgentLike):
         '''
         return self.client.supports(modality)
 
+    @property
+    def reasoning_level(self) -> Optional[str]:
+        '''当前生效的推理等级（low / medium / high / off …），用于展示。
+
+        读的是统一的 `reasoning=`（或旧写法 `reasoning_effort`），所以包含
+        厂商默认值（例如 DeepSeek 的 high）。如果用户直接把原生参数
+        （`thinking` / `extra_body`）塞进 params，等级无法反推，返回 None。
+        '''
+        level = self.params.get("reasoning")
+        if level is None:
+            level = self.params.get("reasoning_effort")
+        return str(level).strip().lower() if level else None
+
+    @property
+    def reasoning_is_max(self) -> bool:
+        '''当前等级是不是厂商声明的最高档（TUI 用它决定要不要放特效）。
+
+        `ReasoningSpec.levels` 约定按从低到高声明，最后一个就是最高档。
+        '''
+        level = self.reasoning_level
+        config = self.spec.reasoning
+        if not level or config is None or not config.levels:
+            return False
+        return level == list(config.levels)[-1].strip().lower()
+
     def on(self, handler: EventHandler) -> EventHandler:
         '''挂一个事件 handler，返回它（可以当装饰器）。'''
         return self.bus.on(handler)
@@ -530,13 +563,16 @@ class Agent(AgentLike):
         '''发一次请求。只有传了工具才带 tools 参数。
 
         `self.params` 是厂商默认参数（DeepSeek 的思考模式）和用户参数的合并结果；
+        发请求前再按厂商把统一的 `reasoning` 等级翻成各家自己的参数名
+        （Anthropic 的 thinking.budget_tokens / 豆包的 thinking 开关……）。
         Anthropic 那种不认这些参数的厂商，由客户端自己忽略 / 翻译，
         Agent 不需要知道。
         '''
         # 显式的 model / messages / stream / tools 优先于 params 里的同名项
+        extra = expand_reasoning(self.spec, self.params)
         extra = {
             key: value
-            for key, value in self.params.items()
+            for key, value in extra.items()
             if key not in ("model", "messages", "stream", "tools")
         }
         # `chat.completions` 只是兼容外壳，等价于 client.create(...)

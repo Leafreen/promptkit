@@ -33,6 +33,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from aipykit import config as config_module
 from aipykit.client_sys.client import BaseClient, ClientError, ClientSpec
+from aipykit.client_sys.reasoning import ReasoningSpec
 
 __all__ = [
     "PROVIDERS",
@@ -85,6 +86,59 @@ _HOST_HINTS: Tuple[Tuple[str, str], ...] = (
 )
 
 
+#: 各家厂商对「推理等级」的叫法/形状都不一样，统一在这里声明。
+#: 调用方只写 `Agent(reasoning="low")`，翻译逻辑见 reasoning.py。
+_DEEPSEEK_REASONING = ReasoningSpec(
+    levels={
+        level: {
+            "reasoning_effort": level,
+            "extra_body": {"thinking": {"type": "enabled"}},
+        }
+        for level in ("low", "medium", "high")
+    },
+    off={"extra_body": {"thinking": {"type": "disabled"}}},
+    note="DeepSeek 同时用 reasoning_effort 和 thinking 开关",
+)
+
+_OPENAI_REASONING = ReasoningSpec(
+    levels={
+        level: {"reasoning_effort": level}
+        for level in ("minimal", "low", "medium", "high")
+    },
+    # OpenAI 不发这个参数就是模型默认档；o 系列没有真正的「关闭」
+    off={},
+    note="OpenAI 的 o 系列 / GPT-5 用 reasoning_effort，minimal 是最低档",
+)
+
+_ANTHROPIC_REASONING = ReasoningSpec(
+    levels={
+        "low": {"thinking": {"type": "enabled", "budget_tokens": 1024}},
+        "medium": {"thinking": {"type": "enabled", "budget_tokens": 2048}},
+        "high": {"thinking": {"type": "enabled", "budget_tokens": 3072}},
+    },
+    off={"thinking": {"type": "disabled"}},
+    note="Claude 用 thinking.budget_tokens，且预算必须小于 max_tokens",
+)
+
+_DOUBAO_REASONING = ReasoningSpec(
+    levels={
+        level: {"extra_body": {"thinking": {"type": "enabled"}}}
+        for level in ("low", "medium", "high")
+    },
+    off={"extra_body": {"thinking": {"type": "disabled"}}},
+    note="Ark 只区分思考开关，具体想多深由模型决定",
+)
+
+_COMPATIBLE_REASONING = ReasoningSpec(
+    levels={
+        level: {"reasoning_effort": level}
+        for level in ("minimal", "low", "medium", "high")
+    },
+    off={},
+    note="按 reasoning_effort 发；网关不认时用 params= 传它自己的参数名",
+)
+
+
 DEEPSEEK = ClientSpec(
     name="deepseek",
     label="DeepSeek",
@@ -98,6 +152,7 @@ DEEPSEEK = ClientSpec(
         "reasoning_effort": config_module.DEFAULT_REASONING_EFFORT,
         "extra_body": dict(config_module.DEFAULT_EXTRA_BODY),
     },
+    reasoning=_DEEPSEEK_REASONING,
     aliases=("ds",),
 )
 
@@ -108,6 +163,7 @@ OPENAI = ClientSpec(
     env_vars=("OPENAI_API_KEY",),
     default_model="gpt-4o-mini",
     default_base_url="https://api.openai.com/v1",
+    reasoning=_OPENAI_REASONING,
     aliases=("gpt",),
 )
 
@@ -120,6 +176,7 @@ ANTHROPIC = ClientSpec(
     default_base_url="https://api.anthropic.com",
     # Messages API 硬性要求 max_tokens
     default_params={"max_tokens": 4096},
+    reasoning=_ANTHROPIC_REASONING,
     aliases=("claude",),
 )
 
@@ -131,6 +188,7 @@ DOUBAO = ClientSpec(
     env_vars=(config_module.DOUBAO_API_KEY_ENV, "ARK_API_KEY"),
     default_model=config_module.DOUBAO_TEXT_MODEL,
     default_base_url=config_module.DOUBAO_BASE_URL,
+    reasoning=_DOUBAO_REASONING,
     aliases=("ark", "volcengine", "seedance"),
     note="文本 / 图片理解 + 视频输入与生成（Seedance）",
 )
@@ -143,6 +201,7 @@ OPENAI_COMPATIBLE = ClientSpec(
     env_vars=("OPENAI_API_KEY",),
     default_model=None,
     default_base_url=None,
+    reasoning=_COMPATIBLE_REASONING,
     aliases=("openai_compatible", "compatible", "custom", "generic"),
     note="需要显式传 base_url 和 model",
 )

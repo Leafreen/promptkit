@@ -1,4 +1,4 @@
-﻿﻿# core/steps/actions/coding.py
+# core/steps/actions/coding.py
 '''`CodingStep`：让模型产出**可执行的代码变更**，而不是给人看的文本。
 
 它和 `LLMStep` 的分工：

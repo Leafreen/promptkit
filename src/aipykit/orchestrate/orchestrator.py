@@ -1,4 +1,4 @@
-﻿﻿# orchestrate/orchestrator.py
+# orchestrate/orchestrator.py
 '''`Orchestrator`：按依赖顺序跑任务、汇总结果、处理失败、守住预算。
 
 它**只执行**：任务从哪来（模板 / LLM 规划）不归它管，怎么规划在

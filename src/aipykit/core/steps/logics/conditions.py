@@ -1,4 +1,4 @@
-﻿﻿# core/steps/logics/conditions.py
+# core/steps/logics/conditions.py
 '''If / While 用的条件。'''
 from __future__ import annotations
 

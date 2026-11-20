@@ -1,4 +1,4 @@
-﻿﻿# skill/spec.py
+# skill/spec.py
 '''`SkillSpec`（描述）和 `Skill`（可调用对象），以及 `@skill` 装饰器。
 
 一个 Skill 就是「一个能说清楚自己是什么、怎么调、返回什么」的函数：

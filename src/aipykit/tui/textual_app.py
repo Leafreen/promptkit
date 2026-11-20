@@ -1,4 +1,4 @@
-﻿﻿﻿# aipykit/tui/textual_app.py
+# aipykit/tui/textual_app.py
 '''Textual 全屏对话界面：状态栏、对话滚动区、底部输入框。
 
 Textual 在主线程跑 asyncio，原有的同步 ChatLoop 则放进 worker 线程。
@@ -10,8 +10,9 @@ Textual 在主线程跑 asyncio，原有的同步 ChatLoop 则放进 worker 线�
 - `Echo` 的输出流暂时换成空设备，避免把最终回复再打印一遍；回复正文
   已由 `MESSAGE_DELTA` / `MESSAGE_END` 显示在滚动区里。
 
-界面分三块：顶部两行状态栏（模型、上下文占用条、token 用量、快捷键）、
-中间的对话滚动区、底部输入框。离开底部时对话区上方会出现「回到最底部」。
+界面分三块：顶部两行状态栏（模型、运行状态、token 用量、快捷键）、
+中间的对话滚动区、底部输入框；输入框下面一行把思考等级和上下文进度条
+铺满整行（最高档的等级标签带背景高亮）。离开底部时对话区上方会出现「回到最底部」。
 
 思考过程和工具调用默认折叠（鼠标点标题或 Ctrl+R / Ctrl+T 展开），折叠时只
 保留一行标题和耗时，展开后才渲染完整内容；历史面板留在 #chat 里可回看。
@@ -71,9 +72,6 @@ _WELCOME = (
     "• [b]Ctrl+Q[/b] 退出　[b]End[/b] 回到对话最底部\n"
     "• [b]Ctrl+R[/b] 展开/折叠思考　[b]Ctrl+T[/b] 展开/折叠工具调用\n"
 )
-
-#: 状态栏里上下文占用条的长度（字符数）
-_BAR_WIDTH = 12
 
 #: 按模型名估算上下文窗口，只用于状态栏的百分比显示。
 #: 拿不到真实窗口时按 128k 算，宁可显示得保守一点。
@@ -225,6 +223,11 @@ if App is not None:
             border: round $primary;
             padding: 0 1;
             scrollbar-size-vertical: 1;
+        }
+        #footer {
+            height: 1;
+            padding: 0 1;
+            color: $text-muted;
         }
         #jump-bottom {
             height: 1;
@@ -383,6 +386,8 @@ if App is not None:
                 placeholder="输入内容 · Enter 发送 · Shift+Enter 换行 · Ctrl+S 导出",
                 id="input",
             )
+            # 输入框下面一行：思考等级 + 铺满全宽的上下文进度条
+            yield Static("", id="footer")
 
         # ---------------- 装配 / 还原 ----------------
         def on_mount(self) -> None:
@@ -404,6 +409,11 @@ if App is not None:
             self._jump_hint = self.query_one("#jump-bottom", Static)
             self._sync_jump_hint()
             self.run_worker(self._run, thread=True)
+
+        def on_resize(self, event) -> None:
+            '''终端宽度变了，底部进度条要按新宽度重画。'''
+            if self.query("#footer"):
+                self._set_status()
 
         def _run(self) -> None:
             '''worker 线程：跑原来的同步循环，保存异常供主线程重新抛出。'''
@@ -835,7 +845,7 @@ if App is not None:
         def _finish_reply(self, text: str) -> None:
             '''UI 线程：把流式 Static 替换成 Markdown，收尾。'''
             if self._stream_reply is not None:
-                self._stream_reply.remove()
+                self._detach(self._stream_reply)
                 self._stream_reply = None
             if text:
                 self._current_reply = Markdown(
@@ -849,11 +859,14 @@ if App is not None:
 
         # ---- 思考面板 ----
         def _thinking_title(self) -> str:
-            '''✦ 思考 · 5.0s（Ctrl+R 展开）—— 折叠时也看得到耗时。'''
+            '''✦/⚡ 思考 · 5.0s（Ctrl+R 展开）—— 折叠时也看得到耗时。'''
             seconds = self._thinking_seconds
             if self._thinking_started is not None:
                 seconds = time.monotonic() - self._thinking_started
             label = "✦ 思考"
+            if self._is_max_reasoning():
+                # 最高推理等级：思考面板标题也带闪电，和状态栏呼应
+                label = "⚡ 思考"
             if seconds:
                 label += f" · {seconds:.1f}s"
             expanded = (
@@ -1079,13 +1092,26 @@ if App is not None:
             )
             return Content.styled(marked, "bold orange1")
 
+        @staticmethod
+        def _detach(widget: Any) -> None:
+            '''先隐藏，等下一次刷新后再真正移除。
+
+            直接 `remove()` 会让控件立刻失去父节点，但在本轮刷新完成前，
+            Textual 的命中测试仍可能返回它。此时鼠标按下会进入 Screen 的
+            文本选中逻辑，访问 `container.region` 时因 parent 为 None 崩溃
+            （AttributeError: 'NoneType' object has no attribute 'region'）。
+            先 `display = False` 让它退出命中范围，下一帧移除就没有窗口期。
+            '''
+            widget.display = False
+            widget.call_after_refresh(widget.remove)
+
         def _dismiss_welcome(self) -> None:
             '''聊起来之后收掉「使用方法」，把空间还给对话。'''
             if self._welcome_dismissed:
                 return
             self._welcome_dismissed = True
             for widget in self.query("#welcome"):
-                widget.remove()
+                self._detach(widget)
 
         @staticmethod
         def _message_markdown(
@@ -1134,27 +1160,26 @@ if App is not None:
             self.query_one("#status-left", Static).update(left)
             self.query_one("#status-right", Static).update(right)
             self.query_one("#status-detail", Static).update(detail)
+            self.query_one("#footer", Static).update(self._footer_text())
+
+        def _resolve_agent(self) -> Optional[Any]:
+            '''Context 里的 Agent -> 默认 Agent；都拿不到就 None。'''
+            agent = self._workflow_context.get("agent")
+            if agent is not None:
+                return agent
+            try:
+                from aipykit.agent import Agent
+
+                return Agent.default()
+            except Exception:  # noqa: BLE001 - 纯展示，拿不到就算了
+                return None
 
         def _resolve_model(self) -> str:
             '''模型名：Context 里的 Agent -> 默认 Agent -> 配置默认值。'''
             if self._model:
                 return self._model
-            model = None
-            agent = self._workflow_context.get("agent")
-            if agent is not None:
-                model = getattr(agent, "model", None)
-            if not model:
-                try:
-                    from aipykit.agent import Agent
-
-                    default_agent = Agent.default()
-                    model = (
-                        getattr(default_agent, "model", None)
-                        if default_agent is not None
-                        else None
-                    )
-                except Exception:  # noqa: BLE001 - 纯展示，拿不到就用默认值
-                    model = None
+            agent = self._resolve_agent()
+            model = getattr(agent, "model", None) if agent is not None else None
             if not model:
                 from aipykit import config
 
@@ -1164,11 +1189,50 @@ if App is not None:
             self._model = str(model)
             return self._model
 
-        @staticmethod
-        def _bar(ratio: float, width: int = _BAR_WIDTH) -> str:
-            filled = min(max(round(ratio * width), 0), width)
-            empty = width - filled
-            return f"[cyan]{'━' * filled}[/][dim]{'━' * empty}[/]"
+        def _resolve_reasoning(self) -> Optional[str]:
+            '''当前推理等级（low / medium / high / off），没设置就不展示。'''
+            agent = self._resolve_agent()
+            level = (
+                getattr(agent, "reasoning_level", None) if agent is not None else None
+            )
+            return str(level) if level else None
+
+        def _is_max_reasoning(self) -> bool:
+            '''是不是厂商声明的最高等级（决定等级标签要不要背景高亮）。'''
+            agent = self._resolve_agent()
+            return bool(getattr(agent, "reasoning_is_max", False))
+
+        def _footer_text(self) -> str:
+            '''输入框下方一行：思考等级 + 铺满宽度的上下文进度条 + 用量。'''
+            level = self._resolve_reasoning()
+            if level:
+                is_max = self._is_max_reasoning()
+                # 最高档统一叫 MAX，比 HIGH 更容易一眼看出来
+                text = "MAX" if is_max else level.upper()
+                if is_max:
+                    # 最高档：白字 + 亮紫背景，不做任何定时闪烁
+                    label = f"[bold white on bright_magenta] {text} [/]"
+                    label_width = len(text) + 2
+                else:
+                    label = f"[magenta]{text}[/magenta]"
+                    label_width = len(text)
+            else:
+                label_width, label = 2, "[dim]--[/dim]"
+
+            model = self._resolve_model()
+            limit = _context_limit(model)
+            used = self._context_tokens
+            ratio = min(used / limit, 1.0) if limit else 0.0
+            usage = f"{_tokens(used)}/{_tokens(limit)} {ratio * 100:.1f}%"
+
+            # 终端宽度 - 左右 padding；再给标签、用量和两个空格让位
+            width = max(self.size.width - 2, 20)
+            bar_width = max(width - label_width - len(usage) - 2, 5)
+            filled = min(max(round(ratio * bar_width), 0), bar_width)
+            # 进度条按占用率变色：正常青色 -> 偏高黄色 -> 接近满红色
+            color = "cyan" if ratio < 0.6 else ("yellow" if ratio < 0.85 else "red")
+            bar = f"[{color}]{'=' * filled}[/][dim]{'-' * (bar_width - filled)}[/]"
+            return f"{label} {bar} [bold]{usage}[/]"
 
         def _state_text(self) -> str:
             if self._exit_requested:
@@ -1188,24 +1252,19 @@ if App is not None:
             return "等待模型"
 
         def _status_parts(self) -> tuple[str, str, str]:
-            '''两行状态栏：模型 / 进度条 / 上下文占用 / 快捷键。'''
+            '''顶部两行：模型 / 运行状态 + token 用量、快捷键。'''
             model = self._resolve_model()
-            limit = _context_limit(model)
-            used = self._context_tokens
-            ratio = min(used / limit, 1.0) if limit else 0.0
-            percent = ratio * 100
-            left = f"{self._bar(ratio)} [b]{model}[/b] · {self._state_text()}"
-            right = f"{_tokens(used)}/{_tokens(limit)} {percent:.1f}%"
-            detail = f"ctx {percent:.1f}% ({_tokens(used)}/{_tokens(limit)})"
+            left = f"[b]{model}[/b] · {self._state_text()}"
+            right = ""
             if self._prompt_tokens or self._completion_tokens:
-                detail += (
-                    f" · ↑{_tokens(self._prompt_tokens)}"
+                right = (
+                    f"↑{_tokens(self._prompt_tokens)}"
                     f" ↓{_tokens(self._completion_tokens)}"
                 )
             if self._waiting:
-                detail += " · Enter 发送 · Shift+Enter 换行 · Ctrl+S 导出"
+                detail = "Enter 发送 · Shift+Enter 换行 · Ctrl+S 导出"
             else:
-                detail += " · Ctrl+C 复制 · Ctrl+S 导出 · Ctrl+Q 退出"
+                detail = "Ctrl+C 复制 · Ctrl+S 导出 · Ctrl+Q 退出"
             return left, right, detail
 
 else:  # 让 `import aipykit.tui.textual_app` 在缺依赖时仍然成功

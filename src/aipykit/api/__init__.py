@@ -1,4 +1,4 @@
-﻿﻿# aipykit/api/__init__.py
+# aipykit/api/__init__.py
 '''轻量扩展 API：Hook 生命周期 + DSL 断言。
 
 一句话接入现有 DSL（不需要适配层）：

@@ -1,4 +1,4 @@
-﻿﻿# core/steps/function.py
+# core/steps/function.py
 '''步骤工厂：Function('$a', '$b').Do(...)、Return(...)，以及最基础的 FunctionStep。'''
 from __future__ import annotations
 

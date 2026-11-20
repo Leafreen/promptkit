@@ -1,4 +1,4 @@
-﻿﻿'''工具（function calling）。
+'''工具（function calling）。
 
 最简单的用法就是直接传 Python 函数，签名和 docstring 会自动变成 JSON Schema：
 

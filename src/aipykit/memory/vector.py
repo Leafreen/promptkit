@@ -1,4 +1,4 @@
-﻿﻿# memory/vector.py
+# memory/vector.py
 '''向量记忆：切分 → 向量化 → 存储 → 召回 → 重排。
 
 `VectorMemory` 自己不碰任何数据库、不碰任何模型，它只做**编排**：
